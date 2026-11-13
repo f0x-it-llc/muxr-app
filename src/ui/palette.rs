@@ -23,9 +23,8 @@ pub struct Palette {
     pub amber: Color,
     pub amber_dim: Color,
     pub amber_faint: Color,
-    /// [`Self::amber_faint`] already composited over [`Self::surface`]: an
-    /// opaque wash for a fill that must hide whatever is painted beneath it
-    /// (the selected session card sits on its accent-filled box).
+    /// [`Self::amber_faint`] composited over [`Self::surface`]: an opaque wash for a fill that
+    /// must hide what is painted beneath it.
     pub amber_wash: Color,
     pub amber_border: Color,
     pub fg: Color,
@@ -41,8 +40,6 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// Resolve every field above from the theme's scheme, falling back to
-    /// scheme roles when no [`StatusPalette`] extension is attached.
     pub fn from_theme(theme: &Theme) -> Palette {
         let scheme = theme.scheme();
         let status = theme.extension::<StatusPalette>();
@@ -84,8 +81,7 @@ pub fn inked(style: &TextStyle, color: Color) -> TextStyle {
     style
 }
 
-/// `tint` at `alpha` composited over the opaque `base` — the colour the GPU
-/// would show for the translucent wash, folded into one opaque fill.
+/// `tint` at `alpha` composited over the opaque `base`, as one opaque fill.
 pub(crate) fn washed(base: Color, tint: Color, alpha: f32) -> Color {
     let (b, t) = (base.components, tint.components);
     let mix = |i: usize| b[i] * (1.0 - alpha) + t[i] * alpha;
@@ -127,11 +123,7 @@ mod tests {
         assert_eq!(palette.amber, theme.scheme().primary);
     }
 
-    /// Guards this module's `amber` unification: `primary ==
-    /// primary_container` under `frust_glyph::baseline()`'s dark scheme. A
-    /// future `frust-theme` change splitting that pair apart under Dark
-    /// fails loudly here, not only as a pixel diff in a device gate. (Hex
-    /// pinned by `canonical_field_values_match_the_glyph_dark_source`, below.)
+    /// `amber` unification relies on `primary == primary_container` in the baseline dark scheme.
     #[test]
     fn glyph_baseline_dark_scheme_keeps_primary_and_primary_container_equal() {
         let theme = frust_glyph::baseline();
@@ -140,11 +132,7 @@ mod tests {
         assert_eq!(scheme.primary, scheme.primary_container);
     }
 
-    /// Hand-verified against `frust_glyph::baseline()`: the derivations above
-    /// prove the *shape* of each field's source, not that the source still
-    /// matches what `docs/glyph-design-system.html` specifies. Pinned to the
-    /// literal hex the design system's dark `:root` block carries
-    /// (`crates/frust-theme`'s `glyph_dark`/`StatusPalette::glyph`).
+    /// Literal hex from the design system's dark `:root` block.
     #[test]
     fn canonical_field_values_match_the_glyph_dark_source() {
         let theme = frust_glyph::baseline();

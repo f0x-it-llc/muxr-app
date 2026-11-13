@@ -41,8 +41,7 @@ pub fn confirm_dialog<State: 'static>(
                 )
         },
         move |state: &mut State, result: PopResult| {
-            // Only the confirm action pops with a payload; every dismissal
-            // route pops empty.
+            // Only the confirm action pops with a payload; every dismissal pops empty.
             if result.take::<bool>().unwrap_or(false) {
                 on_confirm(state);
             }
@@ -50,9 +49,6 @@ pub fn confirm_dialog<State: 'static>(
     );
 }
 
-/// Prompt for a single line of text (session create/rename): a Glyph modal
-/// with `title`, a [`text_input`] seeded with `initial`, a ghost **Cancel**
-/// and a submit button.
 pub fn name_input_dialog<State: 'static>(
     nav: &NavigatorController<State>,
     title: impl Into<String>,
@@ -65,8 +61,7 @@ pub fn name_input_dialog<State: 'static>(
     show_glyph_dialog(
         nav,
         move || {
-            // Tracked read: a keystroke's `value.set` is what rebuilds this
-            // page with the new text (and re-evaluates `can_submit`).
+            // Tracked read: a keystroke's `value.set` rebuilds this page.
             let current = value.get();
             let can_submit = submittable(&current);
             let enter_nav = page_nav.clone();
@@ -78,9 +73,6 @@ pub fn name_input_dialog<State: 'static>(
             .on_submit(move |_state: &mut State, typed: String| submit(&enter_nav, &typed));
             glyph_dialog()
                 .title(title.clone())
-                // The content slot's loose-width constraints fill the panel
-                // width intrinsically (`TextInput::layout` reaches for
-                // `bc.max().width` when finite) — no stretch wrapper needed.
                 .content(field)
                 .action(
                     button(CANCEL_LABEL, move |_state: &mut State| cancel_nav.pop())
@@ -89,8 +81,7 @@ pub fn name_input_dialog<State: 'static>(
                 )
                 .action(
                     button(SUBMIT_LABEL, move |_state: &mut State| {
-                        // "Disabled" here is two halves: the style below is the
-                        // visual one, this guard is the behavioral one.
+                        // The style is disabled's visual half; this guard is the behavioural one.
                         if can_submit {
                             submit(&submit_nav, &current);
                         }
@@ -111,14 +102,11 @@ pub fn name_input_dialog<State: 'static>(
     );
 }
 
-/// Whether `text` is a usable name (non-blank once trimmed).
 fn submittable(text: &str) -> bool {
     !text.trim().is_empty()
 }
 
-/// Pop the dialog page carrying the trimmed name, or do nothing when there is
-/// nothing to submit — the one gate both the Enter key and the submit button
-/// route through.
+/// The one gate both the Enter key and the submit button route through.
 fn submit<State: 'static>(nav: &NavigatorController<State>, typed: &str) {
     let name = typed.trim();
     if name.is_empty() {
@@ -142,8 +130,7 @@ mod tests {
 
     #[test]
     fn the_disabled_submit_style_is_lower_emphasis_than_the_enabled_one() {
-        // A tripwire on the pair, not on either constant: the "disabled" look
-        // only reads as disabled while it differs from the enabled one.
+        // The disabled look only reads as disabled while it differs from the enabled one.
         assert_ne!(SUBMIT_ENABLED_STYLE, SUBMIT_DISABLED_STYLE);
     }
 }

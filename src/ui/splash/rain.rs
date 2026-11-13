@@ -1,36 +1,6 @@
-//! The amber matrix rain: full-surface columns of falling glyphs that start
-//! mid-fall at full density, then drain away column by column.
-//!
-//! Three beats on the **rain-local** clock, which its orchestrator starts (`loading`
-//! from the band's own hold/release schedule; a standalone mount from its first paint):
-//!
-//! | Beat | Window | Behavior |
-//! |---|---|---|
-//! | [`RainPhase::Dense`] | `0..`[`spec::DENSE_END_MS`] | every column respawns forever |
-//! | [`RainPhase::Thinning`] | `..`[`spec::THIN_END_MS`] | respawn probability ramps 1 → 0 |
-//! | [`RainPhase::Settled`] | after that | nothing respawns; the last columns fall off and the widget goes quiet ([`rain_finished`]) |
-//!
-//! Thinning is per column: a column whose head leaves the surface rolls once
-//! against the current density and either respawns or retires for good, so
-//! the rain visibly drains instead of switching off.
-//!
-//! No previous-frame fade: the HTML source fakes long trails by never
-//! clearing its canvas, but `frust` paints an immediate display list rebuilt
-//! from scratch every frame, so there's no retained framebuffer to fade
-//! (and a translucent rect here would dim the app content beneath). This
-//! widget instead repaints the visible trail window every frame — the head
-//! plus [`spec::RAIN_TRAIL`] glyphs above it, with the same alpha falloff —
-//! with the only visible difference being a slightly crisper tail.
-//!
-//! Everything random comes from the widget's seeded [`SplashRng`], so a
-//! given seed replays exactly. The rain self-clocks from its first paint by
-//! default (mounting it is the cue); [`RainView::clock`] and the live
-//! [`RainView::clock_cell`] override that. Fall speed is scaled by the
-//! real frame delta ([`super::frame_factor`]) so the rain falls at the same
-//! speed on a 120Hz device as on a 60Hz one.
-//!
-//! Under `MotionScheme::reduce_motion` the rain never starts: nothing
-//! painted, no frames requested, no clock advanced.
+//! The amber matrix rain: columns start mid-fall at full density, then drain column by column.
+//! `frust` rebuilds its display list every frame, so there is no framebuffer to fade: each frame
+//! repaints the head plus [`spec::RAIN_TRAIL`] glyphs with the source's alpha falloff.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -48,28 +18,20 @@ use super::{
     reduce_motion, with_alpha,
 };
 
-/// Which beat the rain-local clock is in. See the module docs' table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RainPhase {
-    /// Full density: every column that leaves the surface comes back.
     Dense,
-    /// Draining: respawn probability ramps 1 → 0.
     Thinning,
-    /// Nothing respawns; the survivors fall off and the rain goes quiet.
     Settled,
 }
 
-/// One column's live state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RainColumn {
-    /// The head's vertical position, in rows (may be negative — above the
-    /// surface — right after a respawn).
+    /// In rows; negative above the surface right after a respawn.
     head_row: f64,
-    /// Cleared for good once a head exits and the density roll fails.
     active: bool,
 }
 
-/// How many columns fit across `width` (`Math.floor(W/colW)`).
 pub fn column_count(width: f64) -> usize {
     if width <= 0.0 {
         return 0;
@@ -77,7 +39,6 @@ pub fn column_count(width: f64) -> usize {
     (width / spec::RAIN_COL_W).floor() as usize
 }
 
-/// The beat at `t_ms` on the rain-local clock.
 pub fn rain_phase(t_ms: f64) -> RainPhase {
     if t_ms < spec::DENSE_END_MS {
         RainPhase::Dense
@@ -88,18 +49,11 @@ pub fn rain_phase(t_ms: f64) -> RainPhase {
     }
 }
 
-/// Whether the rain has stopped painting entirely.
-///
-/// The source keeps drawing for [`spec::RAIN_TAIL_MS`] past
-/// [`spec::THIN_END_MS`] (`if(t < THIN_END + 400)`) so the last few columns
-/// can fall off screen at zero density, then stops for good.
+/// The source keeps drawing [`spec::RAIN_TAIL_MS`] past thinning so the last columns fall off.
 pub fn rain_finished(t_ms: f64) -> bool {
     t_ms >= spec::THIN_END_MS + spec::RAIN_TAIL_MS
 }
 
-/// The global respawn probability at `t_ms`: 1 through the dense beat, then a
-/// linear ramp to 0 across the thinning window
-/// (`Math.max(0, 1 - (t-DENSE_END)/(THIN_END-DENSE_END))`).
 pub fn global_density(t_ms: f64) -> f64 {
     if t_ms <= spec::DENSE_END_MS {
         return 1.0;
@@ -108,9 +62,7 @@ pub fn global_density(t_ms: f64) -> f64 {
     (1.0 - (t_ms - spec::DENSE_END_MS) / span).max(0.0)
 }
 
-/// The overall ink fade at `t_ms`: full through the dense beat, then the
-/// density with a floor so the last columns stay faintly visible rather than
-/// vanishing mid-fall (`Math.max(0.15, globalDensity)`).
+/// Floored so the last columns stay faintly visible rather than vanishing mid-fall.
 pub fn overall_fade(t_ms: f64) -> f64 {
     if t_ms < spec::DENSE_END_MS {
         1.0
@@ -119,11 +71,7 @@ pub fn overall_fade(t_ms: f64) -> f64 {
     }
 }
 
-/// Alpha for the glyph `index` rows above a column's head (`0` *is* the
-/// head), at overall `fade`.
-///
-/// The head keeps its own near-opaque alpha; each trail glyph falls off
-/// linearly as `(1 - index/trail) * 0.75`, both scaled by `fade`.
+/// `index` counts rows above the head; `0` is the head.
 pub fn trail_alpha(index: usize, fade: f64) -> f64 {
     if index == 0 {
         return spec::RAIN_HEAD_ALPHA * fade;
@@ -132,26 +80,17 @@ pub fn trail_alpha(index: usize, fade: f64) -> f64 {
     falloff * spec::RAIN_TRAIL_ALPHA * fade
 }
 
-/// Whether a head at `head_row` has fallen far enough below a `height`-tall
-/// surface to be recycled (`py > H + fontSize*6`).
 pub fn head_exited(head_row: f64, height: f64) -> bool {
     head_row * spec::RAIN_ROW_H > height + spec::RAIN_ROW_H * spec::RAIN_EXIT_MARGIN_ROWS
 }
 
-/// What happens to a column whose head just exited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColumnFate {
-    /// Comes back at the top (the source's `drops[c] = rand(-6,-1)`).
     Respawn,
-    /// Goes dark for the rest of the sequence.
     Retire,
 }
 
-/// Decide an exited column's fate from a `[0,1)` `roll` against `density`
-/// (`if(Math.random() < globalDensity)`).
-///
-/// At density 1 every roll respawns; at density 0 every roll retires; in
-/// between the per-column roll is what staggers the drain.
+/// `roll` is in `[0, 1)`; the per-column roll is what staggers the drain.
 pub fn column_fate(roll: f64, density: f64) -> ColumnFate {
     if roll < density {
         ColumnFate::Respawn
@@ -160,7 +99,6 @@ pub fn column_fate(roll: f64, density: f64) -> ColumnFate {
     }
 }
 
-/// The full-surface matrix rain. `seed` fixes every random choice.
 pub fn rain<State: 'static>(seed: u64) -> RainView<State> {
     RainView {
         seed,
@@ -170,40 +108,28 @@ pub fn rain<State: 'static>(seed: u64) -> RainView<State> {
     }
 }
 
-/// The declarative half of the rain. See [`rain`].
 pub struct RainView<State: 'static> {
     seed: u64,
     clock_ms: Option<f64>,
     clock_cell: Option<Rc<Cell<f64>>>,
-    /// `View<State>` is generic over the app state even though a decorative
-    /// leaf never touches it.
     state: std::marker::PhantomData<fn() -> State>,
 }
 
 impl<State: 'static> RainView<State> {
-    /// Drive the rain-local clock externally (milliseconds since the rain was
-    /// cued) instead of letting the widget self-clock from its first paint.
-    ///
-    /// Tests and standalone mounts pin a fixed clock with this; an orchestrator
-    /// whose clock comes from its own paint needs [`clock_cell`](Self::clock_cell).
+    /// A fixed rain-local clock in ms; without one the rain self-clocks from its first paint.
     pub fn clock(mut self, elapsed_ms: f64) -> Self {
         self.clock_ms = Some(elapsed_ms);
         self
     }
 
-    /// Drive the rain-local clock from a cell the orchestrator writes each
-    /// frame, read at paint. Outranks [`clock`](Self::clock) and the
-    /// self-clock: `clock` only carries a value known at *build* time, so a
-    /// clock derived from the orchestrator's own paint needs this instead.
+    /// A clock the orchestrator writes each frame, read at paint; outranks [`clock`](Self::clock).
     pub fn clock_cell(mut self, cell: Rc<Cell<f64>>) -> Self {
         self.clock_cell = Some(cell);
         self
     }
 }
 
-/// Whether two optional clock cells are the *same* cell — identity, not
-/// value: a rebuild that hands over a different cell holding an equal
-/// reading has still moved the rain onto a new writer.
+/// Identity, not value: a different cell holding an equal reading is still a new writer.
 fn same_clock_cell(left: Option<&Rc<Cell<f64>>>, right: Option<&Rc<Cell<f64>>>) -> bool {
     match (left, right) {
         (None, None) => true,
@@ -212,33 +138,21 @@ fn same_clock_cell(left: Option<&Rc<Cell<f64>>>, right: Option<&Rc<Cell<f64>>>) 
     }
 }
 
-/// The retained half of the rain. See [`rain`].
 pub struct RainWidget {
-    /// The seeded generator behind every column start, fall speed, glyph pick
-    /// and respawn roll.
     rng: SplashRng,
-    /// Live column state, rebuilt whenever the surface size changes.
     columns: Vec<RainColumn>,
-    /// The surface the columns were laid out for.
     size: Size,
-    /// One shaped glyph per distinct pool entry, plus the style they were
-    /// shaped at so a theme swap re-shapes them.
+    /// One per distinct pool entry; `style` is kept so a theme swap re-shapes them.
     glyphs: Vec<ShapedGlyph>,
     style: Option<TextStyle>,
-    /// The rain-local clock.
     elapsed_ms: f64,
-    /// An orchestrator-supplied clock, when there is one.
     clock_ms: Option<f64>,
-    /// A live orchestrator-supplied clock, read at paint. Outranks both.
     clock_cell: Option<Rc<Cell<f64>>>,
-    /// The previous frame's clock, for differencing.
     last_frame: Option<FrameTime>,
 }
 
 impl RainWidget {
-    /// (Re)seed every column mid-fall — the source's `initCols`, whose whole
-    /// point is that the rain is already running when it first appears rather
-    /// than booting up from an empty screen.
+    /// Seeds every column mid-fall, so the rain is already running when it first appears.
     fn reset_columns(&mut self) {
         let count = column_count(self.size.width);
         let rows = if spec::RAIN_ROW_H > 0.0 {
@@ -281,8 +195,6 @@ impl<State: 'static> View<State> for RainView<State> {
         element.clock_ms = self.clock_ms;
         let same_cell = same_clock_cell(prev.clock_cell.as_ref(), self.clock_cell.as_ref());
         element.clock_cell = self.clock_cell.clone();
-        // A genuinely new seed restarts the rain; the ordinary rebuild
-        // re-passes the same one and changes nothing.
         if prev.seed != self.seed {
             element.rng = SplashRng::new(self.seed);
             element.reset_columns();
@@ -299,9 +211,7 @@ impl Widget for RainWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let size = fill_size(bc, Size::new(spec::RAIN_COL_W, spec::RAIN_ROW_H));
         if size != self.size {
-            // A resize (rotation, split-screen) re-seeds the field: the column
-            // count is width-derived, so keeping the old vector would leave a
-            // stale strip either uncovered or off-surface.
+            // The column count is width-derived, so a resize re-seeds the field.
             self.size = size;
             self.reset_columns();
         }
@@ -364,7 +274,7 @@ impl Widget for RainWidget {
                 if y < -spec::RAIN_ROW_H || y > height {
                     continue;
                 }
-                // A fresh glyph per cell per frame — the source's flicker.
+                // A fresh glyph per cell per frame: the source's flicker.
                 let glyph = spec::pool_to_distinct(self.rng.below(spec::POOL_LEN));
                 let color = if trail == 0 {
                     with_alpha(spec::RAIN_HEAD_COLOR, trail_alpha(trail, fade))
@@ -382,9 +292,7 @@ impl Widget for RainWidget {
             self.columns[index].head_row += step * factor;
         }
 
-        // Once every column has drained there is nothing left to animate, even
-        // if the tail window hasn't elapsed — stop asking for frames rather
-        // than spinning the shell on an empty surface.
+        // Stop requesting frames once every column has drained, even inside the tail window.
         if self.columns.iter().any(|column| column.active) {
             ctx.request_frame();
         }
@@ -394,8 +302,6 @@ impl Widget for RainWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- geometry --------------------------------------------------------
 
     #[test]
     fn columns_tile_the_width_and_degrade_on_a_degenerate_surface() {
@@ -420,8 +326,6 @@ mod tests {
             height
         ));
     }
-
-    // ---- phases / density ------------------------------------------------
 
     #[test]
     fn the_phases_follow_the_rain_local_clock() {
@@ -461,16 +365,11 @@ mod tests {
         );
     }
 
-    // ---- trail alpha -----------------------------------------------------
-
     #[test]
     fn the_head_is_brightest_and_the_trail_falls_off_linearly() {
         assert!((trail_alpha(0, 1.0) - spec::RAIN_HEAD_ALPHA).abs() < 1e-9);
-        // (1 - 1/7) * 0.75
         assert!((trail_alpha(1, 1.0) - (6.0 / 7.0) * 0.75).abs() < 1e-9);
-        // (1 - 6/7) * 0.75 — the dimmest drawn glyph.
         assert!((trail_alpha(6, 1.0) - (1.0 / 7.0) * 0.75).abs() < 1e-9);
-        // Past the trail length the falloff clamps at zero, never negative.
         assert_eq!(trail_alpha(spec::RAIN_TRAIL, 1.0), 0.0);
         assert_eq!(trail_alpha(spec::RAIN_TRAIL + 3, 1.0), 0.0);
     }
@@ -494,8 +393,6 @@ mod tests {
             assert!((faded - full * 0.4).abs() < 1e-9, "at index {index}");
         }
     }
-
-    // ---- respawn ---------------------------------------------------------
 
     #[test]
     fn at_full_density_every_column_respawns() {
@@ -521,8 +418,6 @@ mod tests {
 
     #[test]
     fn a_half_density_field_drains_to_roughly_half_its_columns() {
-        // The statistical shape of the drain (not an exact count): with a
-        // seeded RNG, ~half of a wide field survives one round at 0.5.
         let mut rng = SplashRng::new(2026);
         let survivors = (0..1_000)
             .filter(|_| column_fate(rng.unit(), 0.5) == ColumnFate::Respawn)
@@ -532,8 +427,6 @@ mod tests {
             "expected ~500 survivors, got {survivors}"
         );
     }
-
-    // ---- column seeding --------------------------------------------------
 
     #[test]
     fn columns_start_mid_fall_and_span_the_surface() {
@@ -560,7 +453,6 @@ mod tests {
                 column.head_row
             );
         }
-        // Staggered, not all at the same row (the "already running" look).
         let first = widget.columns[0].head_row;
         assert!(
             widget
@@ -602,14 +494,12 @@ mod tests {
         let mut widget = View::<()>::build(&first, &mut ctx);
         assert!(widget.clock_cell.is_some(), "the cell reaches the widget");
 
-        // The ordinary rebuild re-passes the same cell: nothing to repaint.
         let same = rain::<()>(9).clock_cell(Rc::clone(&cell));
         assert_eq!(
             View::<()>::rebuild(&same, &first, &mut widget, &mut ctx),
             ChangeFlags::NONE
         );
 
-        // A different cell — even holding an equal reading — is a new writer.
         let moved = rain::<()>(9).clock_cell(Rc::new(Cell::new(0.0)));
         assert_eq!(
             View::<()>::rebuild(&moved, &same, &mut widget, &mut ctx),
