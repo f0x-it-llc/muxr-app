@@ -1,20 +1,6 @@
-//! The tree's lower half: the session's AI agents (Penpot page "06 · Agents",
-//! frames "side sheet split" and "tablet docked rail split").
-//!
-//! A hairline, an `AI AGENTS · N` label with the per-status count pills, then
-//! one 52px row per agent — status dot, kind tile, `name · kind` over the
-//! activity line, the status word and the `space › tab › pane` location at the
-//! trailing edge. A tap jumps to the agent's pane.
-//!
-//! **Page-agnostic** like [`super::side_sheet_tree`]: a borrow of the agent
-//! list plus one callback, so it composes identically under the sheet, the
-//! docked rail and a headless test. The vocabulary (tones, glyphs, tiles,
-//! pills, the spoken roll-up) is `crate::ui::agent_marks`' — nothing here
-//! invents a colour or a word.
-//!
-//! **The split** ([`tree_split`]) is the hosts' one layout rule: with no agents
-//! the tree scrolls alone, exactly as before; with any, tree and agents take
-//! half the host's height each and scroll independently.
+//! The tree's lower half: a 52px row per session AI agent; a tap jumps to its pane. Page-agnostic,
+//! vocabulary from `crate::ui::agent_marks`. With no agents [`tree_split`] scrolls the tree
+//! alone; with any, tree and agents take half the height each and scroll independently.
 
 use std::rc::Rc;
 
@@ -34,13 +20,10 @@ use crate::ui::spacing;
 use super::rail::labelled_button;
 use super::util::{centered_row, h_gap, sized, stretch_column, v_gap};
 
-/// The design's row height.
 pub(crate) const ROW_HEIGHT: f64 = 52.0;
-/// The row box's corner radius (one-off: no tree level wears it, so a row is
-/// never mistaken for a pane pill or a tab rect).
+/// No tree level wears this radius, so a row is never mistaken for a pane pill or a tab rect.
 pub(crate) const ROW_RADIUS: f64 = 10.0;
-/// The trailing location band — a fixed strip, like the pane row's cwd band,
-/// since nothing in `frust` caps a width without also tightening it.
+/// Fixed, since nothing in `frust` caps a width without also tightening it.
 const LOCATION_WIDTH: f64 = 92.0;
 
 const HEADER_SIZE: f32 = 9.0;
@@ -49,9 +32,7 @@ const STATUS_SIZE: f32 = 9.5;
 const LINE_SIZE: f32 = 9.5;
 const LOCATION_SIZE: f32 = 8.5;
 
-/// The section label's word, before the count.
 const HEADER_LABEL: &str = "AI AGENTS";
-/// Between the parts of a location (`api › shell › p2`).
 const LOCATION_SEP: &str = " \u{203a} ";
 
 const ROW_PAD: EdgeInsets = EdgeInsets {
@@ -73,21 +54,18 @@ const LIST_PAD: EdgeInsets = EdgeInsets {
     bottom: spacing::SM,
 };
 
-/// An agent row's tap: the agent it jumps to.
 pub(crate) type PressAgent<State> = Rc<dyn Fn(&mut State, &AgentEntry)>;
 
-/// The pane this connection is on, so its agent's row wears the amber border.
+/// The pane this connection is on; its agent's row wears the amber border.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FocusedPane {
-    /// `None` on a backend with no spaces.
     pub space_id: Option<String>,
     pub tab_key: String,
     pub pane_id: u32,
 }
 
 impl FocusedPane {
-    /// Whether `agent` runs in this pane. An agent with no space id lives in
-    /// the one space there is.
+    /// An agent with no space id lives in the one space there is.
     fn hosts(&self, agent: &AgentEntry) -> bool {
         agent.pane_id == self.pane_id
             && agent.tab_key == self.tab_key
@@ -95,13 +73,11 @@ impl FocusedPane {
     }
 }
 
-/// What the section reads — a borrow of the controller's sorted agent list.
 pub(crate) struct AgentsData<'a> {
     pub agents: &'a [AgentEntry],
     pub focused: Option<FocusedPane>,
 }
 
-/// The theme and palette, resolved once per section build.
 pub(crate) struct AgentTones {
     theme: Theme,
     colors: Palette,
@@ -117,7 +93,6 @@ impl AgentTones {
     }
 }
 
-/// The roll-up of `agents` — what the header's pills and the rail's summary count.
 pub(crate) fn agents_summary(agents: &[AgentEntry]) -> AgentSummary {
     AgentSummary::from_statuses(
         agents
@@ -126,9 +101,6 @@ pub(crate) fn agents_summary(agents: &[AgentEntry]) -> AgentSummary {
     )
 }
 
-/// The host layout: `tree` alone in one scroll view when `agents` is `None`,
-/// else a column giving each half `flex 1` — the tree in its own scroll view,
-/// `agents` (an [`agents_section`], which scrolls its rows itself) below.
 pub(crate) fn tree_split<State: 'static, Tree: View<State>, Agents: View<State>>(
     tree: Tree,
     agents: Option<Agents>,
@@ -144,7 +116,6 @@ pub(crate) fn tree_split<State: 'static, Tree: View<State>, Agents: View<State>>
     }
 }
 
-/// The whole lower half: [`agents_header`] over the scrolling rows.
 pub(crate) fn agents_section<State: 'static>(
     data: &AgentsData<'_>,
     on_agent: &PressAgent<State>,
@@ -171,7 +142,6 @@ pub(crate) fn agents_section<State: 'static>(
         .cross_axis(CrossAxisAlignment::Stretch)
 }
 
-/// A hairline, then `AI AGENTS · N` and the count pills.
 pub(crate) fn agents_header<State: 'static>(
     summary: &AgentSummary,
     tones: &AgentTones,
@@ -199,9 +169,7 @@ pub(crate) fn agents_header<State: 'static>(
         .cross_axis(CrossAxisAlignment::Stretch)
 }
 
-/// One 52px agent row. Blocked rows wear the amber wash and the warning
-/// border; the row of the focused pane the amber border. Announced as one
-/// button named by [`row_label`].
+/// Blocked rows wear the amber wash and warning border; the focused pane's row the amber border.
 pub(crate) fn agent_row<State: 'static>(
     agent: &AgentEntry,
     focused: bool,
@@ -276,7 +244,7 @@ pub(crate) fn agent_row<State: 'static>(
     labelled_button(row_label(agent), GestureDetector(boxed).on_tap(on_press))
 }
 
-/// `space › tab › p<pane>`, the space left out when the agent reports none.
+/// The space is left out when the agent reports none.
 pub(crate) fn location(agent: &AgentEntry) -> String {
     let pane = format!("p{}", agent.pane_id);
     let mut parts: Vec<&str> = Vec::with_capacity(3);
@@ -288,8 +256,7 @@ pub(crate) fn location(agent: &AgentEntry) -> String {
     parts.join(LOCATION_SEP)
 }
 
-/// The row's spoken name, in `summary_line`'s register: "reviewer (claude):
-/// needs you, in api › shell › p2".
+/// `"reviewer (claude): needs you, in api › shell › p2"`.
 pub(crate) fn row_label(agent: &AgentEntry) -> String {
     format!(
         "{} ({}): {}, in {}",
