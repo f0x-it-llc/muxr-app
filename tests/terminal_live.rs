@@ -1882,15 +1882,15 @@ fn a_deep_link_lands_on_its_tab_and_pane_once() {
     let _g = serial();
     let _ambient = setup();
     clear_verb_log_for_tests();
-    // Position 2 is gohora (tab id 3); pane 31 is its unfocused sibling.
+    // Position 2 is harbor (tab id 3); pane 31 is its unfocused sibling.
     let mut h = Harness::mount_at("/terminal?session=s-1&tab=2&pane=31");
     h.pump_until("the target", |_| verb_log_for_tests().len() >= 2);
     h.pump_for(Duration::from_millis(100));
 
     assert_eq!(verb_log_for_tests(), ["go_to_tab:3", "focus_pane:31"]);
     let c = debug_controller().expect("mounted");
-    assert_eq!(c.active_tab.get_untracked(), "gohora");
-    assert_eq!(focused_pane_of("gohora"), Some(31));
+    assert_eq!(c.active_tab.get_untracked(), "harbor");
+    assert_eq!(focused_pane_of("harbor"), Some(31));
 
     let again = Arc::clone(&c);
     tokio::runtime::Builder::new_current_thread()
@@ -2041,7 +2041,7 @@ fn a_link_naming_the_selected_space_behaves_as_one_without() {
     let _g = serial();
     let _ambient = setup();
     clear_verb_log_for_tests();
-    // `forgekit` is the selected space; position 2 is gohora (tab id 3).
+    // `forgekit` is the selected space; position 2 is harbor (tab id 3).
     let mut h = Harness::mount_at("/terminal?session=herdr:work&space=forgekit&tab=2&pane=31");
     h.pump_until("the target", |_| verb_log_for_tests().len() >= 2);
     h.pump_for(Duration::from_millis(100));
@@ -2184,7 +2184,7 @@ fn start(rt: &tokio::runtime::Runtime, step: &mut Step<'_>) {
     }));
 }
 
-/// A **live** controller for `?session=s-1&tab=2&pane=31` (gohora, tab id 3), over the
+/// A **live** controller for `?session=s-1&tab=2&pane=31` (harbor, tab id 3), over the
 /// composition root's own repositories but mounted nowhere, so the test alone decides
 /// when each layout fetch opens and lands.
 fn live_deep_link() -> Arc<TerminalController> {
@@ -2230,7 +2230,7 @@ fn a_load_fenced_out_behind_the_settle_leaves_the_deep_link_to_the_settled_reloa
 
     rt.block_on(settled);
     assert_eq!(verb_log_for_tests(), ["go_to_tab:3", "focus_pane:31"]);
-    assert_eq!(c.active_tab.get_untracked(), "gohora");
+    assert_eq!(c.active_tab.get_untracked(), "harbor");
 }
 
 #[test]

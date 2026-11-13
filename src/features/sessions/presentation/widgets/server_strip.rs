@@ -136,7 +136,7 @@ fn insecure_chip(mode: TrustMode) -> Option<&'static str> {
 }
 
 /// The host half of a `host:port` endpoint — what the top bar's centered
-/// title shows (`100.71.31.57`). `pub(crate)` because `crate::routes`'
+/// title shows (`100.64.0.7`). `pub(crate)` because `crate::routes`'
 /// `BarTitle::ConnectedHost` resolves `/sessions`' bar title through this
 /// one function rather than minting a second copy of the split.
 pub(crate) fn host_of(endpoint: &str) -> &str {
@@ -150,7 +150,7 @@ mod tests {
 
     fn info(mode: TrustMode, backends: Vec<BackendVersion>) -> ServerInfo {
         ServerInfo {
-            endpoint: "100.71.31.57:50051".to_string(),
+            endpoint: "100.64.0.7:50051".to_string(),
             trust_mode: mode,
             tls_label: "No verification".to_string(),
             version: "zellij 0.44.3".to_string(),
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn the_top_bars_title_is_the_host_without_its_port() {
-        assert_eq!(host_of("100.71.31.57:50051"), "100.71.31.57");
+        assert_eq!(host_of("100.64.0.7:50051"), "100.64.0.7");
         assert_eq!(host_of("mock.example:7777"), "mock.example");
         assert_eq!(host_of("mock.example"), "mock.example", "no port at all");
     }

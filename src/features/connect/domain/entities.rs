@@ -298,7 +298,7 @@ mod tests {
 
     fn aged(age_ms: i64) -> SavedServer {
         SavedServer {
-            host: "100.71.31.57".to_string(),
+            host: "100.64.0.7".to_string(),
             port: 50051,
             trust_mode: TrustMode::NoVerification,
             label: "Home rig".to_string(),
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn an_endpoint_is_the_host_and_port_joined() {
-        assert_eq!(aged(0).endpoint(), "100.71.31.57:50051");
+        assert_eq!(aged(0).endpoint(), "100.64.0.7:50051");
     }
 
     #[test]

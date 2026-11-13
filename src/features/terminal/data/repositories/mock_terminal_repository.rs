@@ -4,7 +4,7 @@
 //! Seeds exactly what `docs/terminal.html` v2 ships for its selected space (`forgekit`) — four
 //! tabs, each tab's title/name/path and its four `.term-line`s, transcribed rather than
 //! paraphrased — plus two more spaces so the sheet's space pill row has something to switch
-//! between: `zelli_mobile` (a second, smaller populated space) and `cupline` (empty, proving a
+//! between: `zelli_mobile` (a second, smaller populated space) and `quill` (empty, proving a
 //! space with no tabs is a reachable answer, not a bug). Framework-free: a `Mutex`-guarded space
 //! list plus a `Mutex`-guarded **per-space** tab store (`HashMap<space id, tabs>`); the mutex
 //! (not a `RefCell`) is what makes it `Send + Sync`, which the controller needs to hold it
@@ -160,14 +160,14 @@ pub fn default_agents_for_preview() -> Vec<AgentEntry> {
     let details = [
         (
             "reviewer",
-            ("forgekit", "minefit", 2, 20),
+            ("forgekit", "lumen", 2, 20),
             "Waiting for approval to run the migration",
             "~/api",
             4,
         ),
         (
             "planner",
-            ("forgekit", "gohora", 3, 30),
+            ("forgekit", "harbor", 3, 30),
             "Finished the refactor plan",
             "~/src",
             3,
@@ -496,7 +496,7 @@ impl Default for MockTerminalRepository {
 /// with `forgekit` selected (`.pill.sel`).
 fn seed_spaces() -> Vec<Space> {
     [
-        ("cupline", false),
+        ("quill", false),
         ("zelli_mobile", false),
         ("forgekit", true),
     ]
@@ -537,24 +537,24 @@ fn seed_tabs_forgekit() -> Vec<TabEntry> {
             1,
             "btop",
             "btop",
-            "ed@precision: ~",
-            "ed@precision",
+            "ed@workbench: ~",
+            "ed@workbench",
             "/home/ed",
         ),
         tab(
             2,
-            "minefit",
-            "minefit-api",
-            "ed@minefit: ~/api",
-            "ed@minefit",
+            "lumen",
+            "lumen-api",
+            "ed@lumen: ~/api",
+            "ed@lumen",
             "~/api",
         ),
         tab(
             3,
-            "gohora",
-            "gohora",
-            "ed@gohora: ~/src",
-            "ed@gohora",
+            "harbor",
+            "harbor",
+            "ed@harbor: ~/src",
+            "ed@harbor",
             "~/src",
         ),
         tab(
@@ -600,11 +600,11 @@ fn seed_tabs_zelli_mobile() -> Vec<TabEntry> {
 }
 
 /// Every seeded space's tab world, keyed by [`Space::id`] — `forgekit` (multi-tab, the
-/// default selection), `zelli_mobile` (a second, smaller populated space), and `cupline`
+/// default selection), `zelli_mobile` (a second, smaller populated space), and `quill`
 /// (empty — a space with no tabs is a reachable answer, not a bug).
 fn seed_tabs_by_space() -> HashMap<String, Vec<TabEntry>> {
     HashMap::from([
-        ("cupline".to_string(), Vec::new()),
+        ("quill".to_string(), Vec::new()),
         ("zelli_mobile".to_string(), seed_tabs_zelli_mobile()),
         ("forgekit".to_string(), seed_tabs_forgekit()),
     ])
@@ -646,22 +646,22 @@ fn seed_panes(index: u32, name: &str, path: &str) -> Vec<PaneEntry> {
 fn seed_lines(key: &str) -> Option<Vec<TermLine>> {
     let lines = match key {
         "btop" => vec![
-            TermLine::prompt("ed@precision:~$ btop"),
+            TermLine::prompt("ed@workbench:~$ btop"),
             TermLine::output("cpu 12% \u{b7} mem 4.1/16gb \u{b7} net 1.2mb/s"),
             TermLine::comment("# live system monitor, refreshes every 2s"),
-            TermLine::caret("ed@precision:~$ "),
+            TermLine::caret("ed@workbench:~$ "),
         ],
-        "minefit" => vec![
-            TermLine::prompt("ed@minefit:~/api$ cargo run --release"),
-            TermLine::output("Compiling minefit-api v0.3.2"),
+        "lumen" => vec![
+            TermLine::prompt("ed@lumen:~/api$ cargo run --release"),
+            TermLine::output("Compiling lumen-api v0.3.2"),
             TermLine::output("Finished release [optimized] in 12.4s"),
-            TermLine::caret("ed@minefit:~/api$ "),
+            TermLine::caret("ed@lumen:~/api$ "),
         ],
-        "gohora" => vec![
-            TermLine::prompt("ed@gohora:~/src$ go build ./..."),
-            TermLine::output("ok  gohora/cmd/server  0.842s"),
+        "harbor" => vec![
+            TermLine::prompt("ed@harbor:~/src$ go build ./..."),
+            TermLine::output("ok  harbor/cmd/server  0.842s"),
             TermLine::comment("# no errors, 3 packages rebuilt"),
-            TermLine::caret("ed@gohora:~/src$ "),
+            TermLine::caret("ed@harbor:~/src$ "),
         ],
         "devbox" => vec![
             TermLine::prompt("ed@devbox:~$ systemctl status muxrd"),
@@ -987,7 +987,7 @@ mod tests {
         let spaces = block_on(repo.list_spaces()).expect("the mock never fails to list");
 
         let names: Vec<&str> = spaces.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["cupline", "zelli_mobile", "forgekit"]);
+        assert_eq!(names, ["quill", "zelli_mobile", "forgekit"]);
         let selected: Vec<&str> = spaces
             .iter()
             .filter(|s| s.selected)
@@ -1002,7 +1002,7 @@ mod tests {
         let tabs = block_on(repo.list_tabs()).expect("the mock never fails to list");
 
         let pills: Vec<String> = tabs.iter().map(TabEntry::pill_label).collect();
-        assert_eq!(pills, ["1 btop", "2 minefit-api", "3 gohora", "4 devbox"]);
+        assert_eq!(pills, ["1 btop", "2 lumen-api", "3 harbor", "4 devbox"]);
         let active: Vec<&str> = tabs
             .iter()
             .filter(|t| t.active)
@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     fn every_tab_has_lines_and_an_unknown_key_fails() {
         let repo = MockTerminalRepository::seeded();
-        for key in ["btop", "minefit", "gohora", "devbox"] {
+        for key in ["btop", "lumen", "harbor", "devbox"] {
             let lines = block_on(repo.tab_lines(key.to_string()))
                 .unwrap_or_else(|_| panic!("{key} has lines"));
             assert_eq!(lines.len(), 4, "{key}");
@@ -1065,7 +1065,7 @@ mod tests {
     #[test]
     fn selecting_a_space_moves_the_selection_rather_than_adding_one() {
         let repo = MockTerminalRepository::seeded();
-        repo.select_space("cupline");
+        repo.select_space("quill");
 
         let selected: Vec<String> = repo
             .spaces_snapshot()
@@ -1073,13 +1073,13 @@ mod tests {
             .filter(|s| s.selected)
             .map(|s| s.name)
             .collect();
-        assert_eq!(selected, ["cupline"]);
+        assert_eq!(selected, ["quill"]);
     }
 
     #[test]
     fn a_space_switch_writes_the_store_and_an_unknown_id_fails() {
         let repo = MockTerminalRepository::seeded();
-        assert!(block_on(repo.switch_space("cupline".to_string())).is_ok());
+        assert!(block_on(repo.switch_space("quill".to_string())).is_ok());
 
         let selected: Vec<String> = repo
             .spaces_snapshot()
@@ -1087,7 +1087,7 @@ mod tests {
             .filter(|s| s.selected)
             .map(|s| s.id)
             .collect();
-        assert_eq!(selected, ["cupline"], "the switch is the one write path");
+        assert_eq!(selected, ["quill"], "the switch is the one write path");
         assert!(block_on(repo.switch_space("nope".to_string())).is_err());
     }
 
@@ -1233,7 +1233,7 @@ mod tests {
             .filter(|tab| tab.has_bell)
             .map(|tab| tab.key.as_str())
             .collect();
-        assert_eq!(bells, ["gohora"]);
+        assert_eq!(bells, ["harbor"]);
         let panes = || tabs.iter().flat_map(|tab| tab.panes.iter());
         assert_eq!(panes().filter(|pane| pane.exited).count(), 1);
         let floating: Vec<u32> = panes()
@@ -1310,7 +1310,7 @@ mod tests {
             .collect();
         assert_eq!(
             pills,
-            ["1 btop", "2 minefit-api", "3 gohora", "4 devbox"],
+            ["1 btop", "2 lumen-api", "3 harbor", "4 devbox"],
             "list_tabs still answers the selected space (forgekit), unaffected by the peek"
         );
     }
@@ -1319,7 +1319,7 @@ mod tests {
     fn list_tabs_in_space_answers_an_empty_space_with_an_empty_snapshot() {
         let repo = MockTerminalRepository::seeded();
         assert_eq!(
-            block_on(repo.list_tabs_in_space("cupline")),
+            block_on(repo.list_tabs_in_space("quill")),
             Ok(Vec::new()),
             "a space with no tabs is a reachable answer, not a bug"
         );

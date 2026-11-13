@@ -78,7 +78,7 @@ const SESSION_NAME: &str = "dev";
 /// `docs/terminal.html`'s `TABS`, as the screen must print them.
 const DEVBOX_TITLE: &str = "ed@devbox: ~";
 const DEVBOX_FIRST_LINE: &str = "ed@devbox:~$ systemctl status muxrd";
-const BTOP_TITLE: &str = "ed@precision: ~";
+const BTOP_TITLE: &str = "ed@workbench: ~";
 /// How many lines each tab carries (and so how many the reveal staggers).
 const LINES_PER_TAB: usize = 4;
 
@@ -152,7 +152,7 @@ const NEW_TAB_SUBMIT_LABEL: &str = "Create";
 
 /// The second tab's pane title (`docs/terminal.html`'s `TABS[1]`) — what the
 /// card prints once a pane row inside it has been committed.
-const MINEFIT_TITLE: &str = "ed@minefit: ~/api";
+const MINEFIT_TITLE: &str = "ed@lumen: ~/api";
 
 /// `presentation::pages`'s `FOOTER_RENAME_LABEL`/`FOOTER_DETACH_LABEL`
 /// (private there) — the side sheet's sticky footer's two icon-only
@@ -1348,7 +1348,7 @@ fn a_tab_row_browses_locally_and_leaves_the_card_and_the_sheet_alone() {
 
     // Expanding a tab is a browse: it reveals that tab's own panes, out of
     // the tab world the one load already carried…
-    assert!(h.shows("ed@precision zsh"), "btop's panes are now visible");
+    assert!(h.shows("ed@workbench zsh"), "btop's panes are now visible");
     // …while the card stayed exactly where the session is…
     assert!(
         h.shows(DEVBOX_TITLE),
@@ -1526,11 +1526,11 @@ fn a_second_pane_row_inside_the_close_beat_still_closes_the_sheet_only_once() {
     h.open_sheet();
     assert_eq!(h.depth(), floor + 1, "the sheet is up over the route");
     // Browse `btop`, commit its first pane, then — inside the same close beat — browse
-    // `minefit-api` and commit its first pane too.
+    // `lumen-api` and commit its first pane too.
     h.tap(h.value_point("btop"));
     let scene = h.settle();
     h.tap(center(tree_pane_rows(&scene)[0]));
-    h.tap(h.value_point("minefit-api"));
+    h.tap(h.value_point("lumen-api"));
     let scene = h.settle();
     h.tap(center(tree_pane_rows(&scene)[0]));
 
@@ -1648,12 +1648,12 @@ fn an_empty_non_selected_space_shows_the_hint_row_once_browsed() {
     h.open_sheet();
     assert!(
         !h.shows("no tabs yet"),
-        "cupline is collapsed and unread before the tap"
+        "quill is collapsed and unread before the tap"
     );
 
-    // "cupline" is a herdr space seeded with no tabs at all.
-    h.tap(h.value_point("cupline"));
-    h.pump_until("cupline to be read", |h| h.shows("no tabs yet"));
+    // "quill" is a herdr space seeded with no tabs at all.
+    h.tap(h.value_point("quill"));
+    h.pump_until("quill to be read", |h| h.shows("no tabs yet"));
 }
 
 #[test]
@@ -1666,16 +1666,16 @@ fn the_add_tab_row_under_an_empty_browsed_space_switches_onto_it_first() {
     h.open_sheet();
     let floor = h.depth();
 
-    // "cupline" is seeded with no tabs at all, so it draws no pane row to
+    // "quill" is seeded with no tabs at all, so it draws no pane row to
     // commit through: its add-tab row is the only way onto the space, and the
     // switch that row performs is what makes an empty one reachable.
-    h.tap(h.value_point("cupline"));
-    h.pump_until("cupline to be read", |h| h.shows("no tabs yet"));
+    h.tap(h.value_point("quill"));
+    h.pump_until("quill to be read", |h| h.shows("no tabs yet"));
     // Runs the collapsing/expanding reveals forward, so the row tapped below is
     // where it looks (the same pinned-clock hazard the cross-space commit hits).
     h.settle_motion(0.0);
 
-    // The first add-tab row in tree order is cupline's own — the seeded space
+    // The first add-tab row in tree order is quill's own — the seeded space
     // list draws it first, and the two behind it are collapsed.
     h.tap(h.add_tab_row_point());
     h.pump_until("the switch to land and the new-tab dialog to open", |h| {
@@ -1692,7 +1692,7 @@ fn the_add_tab_row_under_an_empty_browsed_space_switches_onto_it_first() {
         .collect();
     assert_eq!(
         selected,
-        ["cupline"],
+        ["quill"],
         "the create row switched onto the space it sits under, so the tab it \
          is about to name lands there rather than in the space left behind"
     );
@@ -2040,7 +2040,7 @@ fn a_read_only_credential_withdraws_the_trees_three_create_rows() {
     // and moves nothing.
     h.tap(h.value_point("btop"));
     h.settle();
-    assert!(h.shows("ed@precision zsh"), "the browse moved");
+    assert!(h.shows("ed@workbench zsh"), "the browse moved");
 }
 
 #[test]
@@ -2638,17 +2638,14 @@ fn holding_a_space_row_renames_it_without_toggling_it() {
     let floor = h.depth();
     let before = h.frame();
 
-    // "cupline" is a collapsed, empty, non-selected space — the tree's own
+    // "quill" is a collapsed, empty, non-selected space — the tree's own
     // press-and-hold (`side_sheet_tree`'s `pressable`), not a trailing edit
     // icon, is what opens its rename dialog now.
-    h.long_press(h.value_point("cupline"));
+    h.long_press(h.value_point("quill"));
     let after = h.settle();
 
     assert_eq!(h.depth(), floor + 1, "the rename dialog opened");
-    assert!(
-        h.shows("cupline"),
-        "prefilled with the space's current name"
-    );
+    assert!(h.shows("quill"), "prefilled with the space's current name");
 
     let dialog = added(&before.rounded, &after.rounded);
     let content_w = panel(&dialog).1.width - 2.0 * PANEL_PADDING;
@@ -2756,10 +2753,10 @@ fn a_drag_past_slop_mid_hold_cancels_both_the_rename_and_the_toggle() {
 
     h.open_sheet();
     let floor = h.depth();
-    // "cupline" is a collapsed, empty, non-selected space — a landed toggle
+    // "quill" is a collapsed, empty, non-selected space — a landed toggle
     // would expand it and show its hint row, and a landed hold would open its
     // rename dialog; a drag past slop must fire neither.
-    let point = h.value_point("cupline");
+    let point = h.value_point("quill");
 
     h.drag_past_slop_then_release(point);
     h.settle();
@@ -2856,7 +2853,7 @@ fn a_tablet_pane_tap_commits_and_the_rail_stays_resting_on_it() {
 
     h.tap(h.value_point("btop"));
     h.settle_motion(0.0);
-    h.tap(h.value_point("ed@precision zsh"));
+    h.tap(h.value_point("ed@workbench zsh"));
     h.pump_until_values("the btop tab", |values| {
         values.iter().any(|v| v == BTOP_TITLE)
     });
@@ -2879,7 +2876,7 @@ fn the_rails_rows_carry_the_float_tag_the_exited_mark_and_the_bell() {
     assert!(labels.iter().any(|l| l == "float"), "{labels:?}");
     assert!(
         labels.iter().any(|l| l == "bell"),
-        "gohora rings: {labels:?}"
+        "harbor rings: {labels:?}"
     );
     h.tap(h.value_point("btop"));
     h.settle_motion(0.0);
@@ -2915,7 +2912,7 @@ fn a_read_only_rail_withdraws_add_rows_and_overflow_buttons_but_still_browses() 
     assert!(h.shows("read-only: browse and switch only"));
     h.tap(h.value_point("btop"));
     h.settle_motion(0.0);
-    assert!(h.shows("ed@precision zsh"), "the browse moved");
+    assert!(h.shows("ed@workbench zsh"), "the browse moved");
 }
 
 #[test]
@@ -3361,8 +3358,8 @@ fn a_mini_rail_tab_cell_is_a_named_button_and_taps_by_its_label() {
     h.frame();
     clear_verb_log_for_tests();
 
-    assert!(node_labels(&h.root).iter().any(|l| l == "minefit-api"));
-    h.tap_label("minefit-api");
+    assert!(node_labels(&h.root).iter().any(|l| l == "lumen-api"));
+    h.tap_label("lumen-api");
     h.pump_until("the tab commit", |_| {
         verb_log_for_tests()
             .iter()

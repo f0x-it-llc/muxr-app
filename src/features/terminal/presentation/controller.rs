@@ -2754,7 +2754,7 @@ mod tests {
         assert_eq!(c.active_tab.get_untracked(), "btop");
         assert_eq!(
             c.lines.get_untracked().first().map(|l| l.text.clone()),
-            Some("ed@precision:~$ btop".to_string())
+            Some("ed@workbench:~$ btop".to_string())
         );
         assert!(
             c.reveal_epoch.get_untracked() > before,
@@ -2793,7 +2793,7 @@ mod tests {
         let c = controller(Some("herdr:work"));
         block_on(c.load());
 
-        block_on(c.select_space("cupline".to_string()));
+        block_on(c.select_space("quill".to_string()));
 
         let selected: Vec<String> = c
             .spaces
@@ -2802,7 +2802,7 @@ mod tests {
             .filter(|s| s.selected)
             .map(|s| s.name)
             .collect();
-        assert_eq!(selected, ["cupline"]);
+        assert_eq!(selected, ["quill"]);
     }
 
     #[test]
@@ -3655,18 +3655,18 @@ mod tests {
         block_on(async {
             tokio::join!(
                 c.expand_space("ws-2".to_string()),
-                c.expand_space("cupline".to_string()),
+                c.expand_space("quill".to_string()),
             );
         });
 
         assert_eq!(
             c.expanded_space.get_untracked(),
-            Some("cupline".to_string()),
+            Some("quill".to_string()),
             "the later expand stands"
         );
         assert_eq!(
             c.browsed_space_tabs.get_untracked().map(|(id, _)| id),
-            Some("cupline".to_string()),
+            Some("quill".to_string()),
             "the earlier, now-stale peek's answer must not overwrite it"
         );
     }
@@ -3734,12 +3734,9 @@ mod tests {
         block_on(c.expand_space("zelli_mobile".to_string()));
         c.expand_tab("logs".to_string());
 
-        block_on(c.expand_space("cupline".to_string()));
+        block_on(c.expand_space("quill".to_string()));
 
-        assert_eq!(
-            c.expanded_space.get_untracked(),
-            Some("cupline".to_string())
-        );
+        assert_eq!(c.expanded_space.get_untracked(), Some("quill".to_string()));
         assert_eq!(
             c.expanded_tab.get_untracked(),
             None,
