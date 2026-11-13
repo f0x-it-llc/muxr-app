@@ -1,8 +1,5 @@
-//! Muxr's closed failure vocabulary: one [`AppFailure`] enum for the whole
-//! app, small enough not to need per-feature error types. Every use case
-//! maps its errors into this vocabulary at the data-layer boundary;
-//! presentation code matches it exhaustively, never string-matches it — no
-//! catch-all variant.
+//! The app's closed failure vocabulary: data layers map into [`AppFailure`] and
+//! presentation matches it exhaustively.
 
 use std::fmt;
 
@@ -78,7 +75,6 @@ mod tests {
         let f = AppFailure::Internal("unreachable match arm hit".to_string());
         assert!(!f.is_retryable());
         assert_eq!(f.user_message(), "Something went wrong — please try again.");
-        // The raw detail still shows up in Display (for logs), just not user_message.
         assert!(f.to_string().contains("unreachable match arm hit"));
     }
 }

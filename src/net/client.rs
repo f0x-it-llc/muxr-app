@@ -1,16 +1,6 @@
-//! [`MuxrClient`] — one connected `muxrd` handle: the channel, the session
-//! token, and the two stubs everything above this layer calls through.
-//!
-//! Teardown is a drop, always: an `AttachTerminal` stream never completes on
-//! its own, so a graceful `shutdown()` would hang forever. Dropping the last
-//! clone closes the transport.
-//!
-//! Rebuild is single-flight: [`MuxrClient::reconnect`] takes a lock and
-//! re-checks a generation counter behind it, so several callers' error
-//! handlers reaching for a reconnect at once collapse into one dial. Stubs
-//! are minted per call from the current channel, so a caller already
-//! holding one keeps using the old connection until its next stub — which
-//! is what a retry does.
+//! [`MuxrClient`]: one connected `muxrd` handle. Teardown is always a drop: an `AttachTerminal`
+//! stream never completes, so a graceful `shutdown()` would hang. Stubs are minted per call, so
+//! a holder keeps the old connection until its next stub.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,14 +14,12 @@ use crate::net::auth::{AuthedStub, SessionToken, UnauthStub, authed_stub, unauth
 use crate::net::channel;
 use crate::net::tls::TrustConfig;
 
-/// A connected `muxrd` client. Cheap to clone — every clone shares one channel,
-/// one session token and one rebuild guard.
+/// Every clone shares one channel, one session token and one rebuild guard.
 #[derive(Clone, Debug)]
 pub struct MuxrClient {
     inner: Arc<Inner>,
 }
 
-/// The shared state behind every [`MuxrClient`] clone.
 #[derive(Debug)]
 struct Inner {
     host: String,
@@ -39,18 +27,13 @@ struct Inner {
     trust: TrustConfig,
     token: Arc<SessionToken>,
     channel: ArcSwap<Channel>,
-    /// Bumped on every successful rebuild — tells a queued `reconnect` caller
-    /// whether someone else already did the work.
+    /// Bumped on every rebuild so a queued `reconnect` caller sees the work is done.
     generation: AtomicU64,
     rebuild: Mutex<()>,
 }
 
 impl MuxrClient {
-    /// Dial a target and hold the connection.
-    ///
-    /// The returned client carries no session token: `GetVersion` and `Login`
-    /// are reachable through [`Self::unauth`] immediately, everything else once
-    /// [`Self::set_session_token`] has run.
+    /// Carries no session token: only [`Self::unauth`] works until [`Self::set_session_token`].
     pub async fn connect(host: &str, port: u16, trust: TrustConfig) -> Result<Self, AppFailure> {
         let channel = channel::connect(host, port, &trust).await?;
         Ok(Self {
@@ -66,61 +49,45 @@ impl MuxrClient {
         })
     }
 
-    /// The stub for the two unauthenticated paths, `GetVersion` and `Login`.
     pub fn unauth(&self) -> UnauthStub {
         unauth_stub(self.channel())
     }
 
-    /// The stub for every authenticated RPC — each call carries the current
-    /// session token.
     pub fn authed(&self) -> AuthedStub {
         authed_stub(self.channel(), Arc::clone(&self.inner.token))
     }
 
-    /// Install the session token a `Login` response minted, scrubbing any
-    /// previous one.
     pub fn set_session_token(&self, token: &str) {
         self.inner.token.set(token);
     }
 
-    /// Drop the session token, scrubbing it. Authenticated calls fail locally
-    /// until a new one is installed.
     pub fn clear_session_token(&self) {
         self.inner.token.clear();
     }
 
-    /// Whether a session token is currently held.
     pub fn has_session_token(&self) -> bool {
         self.inner.token.is_set()
     }
 
-    /// The host this client dialled.
     pub fn host(&self) -> &str {
         &self.inner.host
     }
 
-    /// The port this client dialled.
     pub fn port(&self) -> u16 {
         self.inner.port
     }
 
-    /// Whether `other` is a clone of this client — one shared channel and token
-    /// store — rather than a separate dial, even to the same target. Lets the
-    /// connection tell a failure on the live client from one on a superseded
-    /// client.
+    /// A clone rather than a separate dial; tells a live client's failure from a superseded one's.
     pub fn is_same(&self, other: &MuxrClient) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    /// Rebuild the channel to the same target, at most once per concurrent
-    /// burst (see the module docs). The session token is untouched — a dropped
-    /// connection does not invalidate a credential.
+    /// Single-flight: concurrent callers collapse into one dial. The session token is untouched.
     pub async fn reconnect(&self) -> Result<(), AppFailure> {
         let seen = self.inner.generation.load(Ordering::Acquire);
         let _guard = self.inner.rebuild.lock().await;
         if self.inner.generation.load(Ordering::Acquire) != seen {
-            // Someone else already rebuilt while this caller waited for the
-            // lock; dialing again would open a second connection.
+            // Rebuilt while this caller waited; dialing again would open a second connection.
             return Ok(());
         }
 
@@ -131,7 +98,6 @@ impl MuxrClient {
         Ok(())
     }
 
-    /// The current channel, cloned — `Channel` is itself a cheap handle.
     fn channel(&self) -> Channel {
         Channel::clone(&self.inner.channel.load())
     }
@@ -144,8 +110,6 @@ mod tests {
     use crate::net::testing::{self, MuxrdFixture};
     use crate::net::{error, tls};
 
-    /// A pinned dial against the fixture's own certificate completes the
-    /// handshake and answers an unauthenticated RPC.
     #[tokio::test]
     async fn pinned_trust_connects_to_the_matching_certificate() {
         let fixture = MuxrdFixture::start().await;
@@ -165,10 +129,6 @@ mod tests {
         assert_eq!(version.server_version, testing::SERVER_VERSION);
     }
 
-    /// A pin for a *different* certificate must fail the handshake. Asserting
-    /// "not success" rather than a message keeps the test honest about which
-    /// rustls alert surfaces; the accept-any dial to the same fixture is what
-    /// proves the refusal came from the pin and not from a dead server.
     #[tokio::test]
     async fn wrong_pin_fails_the_handshake() {
         let fixture = MuxrdFixture::start().await;
@@ -191,7 +151,6 @@ mod tests {
         );
     }
 
-    /// The dev trust mode connects to a certificate it has never seen.
     #[tokio::test]
     async fn insecure_accept_any_connects() {
         let fixture = MuxrdFixture::start().await;
@@ -206,14 +165,11 @@ mod tests {
         assert!(client.unauth().get_version(Empty {}).await.is_ok());
     }
 
-    /// The whole credential round trip: log in over the unauthenticated stub,
-    /// install the minted token, and reach an authenticated RPC with it.
     #[tokio::test]
     async fn login_then_authed_rpc_round_trips() {
         let fixture = MuxrdFixture::start().await;
         let client = fixture.connect_pinned().await;
 
-        // Before a login, the authenticated stub refuses locally.
         let refused = client
             .authed()
             .list_sessions(Empty {})
@@ -249,8 +205,6 @@ mod tests {
         assert_eq!(names, testing::SESSION_NAMES);
     }
 
-    /// A token the server does not recognise comes back as `UNAUTHENTICATED`
-    /// and maps to a non-retryable auth failure — the "please reconnect" path.
     #[tokio::test]
     async fn bad_token_maps_to_an_auth_failure() {
         use clean_signals::Failure;
@@ -271,7 +225,6 @@ mod tests {
         assert!(!failure.is_retryable());
     }
 
-    /// Clearing the token takes the credential away from stubs minted later.
     #[tokio::test]
     async fn clearing_the_token_closes_the_authenticated_surface() {
         let fixture = MuxrdFixture::start().await;
@@ -284,8 +237,6 @@ mod tests {
         assert!(client.authed().list_sessions(Empty {}).await.is_err());
     }
 
-    /// Concurrent reconnects collapse into one dial: the generation counter
-    /// advances once, not once per caller.
     #[tokio::test]
     async fn concurrent_reconnects_are_single_flight() {
         let fixture = MuxrdFixture::start().await;
@@ -298,11 +249,9 @@ mod tests {
         third.expect("rebuild succeeds");
 
         assert_eq!(client.inner.generation.load(Ordering::Acquire), 1);
-        // The rebuilt channel is live.
         assert!(client.unauth().get_version(Empty {}).await.is_ok());
     }
 
-    /// Target metadata survives on the handle, and a client is cheap to clone.
     #[tokio::test]
     async fn client_reports_its_target_and_shares_state_across_clones() {
         let fixture = MuxrdFixture::start().await;
@@ -316,7 +265,6 @@ mod tests {
         assert!(client.has_session_token());
     }
 
-    /// A clone is the same client; a second dial to the very same target is not.
     #[tokio::test]
     async fn a_clone_is_the_same_client_and_a_second_dial_is_not() {
         let fixture = MuxrdFixture::start().await;

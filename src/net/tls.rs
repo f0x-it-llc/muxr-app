@@ -1,20 +1,6 @@
-//! The three trust modes a `muxrd` connection can be dialled under, and the
-//! `rustls` [`ServerCertVerifier`] each one installs.
-//!
-//! [`TrustConfig`] is separate from `crate::connection::TrustMode` (a
-//! screen's plain-data posture label) — mapping between them is the connect
-//! seam's job, not this module's.
-//!
-//! A pin is over the leaf certificate's DER bytes, not its SPKI — the `fp`
-//! form a pairing payload encodes. Parsing is fail-closed: a missing, short,
-//! long or non-hex pin errors before a socket opens, never downgrades to a
-//! weaker mode.
-//!
-//! Pinning replaces chain and name validation, not proof-of-possession: the
-//! pinned verifier still runs `verify_tls12/13_signature` through rustls'
-//! own helpers, so presenting the pinned cert without its private key still
-//! fails the handshake. Skipping those two methods — the shape most "danger"
-//! verifier snippets copy — would accept a replayed certificate.
+//! The trust modes a `muxrd` dial runs under and the `rustls` verifier each installs. A pin is
+//! SHA-256 over the leaf DER (not SPKI) and parses fail-closed. Pinning replaces chain and name
+//! validation, never handshake-signature checks, so a replayed certificate still fails.
 
 use std::fmt;
 use std::sync::Arc;
@@ -27,38 +13,27 @@ use sha2::{Digest, Sha256};
 
 use crate::failure::AppFailure;
 
-/// Width of a certificate pin, in bytes — SHA-256's digest length.
+/// SHA-256's digest length.
 pub const PIN_LEN: usize = 32;
 
-/// Width of a certificate pin written as hex — the exact length
-/// [`TrustConfig::pinned_from_hex`] accepts, no shorter and no longer.
 pub const PIN_HEX_LEN: usize = PIN_LEN * 2;
 
-/// Lowercase hex alphabet for [`leaf_fingerprint_hex`].
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
-/// How a dialled server's certificate is verified.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrustConfig {
-    /// A publicly trusted certificate chain. On Apple targets the platform's
-    /// own trust store validates chain and name (`rustls-platform-verifier`
-    /// over Security.framework). On Android, rustls' WebPKI verifier over the
-    /// bundled Mozilla root program (`webpki-roots`) does instead — see
-    /// [`system_ca_verifier`] for why the platform verifier is not used there.
+    /// Apple uses the platform trust store; Android uses WebPKI over the bundled Mozilla roots
+    /// (see [`system_ca_verifier`]).
     SystemCa,
-    /// Accept any certificate. Dev servers only — this is the one mode with no
-    /// authentication of the peer at all.
+    /// Dev servers only: no peer authentication at all.
     InsecureAcceptAny,
-    /// Accept exactly the leaf certificate whose DER bytes hash to this digest.
+    /// The leaf certificate whose DER bytes hash to this digest.
     PinnedSha256([u8; PIN_LEN]),
 }
 
-/// Why a hex pin was rejected — always *before* a connection is attempted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PinError {
-    /// The pin was not exactly [`PIN_HEX_LEN`] characters long.
     WrongLength(usize),
-    /// The pin was the right length but held a non-hex character.
     NotHex,
 }
 
@@ -77,18 +52,14 @@ impl fmt::Display for PinError {
 impl std::error::Error for PinError {}
 
 impl From<PinError> for AppFailure {
-    /// Lands on [`AppFailure::Network`] — a bad address, not a rejected
-    /// credential, so `Auth`'s "please reconnect" message would misdescribe it.
+    /// `Network`, not `Auth`: a bad address, not a rejected credential.
     fn from(error: PinError) -> Self {
         AppFailure::Network(error.to_string())
     }
 }
 
 impl TrustConfig {
-    /// Parse a 64-character hex certificate pin. Case-insensitive,
-    /// exact-length, hex-only — no lenient path: a pin that fails to parse
-    /// must never degrade into [`TrustConfig::SystemCa`] or
-    /// [`TrustConfig::InsecureAcceptAny`].
+    /// Case-insensitive, exact-length, hex-only; a bad pin never degrades into a weaker mode.
     pub fn pinned_from_hex(pin: &str) -> Result<Self, PinError> {
         let bytes = pin.as_bytes();
         if bytes.len() != PIN_HEX_LEN {
@@ -104,9 +75,7 @@ impl TrustConfig {
         Ok(TrustConfig::PinnedSha256(digest))
     }
 
-    /// The `rustls` verifier this mode installs on a client config. Fallible
-    /// only for [`TrustConfig::SystemCa`], whose verifier is built rather than
-    /// constructed inline — see [`system_ca_verifier`].
+    /// Fallible only for [`TrustConfig::SystemCa`].
     pub fn verifier(&self) -> Result<Arc<dyn ServerCertVerifier>, AppFailure> {
         let provider = crypto_provider();
         match self {
@@ -120,8 +89,7 @@ impl TrustConfig {
     }
 }
 
-/// SHA-256 over a leaf certificate's DER bytes, lowercase hex — the `fp` form a
-/// pairing payload carries and [`TrustConfig::pinned_from_hex`] consumes.
+/// The `fp` form a pairing payload carries and [`TrustConfig::pinned_from_hex`] consumes.
 pub fn leaf_fingerprint_hex(leaf_der: &[u8]) -> String {
     let digest = leaf_digest(leaf_der);
     let mut out = String::with_capacity(PIN_HEX_LEN);
@@ -132,7 +100,6 @@ pub fn leaf_fingerprint_hex(leaf_der: &[u8]) -> String {
     out
 }
 
-/// One hex character's value, or `None` if it is not hex.
 fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
@@ -142,7 +109,6 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// SHA-256 over a leaf certificate's DER bytes.
 fn leaf_digest(leaf_der: &[u8]) -> [u8; PIN_LEN] {
     let digest = Sha256::digest(leaf_der);
     let mut pin = [0u8; PIN_LEN];
@@ -150,11 +116,7 @@ fn leaf_digest(leaf_der: &[u8]) -> [u8; PIN_LEN] {
     pin
 }
 
-/// Compare two pins without an early exit. Hand-rolled XOR fold rather than
-/// the `subtle` crate (no new deps) — a pin is public data (it ships in the
-/// pairing QR), so timing leakage reveals nothing new; this is defense in
-/// depth against the *pattern*, and `black_box` stops an optimizer from
-/// reintroducing the branch.
+/// Constant-time compare; `black_box` stops the optimizer reintroducing an early exit.
 fn pins_match(presented: &[u8; PIN_LEN], expected: &[u8; PIN_LEN]) -> bool {
     let mut difference = 0u8;
     for index in 0..PIN_LEN {
@@ -163,15 +125,8 @@ fn pins_match(presented: &[u8; PIN_LEN], expected: &[u8; PIN_LEN]) -> bool {
     std::hint::black_box(difference) == 0
 }
 
-/// The process-wide `rustls` crypto provider, installing aws-lc-rs if
-/// nothing has installed one yet. Installing (not just constructing) matters
-/// because tonic builds its own `ClientConfig` from
-/// `CryptoProvider::get_default()`, so one shared provider keeps signature
-/// algorithms and cipher suites from splitting across two instances. A lost
-/// install race is a no-op: this tree pairs rustls' default features with
-/// tonic's `tls-aws-lc`, so the winner is always the same provider. Getting
-/// this wrong — installing a second, conflicting provider at runtime — is
-/// exactly the failure this shared-provider contract guards against.
+/// Installs aws-lc-rs as the process default when none is set: tonic builds its `ClientConfig`
+/// from `CryptoProvider::get_default()`, so one provider must be shared. A lost race is a no-op.
 fn crypto_provider() -> Arc<CryptoProvider> {
     if let Some(installed) = CryptoProvider::get_default() {
         return installed.clone();
@@ -182,8 +137,6 @@ fn crypto_provider() -> Arc<CryptoProvider> {
         .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
 }
 
-/// [`TrustConfig::SystemCa`] off Android: the platform's own trust store,
-/// through `rustls-platform-verifier` (Security.framework on Apple targets).
 #[cfg(not(target_os = "android"))]
 fn system_ca_verifier(
     provider: Arc<CryptoProvider>,
@@ -193,23 +146,9 @@ fn system_ca_verifier(
     Ok(Arc::new(verifier))
 }
 
-/// [`TrustConfig::SystemCa`] on Android: rustls' own WebPKI verifier over the
-/// Mozilla root program — deliberately *not* the platform verifier.
-///
-/// `rustls-platform-verifier`'s Android component enables revocation checking
-/// with OCSP tried first and no CRL preference, and Android's checker raises
-/// a hard `CertPathValidatorException: Certificate does not specify OCSP
-/// responder` for any certificate carrying no OCSP URI — which the verifier
-/// then reports as `Revoked` and the handshake fails. Google Trust Services
-/// and Let's Encrypt have both dropped OCSP for CRLs, so that is now the
-/// ordinary shape of a public certificate, and every "Public domain (CA)"
-/// dial failed on it (observed against the demo's GTS WE1 chain). Upstream
-/// tracks it as rustls-platform-verifier PR #34, unreleased as of 0.7.0.
-///
-/// The trade: this trusts the bundled Mozilla roots, not the device's own
-/// store, so a user-installed or enterprise root is not honoured on Android —
-/// a server under one needs a pin (a scanned `fp`) instead. Revocation is not
-/// checked, which matches what browsers do for these certificates today.
+/// Not the platform verifier: its Android revocation check reports a certificate without an OCSP
+/// URI, the ordinary shape of a public certificate, as `Revoked`. Only the bundled Mozilla roots
+/// are trusted, so a user or enterprise root needs a pin; revocation is not checked.
 #[cfg(target_os = "android")]
 fn system_ca_verifier(
     provider: Arc<CryptoProvider>,
@@ -217,9 +156,7 @@ fn system_ca_verifier(
     webpki_roots_verifier(provider)
 }
 
-/// rustls' WebPKI verifier over `webpki-roots`' bundled Mozilla trust
-/// anchors. Android's [`system_ca_verifier`]; compiled under `test` too so
-/// the host suite exercises the exact verifier a device installs.
+/// Compiled under `test` too so the host suite exercises the verifier a device installs.
 #[cfg(any(target_os = "android", test))]
 fn webpki_roots_verifier(
     provider: Arc<CryptoProvider>,
@@ -235,10 +172,7 @@ fn webpki_roots_verifier(
     Ok(verifier)
 }
 
-/// Accepts exactly the leaf certificate whose DER bytes hash to [`Self::pin`].
-///
-/// Chain building and name matching are deliberately absent — a pin *is* the
-/// identity — but handshake-signature verification is not (see the module docs).
+/// No chain or name checks, since a pin is the identity; handshake signatures are still verified.
 #[derive(Debug)]
 struct PinnedVerifier {
     pin: [u8; PIN_LEN],
@@ -298,12 +232,7 @@ impl ServerCertVerifier for PinnedVerifier {
     }
 }
 
-/// Accepts any certificate. Reachable only through
-/// [`TrustConfig::InsecureAcceptAny`], whose own doc states the exposure.
-///
-/// Handshake signatures are still verified, so this proves the peer holds the
-/// key for whatever certificate it presented — it just does not care *which*
-/// certificate that is.
+/// Still verifies handshake signatures, so the peer holds the key for the certificate it presents.
 #[derive(Debug)]
 struct AcceptAnyVerifier {
     provider: Arc<CryptoProvider>,
@@ -360,8 +289,6 @@ impl ServerCertVerifier for AcceptAnyVerifier {
 mod tests {
     use super::*;
 
-    /// The digest/hex pair round-trips: hashing bytes and parsing the printed
-    /// hex must land on the same 32 bytes a pinned verifier compares against.
     #[test]
     fn fingerprint_hex_round_trips_into_a_pin() {
         let hex = leaf_fingerprint_hex(b"a certificate's DER bytes");
@@ -374,8 +301,7 @@ mod tests {
         );
     }
 
-    /// A pairing payload may arrive upper-cased; both spellings must produce the
-    /// identical pin.
+    /// A pairing payload may arrive upper-cased.
     #[test]
     fn pin_parsing_is_case_insensitive() {
         let lower = leaf_fingerprint_hex(b"leaf");
@@ -387,7 +313,6 @@ mod tests {
         );
     }
 
-    /// Fail-closed: every malformed pin is an error, never a weaker trust mode.
     #[test]
     fn malformed_pins_are_rejected_before_any_dial() {
         assert_eq!(
@@ -402,7 +327,7 @@ mod tests {
             TrustConfig::pinned_from_hex(&"a".repeat(PIN_HEX_LEN + 1)),
             Err(PinError::WrongLength(PIN_HEX_LEN + 1))
         );
-        // Right length, wrong alphabet — the case a length-only check misses.
+        // Right length, wrong alphabet.
         let mut not_hex = "a".repeat(PIN_HEX_LEN - 1);
         not_hex.push('z');
         assert_eq!(
@@ -411,7 +336,6 @@ mod tests {
         );
     }
 
-    /// The constant-time compare still answers the plain question correctly.
     #[test]
     fn pins_match_only_on_equal_digests() {
         let a = leaf_digest(b"one");
@@ -419,14 +343,11 @@ mod tests {
         assert!(pins_match(&a, &a));
         assert!(!pins_match(&a, &b));
 
-        // A single flipped bit anywhere must still fail.
         let mut nearly = a;
         nearly[PIN_LEN - 1] ^= 0x01;
         assert!(!pins_match(&a, &nearly));
     }
 
-    /// Every mode builds a verifier on the host — including `SystemCa`, whose
-    /// platform verifier is what a release build actually installs.
     #[test]
     fn every_trust_mode_builds_a_verifier() {
         for mode in [
@@ -438,11 +359,7 @@ mod tests {
         }
     }
 
-    /// The verifier Android installs for `SystemCa` builds on the host too,
-    /// and it is a real WebPKI verifier over a non-empty root set: a leaf
-    /// nobody signed is refused, not waved through, and the refusal is not
-    /// the platform verifier's `Revoked` — the failure this path exists to
-    /// avoid.
+    /// The refusal must not be the platform verifier's `Revoked`.
     #[test]
     fn the_webpki_roots_verifier_refuses_an_unknown_issuer() {
         assert!(
@@ -467,8 +384,6 @@ mod tests {
         );
     }
 
-    /// The pinned verifier answers on the certificate it was pinned to and
-    /// refuses every other one.
     #[test]
     fn pinned_verifier_accepts_only_its_own_leaf() {
         let leaf = CertificateDer::from(b"leaf-der".to_vec());

@@ -1,61 +1,39 @@
-//! The size-class rule every screen reads at the top of `build`.
-//!
-//! Structure is chosen from the window's **shortest side** ([`SizeClass`]), so
-//! rotating a tablet never flips it and an iPad Split View half reads as a
-//! phone; the [`WidthBand`] only collapses panels in place within that
-//! structure. A resize reaches `build` on the next frames without a probe:
-//! the frame driver rebuilds on every frame it runs
-//! (`../frust/crates/frust-shell-ios/src/app/frame.rs:348`) and a resize
-//! reopens the frame gate's three-frame warmup window
-//! (`../frust/crates/frust-shell-common/src/frame_gate.rs:82`, `:483`).
-//! Thresholds: `docs/tablet.html` (size-class table) and the Material 3
-//! compact/medium window-size-class boundary at 600.
+//! The size-class rule every screen reads at the top of `build`. Structure follows the window's
+//! shortest side, so rotation never flips it and an iPad Split View half reads as a phone; the
+//! [`WidthBand`] only collapses panels within that structure.
 
-/// Material 3 compact/medium window-size-class boundary
-/// (<https://m3.material.io/foundations/layout/applying-layout/window-size-classes>).
+/// Material 3 compact/medium window-size-class boundary.
 pub const WIDE_BREAKPOINT_PX: f64 = 600.0;
 
-/// Shortest side at or above which a window is [`SizeClass::Tablet`]
-/// (Material 3's compact/medium boundary, as in `docs/tablet.html`).
+/// Material 3's compact/medium boundary, as in `docs/tablet.html`.
 pub const TABLET_MIN_SHORT_SIDE_PX: f64 = 600.0;
 
-/// Width at or above which a Tablet window is [`WidthBand::Full`]
-/// (`docs/tablet.html`'s 840 band).
+/// `docs/tablet.html`'s 840 band.
 pub const FULL_BAND_MIN_WIDTH_PX: f64 = 840.0;
 
-/// Structural class from the window's shortest side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SizeClass {
-    /// Compact layout: `min(width, height) < 600.0`.
     Compact,
-    /// Tablet layout: `min(width, height) >= 600.0`.
     Tablet,
 }
 
-/// Width band within the Tablet structure: whether panels sit side by side
-/// or collapse in place. Always `Collapsed` on Compact.
+/// Always `Collapsed` on Compact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WidthBand {
-    /// Panels are constrained or collapsed: `width < 840.0`.
     Collapsed,
-    /// Panels spread to full width: `width >= 840.0`.
     Full,
 }
 
-/// The rule a screen reads once per build from [`frust::WindowMetrics`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Responsive {
-    /// Size class from the shortest side of the window.
     pub class: SizeClass,
-    /// Width band for secondary panels.
     pub band: WidthBand,
-    /// Today's clamp tier (`width >= WIDE_BREAKPOINT_PX`), kept for phone landscape.
+    /// Kept for phone landscape.
     pub wide_clamp: bool,
 }
 
 impl Responsive {
-    /// The rule for `metrics`; `None` (no shell, headless tests) is
-    /// Compact / Collapsed / no clamp, the narrow branch every screen has today.
+    /// `None` (no shell, headless tests) is Compact / Collapsed / no clamp.
     pub fn of(metrics: Option<frust::WindowMetrics>) -> Responsive {
         match metrics {
             Some(m) => {
@@ -88,12 +66,11 @@ impl Responsive {
         }
     }
 
-    /// `class == Tablet`.
     pub fn is_tablet(self) -> bool {
         self.class == SizeClass::Tablet
     }
 
-    /// `band == Full` (implies Tablet).
+    /// Implies Tablet.
     pub fn is_full(self) -> bool {
         self.band == WidthBand::Full
     }

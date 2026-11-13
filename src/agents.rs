@@ -1,31 +1,21 @@
-//! The app-level agent vocabulary: what an AI agent running in a pane is
-//! doing, and the per-session / per-tab roll-up of many of them.
-//!
-//! Plain data, framework-free, so a feature's `domain` layer may import it the
-//! way it imports [`crate::connection`]: sessions and terminal both speak this
-//! one vocabulary and neither imports the other. Presentation (colours,
-//! glyphs, tiles, pills) lives in `ui::agent_marks`.
+//! The app-level agent vocabulary: per-pane agent status and its session/tab roll-up.
+//! Framework-free so sessions and terminal share it without importing each other.
 
 use crate::net::proto;
 
-/// What one agent is doing. Ordered for display by [`Self::priority`], not by
-/// declaration.
+/// Display order follows [`Self::priority`], not declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AgentStatus {
     Idle,
     Working,
-    /// Waiting on the user: "needs you".
     Blocked,
-    /// Finished and not yet looked at.
     Done,
-    /// The backend could not classify it (also what an unspecified wire value
-    /// reads as).
+    /// Also what an unspecified wire value reads as.
     Unknown,
 }
 
 impl AgentStatus {
-    /// Display priority: Blocked 4 > Done 3 > Working 2 > Idle 1 > Unknown 0
-    /// (herdr's order).
+    /// herdr's display order.
     pub fn priority(self) -> u8 {
         match self {
             AgentStatus::Blocked => 4,
@@ -46,8 +36,6 @@ impl AgentStatus {
         }
     }
 
-    /// Map the wire enum's raw value; unspecified or out-of-range reads as
-    /// [`AgentStatus::Unknown`].
     pub fn from_wire(value: i32) -> AgentStatus {
         match proto::AgentStatus::try_from(value) {
             Ok(proto::AgentStatus::Idle) => AgentStatus::Idle,
@@ -61,8 +49,6 @@ impl AgentStatus {
     }
 }
 
-/// The roll-up of a session's or tab's agents: a count per status and the
-/// distinct kinds in priority order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AgentSummary {
     pub total: u32,
@@ -71,7 +57,7 @@ pub struct AgentSummary {
     pub working: u32,
     pub idle: u32,
     pub unknown: u32,
-    /// Distinct agent kinds (CLI labels), most urgent first.
+    /// CLI labels, most urgent first.
     pub kinds: Vec<String>,
 }
 
@@ -96,8 +82,7 @@ impl AgentSummary {
         }
     }
 
-    /// Roll up `(status, kind)` pairs. Kinds are distinct and ordered by the
-    /// highest-priority agent carrying them (ties keep first-seen order).
+    /// Kinds are distinct, ordered by their highest-priority agent.
     pub fn from_statuses<'a>(agents: impl Iterator<Item = (AgentStatus, &'a str)>) -> AgentSummary {
         let mut summary = AgentSummary::default();
         let mut kinds: Vec<(u8, &str)> = Vec::new();
@@ -125,9 +110,7 @@ impl AgentSummary {
     }
 }
 
-/// The desktop preview's agent inventory as `(status, kind)` marks — the one
-/// list both mocks derive from: the terminal mock places these on panes and
-/// the sessions mock rolls them up with [`AgentSummary::from_statuses`].
+/// The desktop preview's agent inventory, shared by the terminal and sessions mocks.
 #[doc(hidden)]
 pub const PREVIEW_AGENT_MARKS: [(AgentStatus, &str); 4] = [
     (AgentStatus::Blocked, "claude"),
@@ -136,8 +119,7 @@ pub const PREVIEW_AGENT_MARKS: [(AgentStatus, &str); 4] = [
     (AgentStatus::Idle, "claude"),
 ];
 
-/// Ascending sort key for agent rows: most urgent status first, then the most
-/// recent change (highest `change_seq`) first.
+/// Most urgent status first, then the highest `change_seq`.
 pub fn agent_sort_key(status: AgentStatus, change_seq: u64) -> (u8, u64) {
     (u8::MAX - status.priority(), u64::MAX - change_seq)
 }
