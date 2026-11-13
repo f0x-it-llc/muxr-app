@@ -1,6 +1,6 @@
-//! Comment-density ratchet: bounds `src/`/`tests/`'s comment-line share, overall and per file,
-//! so the total only shrinks over time. Tighten these caps whenever a file is deleted or its
-//! comments are trimmed — never raise a cap to make room for new prose.
+//! Comment-density ratchet: bounds the comment-line share of `src/` and `tests/`, overall and per
+//! file, and the length of every module header. A cap is tightened as comments shrink and never
+//! raised to make room for prose.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -164,144 +164,44 @@ fn per_root_totals(counts: &[FileCounts]) -> (RootTotals, RootTotals) {
     (src, tests)
 }
 
-/// `src/`'s overall comment-line share ceiling.
-const SRC_CEILING_PCT: f64 = 22.5;
-/// `tests/`'s overall comment-line share ceiling.
-const TESTS_CEILING_PCT: f64 = 18.0;
+/// `src/`'s overall comment-line share ceiling: the measured share rounded up, plus 0.5.
+const SRC_CEILING_PCT: f64 = 4.8;
+/// `tests/`'s overall comment-line share ceiling: the measured share rounded up, plus 0.5.
+const TESTS_CEILING_PCT: f64 = 2.4;
 
-/// The default per-file cap applied to any file at or above [`PER_FILE_MIN_LINES`], absent an
+/// The per-file cap applied to any file at or above [`PER_FILE_MIN_LINES`] absent an
 /// [`ALLOWLIST`] entry.
-const DEFAULT_PER_FILE_CAP_PCT: f64 = 25.0;
-/// Files shorter than this are exempt from the per-file cap — a tiny module-index file is
-/// structurally high-percentage (a two-line body under a real header reads as "mostly comment"
-/// without actually carrying excess prose).
-const PER_FILE_MIN_LINES: usize = 100;
+const DEFAULT_PER_FILE_CAP_PCT: f64 = 10.0;
+/// Files shorter than this are exempt from the per-file cap: a short module index under a real
+/// header reads as mostly comment without carrying excess prose.
+const PER_FILE_MIN_LINES: usize = 50;
 
-/// One allowlisted file: a per-file cap tighter than [`DEFAULT_PER_FILE_CAP_PCT`] would allow,
-/// with the justification for why its current share is legitimate rather than residue to trim.
+/// The longest leading `//!` run a module header may have.
+const MODULE_HEADER_MAX_LINES: usize = 3;
+
+/// A file allowed above [`DEFAULT_PER_FILE_CAP_PCT`], with the reason its share is legitimate.
 struct AllowlistEntry {
     path: &'static str,
     cap_pct: f64,
     reason: &'static str,
 }
 
-/// Files whose measured comment share exceeds [`DEFAULT_PER_FILE_CAP_PCT`], each capped at its
-/// own measured share (rounded up to one decimal, plus 0.5 point of headroom) rather than
-/// exempted outright — the cap still ratchets down if the file shrinks or its comments do.
+/// Files whose measured share exceeds [`DEFAULT_PER_FILE_CAP_PCT`], each capped at that share
+/// rounded up to one decimal, so the cap still ratchets down as the file's comments shrink.
 const ALLOWLIST: &[AllowlistEntry] = &[
     AllowlistEntry {
-        path: "src/routes.rs",
-        cap_pct: 38.6,
-        reason: "contract-heavy nav adapter; shell/observer derivation",
+        path: "src/features/connect/domain/repositories.rs",
+        cap_pct: 38.3,
+        reason: "the credential port's contract lives here: each method states how many \
+                 biometric gates it runs and what it leaves behind on failure, which both \
+                 implementations and their tests depend on",
     },
     AllowlistEntry {
-        path: "src/features/connect/presentation/widgets/mod.rs",
-        cap_pct: 36.4,
-        reason: "contract-heavy: the eight-piece stagger order and the splash parity contract \
-                 live in this header",
-    },
-    AllowlistEntry {
-        path: "src/ui/splash/mod.rs",
-        cap_pct: 35.1,
-        reason: "contract-heavy: the module-index table is load-bearing prose, not decoration",
-    },
-    AllowlistEntry {
-        path: "src/features/terminal/presentation/term/mod.rs",
-        cap_pct: 32.7,
-        reason: "contract-heavy: documents every seam and coalescing rule the submodule owns",
-    },
-    AllowlistEntry {
-        path: "src/features/settings/domain/entities.rs",
-        cap_pct: 32.3,
-        reason: "contract-heavy: documents every closed choice set the settings pickers share",
-    },
-    AllowlistEntry {
-        path: "src/features/sessions/presentation/pages.rs",
-        cap_pct: 30.2,
-        reason: "contract-heavy: documents the back-press/generation-cell contract beside the \
-                 route it guards",
-    },
-    AllowlistEntry {
-        path: "src/ui/splash/sequence.rs",
-        cap_pct: 29.0,
-        reason: "contract-heavy: the master-clock timeline table is load-bearing prose, not \
-                 decoration",
-    },
-    AllowlistEntry {
-        path: "src/features/terminal/domain/repositories.rs",
-        cap_pct: 30.0,
-        reason: "contract-heavy: documents which session/connection each repository method \
-                 binds against",
-    },
-    AllowlistEntry {
-        path: "src/fonts/source.rs",
-        cap_pct: 29.7,
-        reason: "contract-heavy: documents the two-implementation test seam and the fetch-policy \
-                 bounds",
-    },
-    AllowlistEntry {
-        path: "src/features/settings/presentation/scramble.rs",
-        cap_pct: 29.3,
-        reason: "contract-heavy: documents what's transcribed vs. copied from the unreachable \
-                 glyph-catalog example",
-    },
-    AllowlistEntry {
-        path: "src/features/terminal/presentation/term/geometry.rs",
-        cap_pct: 29.3,
-        reason: "contract-heavy: documents the measure-never-assume cell-geometry contract",
-    },
-    AllowlistEntry {
-        path: "src/features/terminal/presentation/pages.rs",
-        cap_pct: 28.1,
-        reason: "contract-heavy: documents where each terminal-screen contract is enforced",
-    },
-    AllowlistEntry {
-        path: "src/features/sessions/presentation/heartbeat.rs",
-        cap_pct: 27.5,
-        reason: "contract-heavy: documents the shared live-resolved cadence with the \
-                 session-list poll",
-    },
-    AllowlistEntry {
-        path: "src/features/terminal/presentation/term/style.rs",
-        cap_pct: 27.4,
-        reason: "contract-heavy: documents the dark-side-always palette resolution rule",
-    },
-    AllowlistEntry {
-        path: "src/features/terminal/presentation/widgets/card.rs",
-        cap_pct: 27.4,
-        reason: "contract-heavy: documents the canonical-token-wins-over-mock-hex rule",
-    },
-    AllowlistEntry {
-        path: "src/features/connect/presentation/pages.rs",
-        cap_pct: 27.3,
-        reason: "contract-heavy: documents the layout function the splash also assembles through",
-    },
-    AllowlistEntry {
-        path: "src/net/error.rs",
-        cap_pct: 27.1,
-        reason: "contract-heavy: documents the deliberate gRPC-status collapse and its known \
-                 lossiness",
-    },
-    AllowlistEntry {
-        path: "src/features/settings/presentation/widgets/rows.rs",
-        cap_pct: 25.8,
-        reason: "contract-heavy: documents the never-an-emoji mark rule and the defect it fixes",
-    },
-    AllowlistEntry {
-        path: "src/ui/backdrop.rs",
-        cap_pct: 26.4,
-        reason: "contract-heavy: documents why no facade widget can paint this fill instead",
-    },
-    AllowlistEntry {
-        path: "src/features/connect/presentation/widgets/credential_dialogs.rs",
-        cap_pct: 26.2,
-        reason: "contract-heavy: documents the no-verification confirm gate's ordering contract",
-    },
-    AllowlistEntry {
-        path: "src/features/terminal/presentation/term/input/utf16.rs",
-        cap_pct: 25.7,
-        reason: "contract-heavy for its size: short file, header on the UTF-16-at-the-seam \
-                 rounding contract",
+        path: "src/features/terminal/domain/feed.rs",
+        cap_pct: 15.7,
+        reason: "the terminal feed port carries threading and ordering rules a signature cannot \
+                 express: the drain must not block the UI thread and resize is column-major \
+                 while vt100 is row-major",
     },
 ];
 
@@ -365,6 +265,36 @@ fn per_file_comment_share_holds_its_cap() {
     );
 }
 
+/// The length of the `//!` run `contents` opens with.
+fn module_header_len(contents: &str) -> usize {
+    contents
+        .lines()
+        .take_while(|line| line.trim_start().starts_with("//!"))
+        .count()
+}
+
+#[test]
+fn module_headers_stay_short() {
+    let mut failures = Vec::new();
+    for path in scan_source_files() {
+        let contents =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let len = module_header_len(&contents);
+        if len > MODULE_HEADER_MAX_LINES {
+            failures.push(format!(
+                "{}: {len}-line `//!` header exceeds {MODULE_HEADER_MAX_LINES} lines",
+                rel(&path),
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "module header limit violated ({} file(s)):\n{}",
+        failures.len(),
+        failures.join("\n"),
+    );
+}
+
 #[cfg(test)]
 mod scan_behavior {
     use super::*;
@@ -383,10 +313,21 @@ mod scan_behavior {
     #[test]
     fn allowlisted_cap_looks_up_by_exact_relative_path() {
         assert_eq!(
-            allowlisted_cap("src/routes.rs").map(|e| e.cap_pct),
-            Some(38.6)
+            allowlisted_cap("src/features/terminal/domain/feed.rs").map(|e| e.cap_pct),
+            Some(15.7)
         );
+        assert!(allowlisted_cap("src/routes.rs").is_none());
         assert!(allowlisted_cap("src/lib.rs").is_none());
+    }
+
+    #[test]
+    fn module_header_len_counts_only_the_leading_run() {
+        assert_eq!(
+            module_header_len("//! one\n//! two\n\nfn f() {}\n//! late\n"),
+            2
+        );
+        assert_eq!(module_header_len("use std::fs;\n//! not leading\n"), 0);
+        assert_eq!(module_header_len(""), 0);
     }
 
     #[test]
