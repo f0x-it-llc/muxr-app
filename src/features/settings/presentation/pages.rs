@@ -49,7 +49,6 @@ use crate::failure::AppFailure;
 use crate::features::connect::di::{
     KeyringHandle, expect_credential_service, expect_keyring, expect_saved_servers,
 };
-use crate::features::connect::presentation::widgets::credential_dialogs::unverified_confirm_prompt;
 use crate::features::pro::di::expect_pro_controller;
 use crate::features::pro::domain::entities::ServerLimitVerdict;
 use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
@@ -814,7 +813,6 @@ impl Actions {
         let mark = nav.mark_top();
         self.controller.switch_server(
             endpoint.to_string(),
-            unverified_confirm_prompt(&self.overlays),
             // Settings is only ever pushed from Sessions, so a pop is the way
             // back to it.
             Box::new(move || nav.pop_marked(&mark)),

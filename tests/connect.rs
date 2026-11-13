@@ -3275,7 +3275,7 @@ fn mount_with_gated_row(trust_mode: TrustMode) -> Harness {
 }
 
 #[test]
-fn a_no_verification_saved_row_gates_behind_a_confirmation_before_any_unlock() {
+fn a_no_verification_saved_row_tap_unlocks_and_connects_with_no_confirm() {
     let _g = serial();
     let _ambient = setup();
     let mut harness = mount_with_gated_row(TrustMode::NoVerification);
@@ -3285,74 +3285,11 @@ fn a_no_verification_saved_row_gates_behind_a_confirmation_before_any_unlock() {
     harness.tap_node("the no-verification saved row", |node| {
         node.value() == Some(CRED_ENDPOINT)
     });
-
     assert_eq!(
         harness.nav.depth(),
-        before + 1,
-        "the confirm dialog is pushed as its own page, ahead of any unlock"
+        before,
+        "no confirm dialog is pushed: choosing trust-anyway when saving was the consent"
     );
-    assert_eq!(
-        credentials.prompts().len(),
-        0,
-        "the biometric prompt must not fire until the dialog is confirmed"
-    );
-    assert!(
-        !expect_connection_controller().connected.get_untracked(),
-        "nothing has connected yet"
-    );
-}
-
-#[test]
-fn canceling_the_no_verification_gate_fires_no_prompt_and_leaves_the_form_untouched() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut harness = mount_with_gated_row(TrustMode::NoVerification);
-    let credentials = mock_credentials().expect("the mock service is published");
-    let before = harness.nav.depth();
-
-    harness.tap_node("the no-verification saved row", |node| {
-        node.value() == Some(CRED_ENDPOINT)
-    });
-    // A scrim tap is `confirm_dialog`'s cancel route: it pops with an empty
-    // result, which reads as "cancelled" (see `ui::dialogs`' module docs), so
-    // `ConnectController::recover_and_connect` is never called at all.
-    harness.tap(SCRIM_POINT);
-    harness.settle();
-
-    assert_eq!(harness.nav.depth(), before, "the dialog closed");
-    assert_eq!(
-        credentials.prompts().len(),
-        0,
-        "a canceled gate must never raise the biometric prompt — the whole \
-         point of gating before the unlock rather than after it"
-    );
-    assert!(
-        !expect_connection_controller().connected.get_untracked(),
-        "nothing connected"
-    );
-    assert_eq!(
-        harness.field_values().first().map(String::as_str),
-        Some(""),
-        "cancel backs out silently: the manual form is untouched, not prefilled"
-    );
-}
-
-#[test]
-fn confirming_the_no_verification_gate_unlocks_and_connects() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut harness = mount_with_gated_row(TrustMode::NoVerification);
-    let credentials = mock_credentials().expect("the mock service is published");
-    let before = harness.nav.depth();
-
-    harness.tap_node("the no-verification saved row", |node| {
-        node.value() == Some(CRED_ENDPOINT)
-    });
-    assert_eq!(harness.nav.depth(), before + 1, "the confirm dialog opened");
-
-    harness.tap_node("the dialog's confirm action", |node| {
-        node.role() == Role::Button && node.label() == Some("Connect anyway")
-    });
     pump_until_done("the recovered connect", || {
         expect_connection_controller().connected.get_untracked()
     });
@@ -3361,8 +3298,7 @@ fn confirming_the_no_verification_gate_unlocks_and_connects() {
     assert_eq!(
         credentials.prompts().len(),
         1,
-        "confirming raised exactly one biometric prompt — the same mock \
-         semantics as an ungated row"
+        "exactly one biometric prompt, the same as any other saved row"
     );
     assert!(harness.nav.depth() > before, "…and landed on /sessions");
 }
@@ -5216,10 +5152,8 @@ fn an_unresolvable_stack_no_longer_splits_digits_per_cluster() {
     // device defect. The workaround is kept until it is re-measured on the
     // device that showed the defect. If this fails again, parley's fallback has
     // regressed and the workaround is load-bearing once more.
-    let broken = TextStyle {
-        family: FontFamily::Named(vec!["No Such Family 1234".to_string()]),
-        ..field_style()
-    };
+    let broken =
+        field_style().with_family(FontFamily::Named(vec!["No Such Family 1234".to_string()]));
     let em = f64::from(broken.size);
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &broken, |c| c.is_ascii_digit());
     assert_eq!(
@@ -5236,13 +5170,10 @@ fn an_unresolvable_stack_no_longer_splits_digits_per_cluster() {
     );
 
     // …and the fix is one appended, resolvable generic, nothing more.
-    let rescued = TextStyle {
-        family: FontFamily::NamedWithGeneric(vec![
-            FamilyName::Named("No Such Family 1234".to_string()),
-            FamilyName::Generic(GenericSlot::SansSerif),
-        ]),
-        ..field_style()
-    };
+    let rescued = field_style().with_family(FontFamily::NamedWithGeneric(vec![
+        FamilyName::Named("No Such Family 1234".to_string()),
+        FamilyName::Generic(GenericSlot::SansSerif),
+    ]));
     let digits = advances_where(SERVER_URL_PLACEHOLDER, &rescued, |c| c.is_ascii_digit());
     assert_eq!(
         digits.len(),
@@ -5267,7 +5198,6 @@ const DOCK_TOKEN_B: &str = "dock-s3cr3t-b";
 /// The dock's face and its prompt's reason, for two rows — transcribed.
 const UNLOCK_TWO: &str = "Unlock 2 servers";
 const UNVERIFIED_TITLE: &str = "Connect without verification?";
-const UNVERIFIED_CONFIRM: &str = "Connect anyway";
 const TRY_AGAIN: &str = "Try again";
 const RESET_ACTION: &str = "Reset saved credentials";
 const RESET_TITLE: &str = "Reset saved credentials?";
@@ -5359,13 +5289,11 @@ fn keyring_fixture(rows: Vec<SavedServer>, keyring: &KeyringHandle) -> Creds {
     }
 }
 
-/// The dock's press at controller level, with no confirm expected.
+/// The dock's press at controller level.
 fn unlock_through_the_dock(creds: &Creds) {
-    creds.controller.unlock_keyring_and_connect(
-        &app_nav(),
-        ungated(),
-        Rc::new(|_server, _dial| panic!("no row here needs the no-verification confirm")),
-    );
+    creds
+        .controller
+        .unlock_keyring_and_connect(&app_nav(), ungated());
 }
 
 #[test]
@@ -5492,7 +5420,7 @@ fn a_canceled_dock_unlock_is_silent_and_leaves_the_dock_idle() {
 }
 
 #[test]
-fn a_no_verification_target_asks_once_after_the_unlock_and_dials_on_confirm() {
+fn a_no_verification_target_connects_after_the_unlock_with_no_confirm() {
     let _g = serial();
     let _ambient = setup();
     let _bio = Biometrics::available();
@@ -5503,18 +5431,16 @@ fn a_no_verification_target_asks_once_after_the_unlock_and_dials_on_confirm() {
     );
 
     harness.tap_node("the dock", button_labelled(UNLOCK_TWO));
-    harness.pump_until("the confirm", |harness| {
-        shows_text(harness, UNVERIFIED_TITLE)
-    });
-    assert_eq!(dock_credentials().prompts().len(), 1);
-    assert!(!connected(), "nothing dials before the confirm");
+    harness.pump_until("the connect", |_| connected());
 
-    harness.tap_node("the confirm", button_labelled(UNVERIFIED_CONFIRM));
-    harness.pump_until("the confirmed connect", |_| connected());
+    assert!(
+        !shows_text(&harness, UNVERIFIED_TITLE),
+        "no confirm was raised"
+    );
     assert_eq!(
         dock_credentials().prompts().len(),
         1,
-        "asked once, prompted once"
+        "one unlock prompt, nothing else"
     );
 }
 
@@ -6516,6 +6442,99 @@ fn an_add_mode_connect_moves_the_live_connection_and_records_the_new_row() {
         controller.token.get_untracked().as_str(),
         "",
         "…and scrubbed the token"
+    );
+}
+
+/// The mock host's saved row (the add-mode fixture's live server), with or
+/// without a stored credential.
+fn live_row(has_credential: bool) -> SavedServer {
+    SavedServer {
+        host: "mock.example".to_string(),
+        port: 7777,
+        trust_mode: TrustMode::NoVerification,
+        label: "Mock rig".to_string(),
+        last_used_ms: epoch_millis(),
+        read_only: true,
+        has_credential,
+        token_name: None,
+        fingerprint: None,
+    }
+}
+
+fn add_mode_connect_away(creds: &Creds) {
+    creds.controller.set_url(ADDED_ENDPOINT.to_string());
+    creds.controller.set_token("added-token".to_string());
+    creds.controller.toggle_remember();
+    creds.controller.connect(
+        &app_nav(),
+        Rc::new(|_offer| panic!("remember is off: nothing to offer")),
+        ungated(),
+    );
+}
+
+fn saved_endpoints(creds: &Creds) -> Vec<String> {
+    creds
+        .servers
+        .list()
+        .expect("the mock store never fails")
+        .iter()
+        .map(SavedServer::endpoint)
+        .collect()
+}
+
+#[test]
+fn an_add_mode_connect_away_from_a_credentialless_server_forgets_its_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = add_mode_fixture();
+    creds.servers.save(live_row(false)).expect("mock store");
+
+    add_mode_connect_away(&creds);
+
+    let saved = saved_endpoints(&creds);
+    assert!(
+        !saved.iter().any(|e| e == "mock.example:7777"),
+        "the credential-less row is gone: {saved:?}"
+    );
+    assert!(
+        saved.iter().any(|e| e == ADDED_ENDPOINT),
+        "the new row stays"
+    );
+}
+
+#[test]
+fn an_add_mode_connect_away_from_a_credentialed_server_keeps_its_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = add_mode_fixture();
+    creds.servers.save(live_row(true)).expect("mock store");
+
+    add_mode_connect_away(&creds);
+
+    assert!(
+        saved_endpoints(&creds)
+            .iter()
+            .any(|e| e == "mock.example:7777"),
+        "a row holding a credential is kept"
+    );
+}
+
+#[test]
+fn a_failed_add_mode_connect_keeps_the_credentialless_row_it_was_leaving() {
+    let _g = serial();
+    let _ambient = setup();
+    let creds = add_mode_fixture();
+    creds.servers.save(live_row(false)).expect("mock store");
+    muxr::connection::fail_next_mock_dials_for_tests(1);
+
+    add_mode_connect_away(&creds);
+    muxr::connection::fail_next_mock_dials_for_tests(0);
+
+    assert!(
+        saved_endpoints(&creds)
+            .iter()
+            .any(|e| e == "mock.example:7777"),
+        "a failed switch forgets nothing"
     );
 }
 

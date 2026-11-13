@@ -17,7 +17,8 @@
 //!
 //! **Failure mapping**: every `tonic::Status` crosses
 //! [`crate::net::error::from_status`]; `UNAUTHENTICATED` also fires
-//! `ConnectionController::on_session_expired` (idempotent). `RevokeToken`'s
+//! `ConnectionController::on_session_expired_for` with the client the call
+//! used (idempotent, and fenced to the live client). `RevokeToken`'s
 //! `ActionAck` maps through [`crate::net::error::ack_result`] instead — a
 //! refused revoke is a successful RPC carrying a refusal, not a transport
 //! error.
@@ -41,8 +42,8 @@ use crate::features::settings::domain::entities::{
     AuthToken, CreateTokenRequest, MintedToken, TokenScope,
 };
 use crate::features::settings::domain::repositories::AuthTokensRepository;
-use crate::net::error;
 use crate::net::proto::{CreateTokenReq, Empty, RevokeTokenReq, TokenInfo};
+use crate::net::{MuxrClient, error};
 
 /// [`GrpcAuthTokensRepository::client`]'s failure detail when disconnected —
 /// retryable, since `/settings` is reachable while disconnected.
@@ -61,7 +62,7 @@ impl GrpcAuthTokensRepository {
     }
 
     /// The live client, or [`NOT_CONNECTED`] when nothing is connected.
-    fn client(&self) -> Result<crate::net::MuxrClient, AppFailure> {
+    fn client(&self) -> Result<MuxrClient, AppFailure> {
         self.connection
             .client()
             .ok_or_else(|| AppFailure::Network(NOT_CONNECTED.to_string()))
@@ -69,11 +70,15 @@ impl GrpcAuthTokensRepository {
 }
 
 /// Maps a gRPC status via [`error::from_status`], firing the session-expired
-/// hook on `UNAUTHENTICATED`.
-fn map_status(controller: &ConnectionController, status: &tonic::Status) -> AppFailure {
+/// hook for `client` — the one the failing call used — on `UNAUTHENTICATED`.
+fn map_status(
+    controller: &ConnectionController,
+    client: &MuxrClient,
+    status: &tonic::Status,
+) -> AppFailure {
     let failure = error::from_status(status);
     if matches!(failure, AppFailure::Auth(_)) {
-        controller.on_session_expired();
+        controller.on_session_expired_for(client);
     }
     failure
 }
@@ -117,7 +122,7 @@ impl AuthTokensRepository for GrpcAuthTokensRepository {
             .authed()
             .list_tokens(Empty {})
             .await
-            .map_err(|status| map_status(&self.connection, &status))?
+            .map_err(|status| map_status(&self.connection, &client, &status))?
             .into_inner();
         Ok(list.tokens.iter().map(auth_token_from_wire).collect())
     }
@@ -131,7 +136,7 @@ impl AuthTokensRepository for GrpcAuthTokensRepository {
                 read_only: request.read_only,
             })
             .await
-            .map_err(|status| map_status(&self.connection, &status))?
+            .map_err(|status| map_status(&self.connection, &client, &status))?
             .into_inner();
         // Lift the secret into `Zeroizing`, leaving the wire response
         // emptied — the same `mem::take` hygiene `connection.rs`'s `Login`
@@ -146,7 +151,7 @@ impl AuthTokensRepository for GrpcAuthTokensRepository {
             .authed()
             .revoke_token(RevokeTokenReq { name })
             .await
-            .map_err(|status| map_status(&self.connection, &status))?
+            .map_err(|status| map_status(&self.connection, &client, &status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -157,24 +162,15 @@ mod tests {
     use frust::GetUntracked;
 
     use super::*;
-    use crate::connection::{ConnectTarget, TrustMode};
+    use crate::net::testing::MuxrdFixture;
 
-    /// A mock-backed, unpublished controller — `ConnectionController::detached`
-    /// is `#[cfg(test)]`-only, reachable here since `cargo test` compiles this
-    /// whole crate under `--cfg test`.
-    fn detached_connected() -> Arc<ConnectionController> {
-        let controller = Arc::new(ConnectionController::detached());
-        controller.connect(ConnectTarget {
-            host: "mock.example".to_string(),
-            port: 7777,
-            trust_mode: TrustMode::NoVerification,
-            label: "mock".to_string(),
-            offer_credential: false,
-            token: Zeroizing::new(String::new()),
-            remember: false,
-            fingerprint: None,
-        });
-        controller
+    /// A fixture client and an unpublished controller reporting it as the live
+    /// client — `with_live_client_for_tests` is `#[cfg(test)]`-only, reachable
+    /// here since `cargo test` compiles this whole crate under `--cfg test`.
+    async fn live_connected(fixture: &MuxrdFixture) -> (Arc<ConnectionController>, MuxrClient) {
+        let client = fixture.connect_pinned().await;
+        let controller = ConnectionController::with_live_client_for_tests(client.clone());
+        (controller, client)
     }
 
     #[test]
@@ -233,12 +229,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_unauthenticated_status_maps_to_auth_and_fires_the_session_expired_hook() {
-        let controller = detached_connected();
+    #[tokio::test]
+    async fn an_unauthenticated_status_maps_to_auth_and_fires_the_session_expired_hook() {
+        let fixture = MuxrdFixture::start().await;
+        let (controller, client) = live_connected(&fixture).await;
         assert!(controller.connected.get_untracked());
 
-        let failure = map_status(&controller, &tonic::Status::unauthenticated("expired"));
+        let failure = map_status(
+            &controller,
+            &client,
+            &tonic::Status::unauthenticated("expired"),
+        );
 
         assert!(matches!(failure, AppFailure::Auth(_)));
         assert!(
@@ -247,11 +248,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_retryable_status_maps_to_network_and_leaves_the_connection_alone() {
-        let controller = detached_connected();
+    #[tokio::test]
+    async fn a_retryable_status_maps_to_network_and_leaves_the_connection_alone() {
+        let fixture = MuxrdFixture::start().await;
+        let (controller, client) = live_connected(&fixture).await;
 
-        let failure = map_status(&controller, &tonic::Status::unavailable("down"));
+        let failure = map_status(&controller, &client, &tonic::Status::unavailable("down"));
 
         assert!(matches!(failure, AppFailure::Network(_)));
         assert!(
@@ -260,13 +262,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_repeated_unauthenticated_status_tears_the_connection_down_exactly_once() {
-        // `on_session_expired`'s own idempotence, exercised through this
+    #[tokio::test]
+    async fn a_repeated_unauthenticated_status_tears_the_connection_down_exactly_once() {
+        // `on_session_expired_for`'s own idempotence, exercised through this
         // module's one caller of it.
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let controller = detached_connected();
+        let fixture = MuxrdFixture::start().await;
+        let (controller, client) = live_connected(&fixture).await;
         let raised = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&raised);
         let _subscription = controller
@@ -277,7 +280,11 @@ mod tests {
             });
 
         for _ in 0..3 {
-            map_status(&controller, &tonic::Status::unauthenticated("expired"));
+            map_status(
+                &controller,
+                &client,
+                &tonic::Status::unauthenticated("expired"),
+            );
         }
 
         assert_eq!(raised.load(Ordering::SeqCst), 1);

@@ -24,7 +24,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
@@ -41,6 +41,9 @@ use crate::AppState;
 use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::di::{KeyringHandle, expect_keyring};
+use crate::features::servers::di::{stage_settled, use_servers_controller};
+use crate::features::servers::domain::entities::PageSnapshot;
+use crate::features::servers::presentation::controller::ServersSwitcherController;
 use crate::features::sessions::di::expect_sessions_repository;
 use crate::features::sessions::domain::entities::{Session, SessionAgent, SessionBackend};
 use crate::features::settings::di::{SharedPreferencesRepository, expect_preferences_repository};
@@ -57,7 +60,7 @@ use crate::ui::spacing;
 use crate::ui::splash::loading::loading_sequence;
 use crate::ui::toasts::app_toasts;
 
-use super::controllers::{POLL_PERIOD_SECS, SessionsController, each_wake};
+use super::controllers::{ConnectionTrouble, POLL_PERIOD_SECS, SessionsController, each_wake};
 use super::heartbeat::{self, HeartbeatState};
 use super::widgets::{self, CardMode, LoadPhase};
 
@@ -97,6 +100,25 @@ const LOADING_RAIN_SEED: u64 = 0x6D75_7872;
 
 /// The list band's loading rain, on by default (see [`set_loading_rain_for_tests`]).
 static LOADING_RAIN: AtomicBool = AtomicBool::new(true);
+
+/// How often a deferred rain arm re-checks that the switcher stage has settled.
+const RAIN_SETTLE_POLL: Duration = Duration::from_millis(50);
+
+/// How many deferred rain arms have fired in this process (a test seam).
+static RAIN_ARMS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of deferred rain arms fired so far; tests compare deltas.
+pub fn deferred_rain_arms_for_tests() -> usize {
+    RAIN_ARMS.load(Ordering::SeqCst)
+}
+
+/// How many builds have carried the rain overlay in this process (a test seam).
+static RAIN_BUILDS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of builds that carried the rain overlay so far; tests compare deltas.
+pub fn rain_overlay_builds_for_tests() -> usize {
+    RAIN_BUILDS.load(Ordering::SeqCst)
+}
 
 /// Opts the process out of the loading rain for its remaining life — every
 /// page-level suite taps under a pinned frame clock an overlay never advances.
@@ -138,6 +160,10 @@ pub struct SessionsState {
     /// The app-scoped connection handle, for the strip, the top bar's title
     /// and the read-only posture that gates this screen's mutations.
     pub connection: Arc<ConnectionController>,
+    /// The server switcher, when the shell provided one: the poll pauses while
+    /// its stage is open (the stage covers this screen without moving a
+    /// navigator, so the depth mark alone cannot see it).
+    switcher: Option<Arc<ServersSwitcherController>>,
     /// The `.conn-row` strip's heartbeat clocks — written by the ping
     /// interval `init` starts, read by every rebuild that renders the strip
     /// (see [`super::heartbeat`]). Screen-internal, unlike the two handles
@@ -162,6 +188,24 @@ pub struct SessionsState {
     /// Sticky: whether this mount has ever seen the connection up. Told apart
     /// from a first connect, which the load `init` already issued serves.
     has_connected: bool,
+    /// The endpoint of the cached snapshot this mount was seeded with and has
+    /// not yet seen land (a connection landing there refreshes in place).
+    seeded: Option<String>,
+    /// The latest [`ReconnectSeed`] generation this mount applied.
+    seeded_gen: u64,
+    /// The snapshot behind [`Self::seeded`]: what the header facts read while
+    /// the connection is down.
+    seeded_page: Option<Arc<PageSnapshot>>,
+    /// Generation of the deferred rain arm: every restart bumps it, so a stale
+    /// arm task finds itself superseded and does nothing.
+    rain_generation: Arc<AtomicU64>,
+    /// Cleared when the screen unmounts, ending any pending arm task.
+    alive: Arc<AtomicBool>,
+    /// Bumped when the close tail ends, so a build resumes the poll the tail
+    /// held paused (nothing else rebuilds at the tail's end).
+    tail_wake: RwSignal<u64>,
+    /// Whether a task is already waiting out a close tail.
+    tail_watch: Arc<AtomicBool>,
 }
 
 /// What a back press on `/sessions` means to this screen: the dismiss cell,
@@ -271,6 +315,63 @@ pub async fn resolve_poll_interval(preferences: &SharedPreferencesRepository) ->
     Duration::from_secs(u64::from(secs))
 }
 
+/// Arms the loading rain once the switcher stage has settled, provided the
+/// restarted first load has not settled by then and no later restart or unmount
+/// superseded this `generation`. Handles are resolved here, not in the task.
+fn spawn_deferred_rain(state: &SessionsState, generation: u64) {
+    let current = Arc::clone(&state.rain_generation);
+    let alive = Arc::clone(&state.alive);
+    let switcher = state.switcher.clone();
+    let first_load_settled = state.actions.controller.first_load_settled;
+    let loading_done = state.loading_done;
+    let fenced =
+        move || !alive.load(Ordering::SeqCst) || current.load(Ordering::SeqCst) != generation;
+    spawn_local(async move {
+        loop {
+            clean_signals::time::sleep(RAIN_SETTLE_POLL).await;
+            if fenced() {
+                return;
+            }
+            let open = switcher.as_ref().is_some_and(|s| s.open.get_untracked());
+            if !open && stage_settled() {
+                break;
+            }
+        }
+        if first_load_settled.get_untracked() {
+            return;
+        }
+        RAIN_ARMS.fetch_add(1, Ordering::SeqCst);
+        loading_done.set(false);
+    });
+}
+
+/// Waits out the stage's close tail, then wakes a rebuild so the poll resumes.
+/// One task at a time; a reopen ends it (the next close spawns another).
+fn spawn_tail_watch(state: &SessionsState) {
+    if state.tail_watch.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let watching = Arc::clone(&state.tail_watch);
+    let alive = Arc::clone(&state.alive);
+    let switcher = state.switcher.clone();
+    let wake = state.tail_wake;
+    spawn_local(async move {
+        loop {
+            clean_signals::time::sleep(RAIN_SETTLE_POLL).await;
+            let reopened = switcher.as_ref().is_some_and(|s| s.open.get_untracked());
+            if !alive.load(Ordering::SeqCst) || reopened {
+                watching.store(false, Ordering::SeqCst);
+                return;
+            }
+            if stage_settled() {
+                watching.store(false, Ordering::SeqCst);
+                wake.set(wake.get_untracked() + 1);
+                return;
+            }
+        }
+    });
+}
+
 /// Starts a self-rescheduling loop running `tick` forever, re-resolving
 /// [`resolve_poll_interval`] before every sleep rather than baking a period
 /// in at mount time — the live-pref read is why this hand-rolls the loop
@@ -329,6 +430,44 @@ fn beat(
     });
 }
 
+/// How many channel rebuilds a failure streak has asked for in this process (a test seam).
+static TROUBLE_RECONNECTS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of channel rebuilds failure streaks asked for so far; tests compare deltas.
+pub fn trouble_reconnects_for_tests() -> usize {
+    TROUBLE_RECONNECTS.load(Ordering::SeqCst)
+}
+
+/// Reports the failure streak's latest edge: trouble rebuilds the channel
+/// (single-flight, the session kept) and goes under the servers controller's
+/// banner; recovery flashes it away. Never tears the connection down. Without a
+/// servers controller (no shell) only the channel rebuild runs.
+fn report_streak(
+    controller: &SessionsController,
+    connection: &Arc<ConnectionController>,
+    servers: Option<&Arc<ServersSwitcherController>>,
+) {
+    let Some(edge) = controller.take_trouble() else {
+        return;
+    };
+    if edge == ConnectionTrouble::Recovered {
+        if let Some(servers) = servers {
+            servers.report_recovered();
+        }
+        return;
+    }
+    TROUBLE_RECONNECTS.fetch_add(1, Ordering::SeqCst);
+    let rebuilding = Arc::clone(connection);
+    spawn_local(async move {
+        if let Err(failure) = rebuilding.reconnect().await {
+            log::debug!("sessions: reconnect on a failure streak failed: {failure:?}");
+        }
+    });
+    if let Some(servers) = servers {
+        servers.report_trouble(edge == ConnectionTrouble::Persistent);
+    }
+}
+
 /// Runs a wake-driven refresh and heartbeat ping for every wake on `wakes`
 /// while the screen is mounted, and ends the loop at unmount. `wakes` is
 /// injected: production passes [`crate::net::wake::subscribe`], tests a
@@ -336,12 +475,15 @@ fn beat(
 /// single-flight paths the poll uses, so a wake never starts a second one in
 /// flight.
 ///
-/// A [`WakeReason::NetworkChanged`] wake first rebuilds the shared client's
+/// Every wake, a [`WakeReason::NetworkChanged`] one and a
+/// [`WakeReason::Foregrounded`] one alike, first rebuilds the shared client's
 /// channel (single-flight with the terminal feed's own), so the refresh and
-/// the ping do not ride a half-open one until keepalive notices; a failed
-/// rebuild is logged and the refresh still runs, whose own error surfacing
-/// then applies. A [`WakeReason::Foregrounded`] wake skips the redial. A wake
-/// while the poll is covered does nothing at all.
+/// the ping do not ride a half-open one (a suspended app's channel is dead on
+/// return) until keepalive notices; a failed rebuild is logged and the refresh
+/// still runs, whose own error handling then applies. A wake while the poll is
+/// covered does nothing more. With nothing connected a wake first redials a
+/// failed background dial's pending reconnect (the servers controller's
+/// `retry_pending`), covered or not.
 ///
 /// Must run where a reactive `Owner` is ambient, as `on_cleanup` no-ops
 /// otherwise.
@@ -351,26 +493,34 @@ fn spawn_wake_loop(
     connection: Arc<ConnectionController>,
     heartbeat: HeartbeatState,
 ) {
+    let servers = use_servers_controller();
     let cancel = Arc::new(Notify::new());
     let stop = Arc::clone(&cancel);
     on_cleanup(move || stop.notify_one());
 
     spawn_local(async move {
-        each_wake(wakes, &cancel, move |reason| {
+        each_wake(wakes, &cancel, move |_reason| {
+            if !connection.connected.get_untracked()
+                && let Some(servers) = &servers
+            {
+                servers.end_trouble();
+                servers.retry_pending();
+            }
             if !controller.is_polling() {
                 return;
             }
             let controller = Arc::clone(&controller);
             let connection = Arc::clone(&connection);
+            let servers = servers.clone();
             spawn_local(async move {
-                if reason == WakeReason::NetworkChanged
-                    && let Err(failure) = connection.reconnect().await
-                {
-                    log::debug!("sessions: reconnect on a network change failed: {failure:?}");
+                if let Err(failure) = connection.reconnect().await {
+                    log::debug!("sessions: reconnect on a wake failed: {failure:?}");
                 }
                 let refresh = Arc::clone(&controller);
+                let reporting = Arc::clone(&connection);
                 spawn_local(async move {
                     refresh.refresh_on_wake().await;
+                    report_streak(&refresh, &reporting, servers.as_ref());
                 });
                 beat(&controller, &connection, heartbeat);
             });
@@ -395,7 +545,7 @@ impl Component for SessionsScreen {
         });
 
         let first_load = Arc::clone(&controller);
-        spawn_local(async move { first_load.refresh().await });
+        spawn_local(async move { first_load.refresh_background().await });
 
         // Resolved synchronously in `init`, never inside a spawned future's
         // body: a future's first poll has no ambient owner, so a
@@ -403,17 +553,32 @@ impl Component for SessionsScreen {
         // crosses into the loops below.
         let preferences = expect_preferences_repository();
 
+        let servers = use_servers_controller();
+        let connection = expect_connection_controller();
+        // A pending reconnect or trouble report is this screen's: it ends with it.
+        if let Some(servers) = servers.clone() {
+            on_cleanup(move || servers.sessions_left());
+        }
+
         // Session-list poll: re-resolves `layout_refresh_secs` live, not
         // just at mount.
         let polling = Arc::clone(&controller);
+        let polled = Arc::clone(&connection);
         spawn_cadence_loop(Arc::clone(&preferences), move || {
             if polling.take_poll_tick() {
                 let handle = Arc::clone(&polling);
-                spawn_local(async move { handle.refresh_from_poll().await });
+                let connection = Arc::clone(&polled);
+                let servers = servers.clone();
+                spawn_local(async move {
+                    handle.refresh_from_poll().await;
+                    report_streak(&handle, &connection, servers.as_ref());
+                });
+            } else if !polled.connected.get_untracked()
+                && let Some(servers) = &servers
+            {
+                servers.end_trouble();
             }
         });
-
-        let connection = expect_connection_controller();
 
         // Connection heartbeat: one real timed `GetVersion`, same cadence as
         // the list poll (the roll `HeartbeatState::settle` animates over is
@@ -440,6 +605,9 @@ impl Component for SessionsScreen {
         let rain = LOADING_RAIN.load(Ordering::Relaxed);
         let connection_epoch = connection.connection_epoch.get_untracked();
         let seen_connected = connection.connected.get_untracked();
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_flag = Arc::clone(&alive);
+        on_cleanup(move || alive_flag.store(false, Ordering::SeqCst));
 
         SessionsState {
             actions: Actions {
@@ -450,13 +618,23 @@ impl Component for SessionsScreen {
                 keyring: expect_keyring(),
             },
             connection,
+            switcher: use_servers_controller(),
             heartbeat,
             back: BackConfirm::new(),
             loading_done: RwSignal::new(!rain),
             loading_snapshot: None,
             rain,
+            seeded: None,
+            seeded_gen: use_servers_controller()
+                .and_then(|switcher| switcher.seed.get_untracked())
+                .map_or(0, |seed| seed.generation),
+            seeded_page: None,
             seen_epoch: connection_epoch,
             has_connected: seen_connected,
+            rain_generation: Arc::new(AtomicU64::new(0)),
+            alive,
+            tail_wake: RwSignal::new(0),
+            tail_watch: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -464,9 +642,44 @@ impl Component for SessionsScreen {
         // Plain atomic, not a signal — see `BackConfirm`'s doc for why.
         let depth = state.actions.stack_depth();
         state.actions.controller.observe_depth(depth);
+        // Tracked, so a close wakes this build and the observe above resumes
+        // the poll; while open, re-mark the pause at the current depth right
+        // after that observe (nothing polls between the two, same thread).
+        // The close tail keeps the pause too: the live page must not change
+        // while the neighbours still paint (`stage_settled`).
+        state.tail_wake.get();
+        if let Some(switcher) = state.switcher.clone() {
+            if switcher.open.get() {
+                state.actions.pause_for_push();
+            } else if !stage_settled() {
+                state.actions.pause_for_push();
+                spawn_tail_watch(state);
+            }
+        }
 
         if state.back.take_request(depth) {
-            state.actions.open_disconnect_confirm(&state.connection);
+            // The route navigator outranks the switcher's `SwitcherBack`
+            // fallback, so a press with the stage up arrives here as this
+            // page's dismiss request: it closes the stage, not the session.
+            match state.switcher.as_ref().filter(|s| s.open.get_untracked()) {
+                Some(switcher) => switcher.close(),
+                None => state.actions.open_disconnect_confirm(&state.connection),
+            }
+        }
+
+        // A cached switch committed: show its snapshot from this very build on
+        // (one write, never an empty list) and stay plain, no rain. The
+        // connection landing there refreshes in place, below.
+        if let Some(seed) = state.switcher.as_ref().and_then(|s| s.seed.get())
+            && seed.generation != state.seeded_gen
+        {
+            state.seeded_gen = seed.generation;
+            state.seeded = Some(seed.endpoint.clone());
+            state.seeded_page = Some(Arc::clone(&seed.page));
+            state.loading_snapshot = None;
+            state.rain_generation.fetch_add(1, Ordering::SeqCst);
+            state.loading_done.set(true);
+            state.actions.controller.seed_from(&seed.page);
         }
 
         // A new connection (the epoch moved while connected) starts this mount
@@ -484,10 +697,32 @@ impl Component for SessionsScreen {
             // issued already serves.
             let switched = state.has_connected || epoch - state.seen_epoch >= 2;
             state.seen_epoch = epoch;
-            if connected && switched {
+            let landed = state
+                .connection
+                .server_info
+                .get_untracked()
+                .map(|info| info.endpoint);
+            if connected && switched && landed.is_some() && state.seeded == landed {
+                // The endpoint this mount was seeded for: refresh in place.
+                state.seeded = None;
+                state.seeded_page = None;
+                state.actions.controller.refresh_in_place();
+            } else if connected && switched {
+                state.seeded = None;
+                state.seeded_page = None;
                 state.loading_snapshot = None;
-                state.loading_done.set(!state.rain);
-                state.actions.controller.restart();
+                let generation = state.rain_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                if state.rain && !stage_settled() {
+                    // The switcher stage is still animating: the rain's
+                    // offscreen layers must not nest inside it. Stay plain and
+                    // arm the rain once the stage settles.
+                    state.loading_done.set(true);
+                    state.actions.controller.restart();
+                    spawn_deferred_rain(state, generation);
+                } else {
+                    state.loading_done.set(!state.rain);
+                    state.actions.controller.restart();
+                }
             }
         }
         state.has_connected |= connected;
@@ -498,10 +733,22 @@ impl Component for SessionsScreen {
         let loaded = state.actions.controller.loaded.get();
         let settled = state.actions.controller.first_load_settled.get();
         let loading_done = state.loading_done.get();
-        let info = state.connection.server_info.get();
+        let live_info = state.connection.server_info.get();
+        let live_read_only = state.connection.is_read_only.get();
+        // A seeded page with no connection behind it keeps showing the
+        // snapshot's header facts through the disconnect and the dial, and
+        // every action that needs the server is off.
+        let offline = state.seeded.is_some() && !state.connection.connected.get_untracked();
+        state.actions.controller.set_offline(offline);
+        let seeded_page = state.seeded_page.clone().filter(|_| offline);
+        let info = match &seeded_page {
+            Some(page) if live_info.is_none() => page.info.clone(),
+            _ => live_info,
+        };
+        let strip_read_only = seeded_page.as_ref().map_or(live_read_only, |p| p.read_only);
         // Gates create/rename/kill (never attach) — see
         // `widgets::new_session_row`'s doc for the disabled-state pattern.
-        let read_only = state.connection.is_read_only.get();
+        let read_only = live_read_only || offline;
 
         let theme = widgets::active_theme();
         let colors = Palette::from_theme(&theme);
@@ -550,6 +797,7 @@ impl Component for SessionsScreen {
         // Some→None tears the pod under it down (`shell::root_view`'s rule).
         let mut children = vec![any(live_scroller)]; // erasure: keep accumulator into Vec<AnyView>
         if !loading_done {
+            RAIN_BUILDS.fetch_add(1, Ordering::SeqCst);
             let (overlay_pieces, stale) = if settled {
                 let frozen = state
                     .loading_snapshot
@@ -581,7 +829,7 @@ impl Component for SessionsScreen {
                 state.loading_done,
             ));
         }
-        let strip = widgets::server_strip(info.as_ref(), beat, read_only, &colors);
+        let strip = widgets::server_strip(info.as_ref(), beat, strip_read_only, &colors);
         let list = Stack(children);
         let mut bands = match layout {
             ListLayout::Compact { .. } => vec![inflexible(strip), flexible(1, list)],
@@ -748,6 +996,9 @@ impl Actions {
     /// a query param. A card tap and the management sheet's own Attach row
     /// both land here.
     pub fn attach(&self, id: &str) {
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         self.app_nav.push(&terminal_location(id, None));
     }
@@ -756,6 +1007,9 @@ impl Actions {
     /// The terminal honours that target once Phase 4's attach-into-pane card
     /// lands; until then it attaches at the session's server focus.
     pub fn attach_pane(&self, id: &str, tab: u32, pane: u32) {
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         self.app_nav.push(&terminal_location(id, Some((tab, pane))));
     }
@@ -767,6 +1021,9 @@ impl Actions {
         let Some(location) = terminal_location_for_agent(id, agent) else {
             return;
         };
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         self.app_nav.push(&location);
     }
@@ -774,6 +1031,9 @@ impl Actions {
     /// Open the create-session dialog (the dashed row and the empty state's
     /// action both land here).
     pub fn open_create_dialog(&self, connection: &Arc<ConnectionController>) {
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
         let available = connection
@@ -795,6 +1055,9 @@ impl Actions {
     /// name — re-read from the controller rather than captured, so a sheet
     /// opened several frames ago can't seed a stale name.
     pub fn open_rename_dialog(&self, id: &str) {
+        if self.controller.is_offline() {
+            return;
+        }
         let Some(session) = self.controller.session(id) else {
             // List moved since paint (a poll landed between paint and tap)
             // — nothing to rename.
@@ -817,6 +1080,9 @@ impl Actions {
 
     /// Open the kill confirmation for `id`.
     pub fn open_kill_dialog(&self, id: &str) {
+        if self.controller.is_offline() {
+            return;
+        }
         self.pause_for_push();
         let controller = Arc::clone(&self.controller);
         let id = id.to_string();
@@ -873,6 +1139,9 @@ impl Actions {
     /// carries no buttons. `read_only` disables the Rename/Kill rows, never
     /// Attach — see [`widgets::sheet_body`] for the sheet's own layout.
     pub fn open_manage_sheet(&self, id: &str, read_only: bool) {
+        if self.controller.is_offline() {
+            return;
+        }
         let Some(session) = self.controller.session(id) else {
             return;
         };
@@ -1285,16 +1554,27 @@ mod tests {
     }
 
     #[test]
-    fn a_foregrounded_wake_refreshes_and_pings_without_a_redial() {
+    fn a_foregrounded_wake_redials_then_refreshes_once_and_pings_once() {
         let rig = WakeRig::mount();
 
         rig.bus.publish(WakeReason::Foregrounded);
         rig.pump();
 
         let events = noted(&rig.events);
-        assert!(!events.contains(&"reconnect"), "{events:?}");
-        assert!(
-            events.contains(&"refresh") && events.contains(&"ping"),
+        assert_eq!(events.first(), Some(&"reconnect"), "{events:?}");
+        assert_eq!(
+            events.iter().filter(|e| **e == "reconnect").count(),
+            1,
+            "{events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|e| **e == "refresh").count(),
+            1,
+            "{events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|e| **e == "ping").count(),
+            1,
             "{events:?}"
         );
     }

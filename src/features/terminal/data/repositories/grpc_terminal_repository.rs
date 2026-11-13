@@ -18,8 +18,9 @@
 //! **Tab keys are derived, not carried**, and uniqueness is load-bearing —
 //! [`map_tabs`] and [`crate::net::agent_layouts::unique_tab_key`] state that contract. Failure mapping funnels through
 //! [`crate::net::error::from_status`], with `UNAUTHENTICATED` additionally invoking
-//! [`ConnectionController::on_session_expired`]; every `ActionAck`-returning call maps through
-//! [`crate::net::error::ack_result`] rather than trusting the outer `Status`.
+//! [`ConnectionController::on_session_expired_for`] with the client the call used; every
+//! `ActionAck`-returning call maps through [`crate::net::error::ack_result`] rather than
+//! trusting the outer `Status`.
 //!
 //! **The agents stream.** `watch_agents` runs `WatchAgents` on a background [`frust::spawn`]
 //! task that writes no signal: events reach the caller's sink, a transport failure reconnects on
@@ -160,10 +161,10 @@ impl GrpcTerminalRepository {
     /// Map a gRPC status through [`crate::net::error::from_status`], and — for
     /// `UNAUTHENTICATED` specifically — additionally invoke the shared
     /// session-expired hook.
-    fn map_status(&self, status: Status) -> AppFailure {
+    fn map_status(&self, client: &MuxrClient, status: Status) -> AppFailure {
         let failure = error::from_status(&status);
         if matches!(failure, AppFailure::Auth(_)) {
-            self.connection.on_session_expired();
+            self.connection.on_session_expired_for(client);
         }
         failure
     }
@@ -543,7 +544,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .get_spaces(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         Ok(map_spaces(response))
     }
@@ -557,7 +558,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .get_layout(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         Ok(map_tabs(response))
     }
@@ -572,7 +573,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .get_layout(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         Ok(map_tabs(response))
     }
@@ -586,7 +587,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .list_agents(request.clone())
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         // `AgentMsg` carries a tab id and a tab *name*, but `TabEntry::key` is derived from the
         // tab's name and position within its space's layout, so the key needs that layout: one
@@ -595,7 +596,7 @@ impl TerminalRepository for GrpcTerminalRepository {
         // failure is reported once rather than failing the inventory.
         let layouts = fetch_agent_layouts(&client, &request, agent_spaces(&list.agents)).await;
         if let Some(first) = layouts.failed.first() {
-            let failure = self.map_status(first.status.clone());
+            let failure = self.map_status(&client, first.status.clone());
             log::warn!(
                 "list_agents: {} space layout(s) unread, rows keep their last tab key: {failure}",
                 layouts.failed.len()
@@ -633,7 +634,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .switch_space(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -650,7 +651,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .go_to_tab(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -672,7 +673,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .create_space(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -685,7 +686,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .rename_space(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -700,7 +701,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .new_tab(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -713,7 +714,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .rename_tab(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -726,7 +727,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .new_pane(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -744,7 +745,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .rename_pane(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -757,7 +758,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .focus_pane(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -782,7 +783,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .toggle_pane_fullscreen(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -800,7 +801,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .authed()
             .scroll_pane(request)
             .await
-            .map_err(|status| self.map_status(status))?
+            .map_err(|status| self.map_status(&client, status))?
             .into_inner();
         error::ack_result(&ack)
     }
@@ -1133,23 +1134,6 @@ mod tests {
             fullscreen_active: false,
             floating_panes_visible: false,
         }
-    }
-
-    /// A connected mock-backed controller — [`ConnectionController::detached`]
-    /// is the same `#[cfg(test)]` seam `crate::connection`'s own tests use.
-    fn connected_controller() -> Arc<ConnectionController> {
-        let connection = Arc::new(ConnectionController::detached());
-        connection.connect(ConnectTarget {
-            host: "mock.example".to_string(),
-            port: 1,
-            trust_mode: TrustMode::NoVerification,
-            label: "Mock".to_string(),
-            offer_credential: false,
-            token: Zeroizing::new(String::new()),
-            remember: false,
-            fingerprint: None,
-        });
-        connection
     }
 
     // -- proto → entity mapping ----------------------------------------------
@@ -2321,13 +2305,15 @@ mod tests {
         assert!(failure.to_string().contains("read-only session"));
     }
 
-    #[test]
-    fn an_unauthenticated_status_logs_the_session_out_through_the_shared_hook() {
-        let connection = connected_controller();
+    #[tokio::test]
+    async fn an_unauthenticated_status_logs_the_session_out_through_the_shared_hook() {
+        let fixture = MuxrdFixture::start().await;
+        let client = fixture.connect_pinned().await;
+        let connection = ConnectionController::with_live_client_for_tests(client.clone());
         assert!(connection.connected.get_untracked());
 
         let repo = GrpcTerminalRepository::new(Arc::clone(&connection));
-        let failure = repo.map_status(Status::unauthenticated("session token expired"));
+        let failure = repo.map_status(&client, Status::unauthenticated("session token expired"));
 
         assert!(matches!(failure, AppFailure::Auth(_)));
         assert!(
@@ -2336,12 +2322,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_non_auth_status_never_touches_the_connection() {
-        let connection = connected_controller();
+    #[tokio::test]
+    async fn an_unauthenticated_status_from_a_replaced_client_leaves_the_connection_alone() {
+        let fixture = MuxrdFixture::start().await;
+        let connection =
+            ConnectionController::with_live_client_for_tests(fixture.connect_pinned().await);
+        let stale = fixture.connect_pinned().await;
+
+        let repo = GrpcTerminalRepository::new(Arc::clone(&connection));
+        let failure = repo.map_status(&stale, Status::unauthenticated("session token expired"));
+
+        assert!(matches!(failure, AppFailure::Auth(_)));
+        assert!(connection.connected.get_untracked());
+    }
+
+    #[tokio::test]
+    async fn a_non_auth_status_never_touches_the_connection() {
+        let fixture = MuxrdFixture::start().await;
+        let client = fixture.connect_pinned().await;
+        let connection = ConnectionController::with_live_client_for_tests(client.clone());
         let repo = GrpcTerminalRepository::new(Arc::clone(&connection));
 
-        let failure = repo.map_status(Status::unavailable("connection refused"));
+        let failure = repo.map_status(&client, Status::unavailable("connection refused"));
 
         assert!(matches!(failure, AppFailure::Network(_)));
         assert!(

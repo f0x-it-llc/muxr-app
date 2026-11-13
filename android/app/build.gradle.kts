@@ -376,6 +376,12 @@ val cargoProfileArgs: List<String> = run {
         else -> listOf("build")
     }
 }
+// Develop-flavor builds unlock every Pro feature (their `.dev` app id can never
+// sell): export `MUXR_FLAVOR=develop` so `option_env!("MUXR_FLAVOR")` sees it.
+val isDevelopFlavor: Boolean = run {
+    val requested = gradle.startParameter.taskNames.joinToString(" ").lowercase()
+    requested.contains("develop") && !requested.contains("production")
+}
 val cargoTargetArgs: List<String> = abis.flatMap { listOf("-t", it) }
 
 // Decode the base64 `--features` CSV (empty → no extra features).
@@ -399,6 +405,12 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
             addAll(cargoFeatureArgs)
         },
     )
+    // Unset (not empty) for production so `option_env!` stays `None`.
+    if (isDevelopFlavor) {
+        environment("MUXR_FLAVOR", "develop")
+    } else {
+        environment.remove("MUXR_FLAVOR")
+    }
     // Thread `--define`s through as env vars so `option_env!("K")` sees them.
     if (definesB64.isNotEmpty()) {
         String(Base64.getDecoder().decode(definesB64))

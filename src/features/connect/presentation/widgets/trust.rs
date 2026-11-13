@@ -227,11 +227,9 @@ fn full_row_press<S: 'static>(
 /// theme's `bodyLarge` family at [`RADIO_LABEL_SIZE`], regular weight —
 /// inked `ink`; never used for the live row, which shapes its own.
 fn radio_label_style(theme: &Theme, ink: Color) -> TextStyle {
-    TextStyle {
-        family: theme.type_scale.body_large.family.clone(),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(RADIO_LABEL_SIZE, ink)
-    }
+    TextStyle::new(RADIO_LABEL_SIZE, ink)
+        .with_family(theme.type_scale.body_large.family.clone())
+        .with_weight(FontWeight::REGULAR)
 }
 
 /// A 16px ring whose selected state re-inks it amber and drops an inset amber

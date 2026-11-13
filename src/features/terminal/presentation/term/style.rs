@@ -209,21 +209,19 @@ impl CellStyle {
     /// (a caller with no controller behind it passes
     /// `crate::fonts::default_terminal_family()`).
     pub fn text_style(self, font_size: f32, color: Color, family: &FontFamily) -> TextStyle {
-        TextStyle {
-            family: family.clone(),
-            weight: if self.bold {
+        TextStyle::new(font_size, color)
+            .with_family(family.clone())
+            .with_weight(if self.bold {
                 FontWeight::SEMI_BOLD
             } else {
                 FontWeight::REGULAR
-            },
-            style: if self.italic {
+            })
+            .with_style(if self.italic {
                 FontStyle::Italic
             } else {
                 FontStyle::Normal
-            },
-            line_height: LineHeight::FontSizeRelative(LINE_HEIGHT),
-            ..TextStyle::new(font_size, color)
-        }
+            })
+            .with_line_height(LineHeight::FontSizeRelative(LINE_HEIGHT))
     }
 }
 
