@@ -277,9 +277,6 @@ fn pane_pills(preview: &[String], colors: &Palette) -> FlexView<SessionsState> {
     let theme = active_theme();
     let mut children = Vec::new();
     for title in preview.iter().take(MAX_PREVIEW_PILLS) {
-        if !children.is_empty() {
-            children.push(h_gap(PILL_GAP));
-        }
         children.push(flexible(
             1,
             container(Padding(
@@ -291,7 +288,7 @@ fn pane_pills(preview: &[String], colors: &Palette) -> FlexView<SessionsState> {
             .radius(theme.shape.extra_small),
         ));
     }
-    centered_row(children)
+    centered_row(children).gap(PILL_GAP)
 }
 
 /// `.sess-agents` — kind tiles and the `N agents` count at the left, the

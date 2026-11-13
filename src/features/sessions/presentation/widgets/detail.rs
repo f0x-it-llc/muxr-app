@@ -32,7 +32,7 @@ use crate::ui::spacing;
 
 use super::super::pages::{self, SessionsState};
 use super::session_card::{bell_mark, status_variant};
-use super::{LoadPhase, active_theme, centered_row, gapped_column, h_gap, v_gap};
+use super::{LoadPhase, active_theme, centered_row, gapped_column, h_gap};
 
 /// `.d-body{padding:20px;gap:14px}`.
 const BODY_PAD: f64 = spacing::XXL;
@@ -279,8 +279,8 @@ fn grid<V: View<SessionsState>>(cards: Vec<V>, full: bool) -> FlexView<SessionsS
         rows.push(
             row()
                 .flex(1, first)
-                .push(h_gap(GRID_GAP))
                 .push(second)
+                .gap(GRID_GAP)
                 .cross_axis(CrossAxisAlignment::Start),
         );
     }
@@ -298,23 +298,19 @@ fn header(session: &Session, read_only: bool, colors: &Palette) -> impl View<Ses
                 .max_lines(1)
                 .overflow(TextOverflow::Ellipsis),
         ),
-        h_gap(CHIP_GAP),
         inflexible(badge(
             session.status.label(),
             status_variant(session.status),
         )),
-        h_gap(CHIP_GAP),
         inflexible(badge(session.backend.label(), BadgeVariant::Neutral)),
     ];
     if session.is_current {
-        chips.push(h_gap(CHIP_GAP));
         chips.push(inflexible(badge(
             "attached from this device",
             BadgeVariant::Accent,
         )));
     }
     if session.has_bell {
-        chips.push(h_gap(CHIP_GAP));
         chips.push(inflexible(badge("bell", BadgeVariant::Warning)));
     }
     let actions = centered_row(vec![
@@ -339,7 +335,7 @@ fn header(session: &Session, read_only: bool, colors: &Palette) -> impl View<Ses
     ]);
     container(Padding(
         EdgeInsets::symmetric(HEAD_PAD_X, HEAD_PAD_Y),
-        gapped_column(vec![centered_row(chips), actions], HEAD_GAP),
+        gapped_column(vec![centered_row(chips).gap(CHIP_GAP), actions], HEAD_GAP),
     ))
     .fill(colors.surface)
 }
@@ -384,15 +380,14 @@ fn overview_card(session: &Session, colors: &Palette) -> impl View<SessionsState
     let (third_label, third_value) = third_stat(layout.third);
     let counts = row()
         .flex(1, stat_card("tabs", layout.tabs.to_string()))
-        .push(h_gap(STAT_GAP))
         .flex(1, stat_card("panes", layout.panes.to_string()))
-        .push(h_gap(STAT_GAP))
         .flex(1, stat_card(third_label, third_value.to_string()))
+        .gap(STAT_GAP)
         .cross_axis(CrossAxisAlignment::Stretch);
     let stats = column()
         .child(counts)
-        .push(v_gap(STAT_GAP))
         .child(stat_card("age", session.age_label()))
+        .gap(STAT_GAP)
         .cross_axis(CrossAxisAlignment::Stretch);
     glyph_card()
         .title(card_title("overview", colors))
@@ -413,11 +408,11 @@ fn resurrect_card(session: &Session, colors: &Palette) -> impl View<SessionsStat
     let theme = active_theme();
     let desc = column()
         .child(text(RESURRECT_DESC).style(inked(&theme.type_scale.body_small, colors.fg_muted)))
-        .push(v_gap(spacing::BASE))
         .child(centered_row(vec![
             inflexible(attach_button(session)),
             flexible(1, SizedBox::<SessionsState>(None, None)),
         ]))
+        .gap(spacing::BASE)
         .cross_axis(CrossAxisAlignment::Stretch);
     glyph_card()
         .title(card_title(RESURRECT_TITLE, colors))
@@ -451,7 +446,8 @@ fn active_tab_card(session: &Session, colors: &Palette) -> impl View<SessionsSta
         ])),
         (_, [first, rest @ ..]) => {
             let stacked = rest.iter().map(|pane| flexible(1, tile(pane, colors)));
-            let stack = FlexView::new(Axis::Vertical, spaced(stacked.collect(), false))
+            let stack = FlexView::new(Axis::Vertical, stacked.collect())
+                .gap(TILE_GAP)
                 .cross_axis(CrossAxisAlignment::Stretch);
             EitherOf3::C(tile_row(vec![
                 flexible(2, tile(first, colors)),
@@ -466,23 +462,9 @@ fn active_tab_card(session: &Session, colors: &Palette) -> impl View<SessionsSta
 }
 
 fn tile_row(children: Vec<FlexChild<SessionsState>>) -> FlexView<SessionsState> {
-    FlexView::new(Axis::Horizontal, spaced(children, true)).cross_axis(CrossAxisAlignment::Stretch)
-}
-
-/// `children` with a [`TILE_GAP`] spacer between neighbours along the axis.
-fn spaced(children: Vec<FlexChild<SessionsState>>, across: bool) -> Vec<FlexChild<SessionsState>> {
-    let mut spaced = Vec::with_capacity(children.len() * 2);
-    for (index, child) in children.into_iter().enumerate() {
-        if index > 0 {
-            spaced.push(if across {
-                h_gap(TILE_GAP)
-            } else {
-                inflexible(SizedBox::<SessionsState>(None, Some(TILE_GAP)))
-            });
-        }
-        spaced.push(child);
-    }
-    spaced
+    FlexView::new(Axis::Horizontal, children)
+        .gap(TILE_GAP)
+        .cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// `.lp`: one pane tile, amber when focused.
@@ -598,17 +580,14 @@ fn pane_pills(
         .panes
         .chunks(per_row)
         .map(|chunk| {
-            let mut cells: Vec<FlexChild<SessionsState>> = Vec::with_capacity(per_row * 2);
+            let mut cells: Vec<FlexChild<SessionsState>> = Vec::with_capacity(per_row);
             for slot in 0..per_row {
-                if slot > 0 {
-                    cells.push(h_gap(PILL_GAP));
-                }
                 cells.push(match chunk.get(slot) {
                     Some(pane) => flexible(1, pane_pill(id, tab.index, pane, colors)),
                     None => flexible(1, SizedBox::<SessionsState>(None, None)),
                 });
             }
-            centered_row(cells)
+            centered_row(cells).gap(PILL_GAP)
         })
         .collect();
     gapped_column(rows, PILL_GAP)
@@ -625,7 +604,6 @@ fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> impl V
     };
     let mut parts = vec![
         inflexible(icon(PANE_MARK).size(PANE_ICON).color(ink)),
-        h_gap(PILL_GAP),
         flexible(
             2,
             text(pane.title.clone())
@@ -635,7 +613,6 @@ fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> impl V
         ),
     ];
     if let Some(cwd) = &pane.cwd {
-        parts.push(h_gap(PILL_GAP));
         parts.push(flexible(
             1,
             text(cwd.clone())
@@ -645,12 +622,11 @@ fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> impl V
         ));
     }
     if pane.floating {
-        parts.push(h_gap(PILL_GAP));
         parts.push(inflexible(tag::<SessionsState>("float")));
     }
     let pill = container(Padding(
         EdgeInsets::symmetric(PILL_PAD_X, PILL_PAD_Y),
-        centered_row(parts),
+        centered_row(parts).gap(PILL_GAP),
     ))
     .fill(fill)
     .border(border, HAIRLINE)
@@ -731,12 +707,12 @@ fn agent_row(id: &str, agent: &SessionAgent, colors: &Palette) -> impl View<Sess
                 .max_lines(1)
                 .overflow(TextOverflow::Ellipsis),
         ),
-        h_gap(CHIP_GAP),
         inflexible(text(agent.status.label()).style(inked(
             &theme.type_scale.label_small,
             status_tone(colors, agent.status),
         ))),
-    ]);
+    ])
+    .gap(CHIP_GAP);
     let line = centered_row(vec![
         flexible(
             1,
@@ -745,26 +721,25 @@ fn agent_row(id: &str, agent: &SessionAgent, colors: &Palette) -> impl View<Sess
                 colors.fg_muted,
             ),
         ),
-        h_gap(CHIP_GAP),
         inflexible(
             SizedBox::<SessionsState>(Some(AGENT_LOCATION_WIDTH), None)
                 .child(one_line(agent_location(agent), colors.fg_dim)),
         ),
-    ]);
+    ])
+    .gap(CHIP_GAP);
     let content = centered_row(vec![
         inflexible(status_dot::<SessionsState>(agent.status)),
-        h_gap(CHIP_GAP),
         inflexible(kind_tile::<SessionsState>(&agent.kind, TILE_SIZE)),
-        h_gap(CHIP_GAP),
         flexible(
             1,
             column()
                 .child(headline)
-                .push(v_gap(spacing::MICRO))
                 .child(line)
+                .gap(spacing::MICRO)
                 .cross_axis(CrossAxisAlignment::Stretch),
         ),
-    ]);
+    ])
+    .gap(CHIP_GAP);
     let boxed = container(
         SizedBox::<SessionsState>(None, Some(AGENT_ROW_HEIGHT)).child(Padding(
             EdgeInsets::symmetric(PILL_PAD_X, PILL_PAD_Y),

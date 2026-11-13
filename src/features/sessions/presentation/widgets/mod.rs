@@ -86,21 +86,13 @@ pub(super) fn centered_row(children: Vec<FlexChild<SessionsState>>) -> FlexView<
     FlexView::new(Axis::Horizontal, children).cross_axis(CrossAxisAlignment::Center)
 }
 
-pub(super) fn v_gap(gap: f64) -> FlexChild<SessionsState> {
-    inflexible(SizedBox::<SessionsState>(None, Some(gap)))
-}
-
-/// `views` stacked and stretched, with a `gap`-tall spacer between neighbours.
+/// `views` stacked and stretched, with a `gap`-tall space between neighbours.
 pub(super) fn gapped_column<V: View<SessionsState>>(
     views: Vec<V>,
     gap: f64,
 ) -> FlexView<SessionsState> {
-    let mut children = Vec::with_capacity(views.len() * 2);
-    for (index, view) in views.into_iter().enumerate() {
-        if index > 0 {
-            children.push(v_gap(gap));
-        }
-        children.push(inflexible(view));
-    }
-    FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
+    let children = views.into_iter().map(inflexible).collect();
+    FlexView::new(Axis::Vertical, children)
+        .gap(gap)
+        .cross_axis(CrossAxisAlignment::Stretch)
 }

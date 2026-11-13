@@ -174,9 +174,9 @@ pub fn tablet_panel_pieces<S: 'static>(
     vec![
         any(centered_row::<S>(vec![
             inflexible(mark::connect_mark(theme, &colors)),
-            inflexible(h_gap::<S>(spacing::LG)),
             inflexible(badge::server_badge(theme, &colors)),
-        ])),
+        ])
+        .gap(spacing::LG)),
         any(getting_started::tablet_headline(theme, &colors)),
         any(getting_started::getting_started_card(theme, &colors)),
         any(saved::tablet_saved_list(theme, &colors, saved, live)),
