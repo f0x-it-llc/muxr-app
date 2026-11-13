@@ -464,40 +464,31 @@ impl Nav {
     /// on it: the guard bouncing a push made after the connection dropped, and
     /// Settings' disconnect `go`.
     ///
-    /// Pop, not push. Connect landed *over* a live shell page would retain the
+    /// A `go` to Connect, not a push: under frust 0.6.6 a `go` makes the stack
+    /// exactly the matched chain, so the shell page and anything covering it
+    /// (the add-server page) leave in one op, Connect (the outer root, kept by
+    /// its unchanged path) stays, and the departing top plays its own
+    /// transition reversed — what the hand-written pops used to do. The queued
+    /// removal is still recorded ([`Self::pending_unwind`]): `Router::go`
+    /// cannot place the shell with the back policy and dismiss cell
+    /// [`place_shell`](Self::place_shell) gives it, so a navigation back into
+    /// the shell on this same frame must not see the dying page as placed.
+    ///
+    /// Connect landed *over* a live shell page would retain the
     /// authenticated subtree beneath it — frust's keep rule answers "on the
     /// stack", not "on top" — leaving the next in-shell navigation to land on
     /// that hidden navigator, and a platform back press (no router navigation,
-    /// so no guard) to walk back into it. The pop is the op the confirmed
-    /// disconnect already applies ([`Self::pop`]'s outer branch), and it tears
-    /// the page down, the inner navigator's pages with it, so the next
-    /// placement opens fresh. What it reveals is the outer **root**, Connect —
-    /// the one route outside the shell, and where the bounce was going.
-    /// [`Self::landing`] is left alone: the leaving page rebuilds through it
-    /// while the pop plays.
-    ///
-    /// A page covering the shell (the add-server page) comes off first, in
-    /// the same frame: popping only the top would leave the shell placed
-    /// under a dead connection.
+    /// so no guard) to walk back into it. The `go` tears the page down, the
+    /// inner navigator's pages with it, so the next placement opens fresh.
+    /// What it reveals is the outer **root**, Connect — the one route outside
+    /// the shell, and where the bounce was going. [`Self::landing`] is left
+    /// alone: the leaving page rebuilds through it while it plays out.
     fn unwind_shell(&self) {
-        let controller = self.router.controller();
-        let stack = controller.route_stack();
-        let entries = stack.entries();
-        let covering = entries
-            .iter()
-            .rposition(|entry| {
-                entry
-                    .as_ref()
-                    .is_some_and(|location| route_meta(&location.path).is_some())
-            })
-            .map_or(0, |shell| entries.len() - 1 - shell);
-        for _ in 0..=covering {
-            controller.pop();
-        }
+        self.router.go(CONNECT_LOCATION);
+        let generation = self.router.controller().route_generation();
         self.pending_shell.set(None);
-        self.pending_unwind.set(Some(controller.route_generation()));
-        self.queued_pop
-            .set(Some((true, controller.route_generation())));
+        self.pending_unwind.set(Some(generation));
+        self.queued_pop.set(Some((true, generation)));
     }
 
     /// The landing page's own location — the inner navigator's root route
