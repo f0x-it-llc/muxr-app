@@ -1,15 +1,6 @@
-//! The `src/net` transport surface, exercised from outside the crate.
-//!
-//! This suite covers the contracts that hold with no server on the other end: fail-closed pin
-//! parsing, endpoint/trust-mode construction (system-CA included — construction only, since a
-//! real CA chain needs a real CA), the keepalive parity constants, the `Status`/`ActionAck`
-//! failure mapping, and one genuine dial against a closed port.
-//!
-//! The handshake and credential round trips — right pin connects, wrong pin does not, `Login`
-//! mints a token an authenticated RPC accepts — run against the in-process fixture in
-//! `src/net/testing.rs`, and live in `src/net`'s own unit tests: that fixture needs `rcgen` and
-//! tonic's server features, `[dev-dependencies]` unreachable from the library build an
-//! integration test links.
+//! The `src/net` transport surface from outside the crate: pin parsing, endpoint construction,
+//! keepalive constants, failure mapping and one dial against a closed port.
+//! Handshake and credential round trips live in `src/net`'s unit tests, which can use the in-process fixture.
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -26,8 +17,6 @@ use muxr::net::{MuxrClient, PinError, TrustConfig};
 use tonic::service::Interceptor;
 use tonic::{Request, Status};
 
-/// A fingerprint printed by this crate is a pin this crate accepts — the whole
-/// pairing path in one assertion.
 #[test]
 fn a_printed_fingerprint_parses_back_into_a_pin() {
     let der = b"a leaf certificate's DER bytes";
@@ -41,15 +30,13 @@ fn a_printed_fingerprint_parses_back_into_a_pin() {
 
     let pin = TrustConfig::pinned_from_hex(&hex).expect("its own fingerprint parses");
     assert!(matches!(pin, TrustConfig::PinnedSha256(_)));
-    // A pairing payload may arrive upper-cased; both spellings are one pin.
     assert_eq!(
         TrustConfig::pinned_from_hex(&hex.to_uppercase()).expect("uppercase parses"),
         pin
     );
 }
 
-/// Fail-closed: every malformed pin is an error, and it is raised before any
-/// socket exists — there is no lenient path that quietly weakens trust.
+/// Fail-closed: every malformed pin errors before any socket exists.
 #[test]
 fn a_malformed_pin_is_rejected_before_dialing() {
     assert_eq!(
@@ -72,14 +59,11 @@ fn a_malformed_pin_is_rejected_before_dialing() {
         Err(PinError::NotHex)
     );
 
-    // The rejection reaches a caller as an app failure with a readable detail,
-    // not as a silent fallback to a weaker mode.
     let failure = AppFailure::from(PinError::NotHex);
     assert!(matches!(failure, AppFailure::Network(_)));
     assert!(failure.to_string().contains("hexadecimal"));
 }
 
-/// All three trust modes build an endpoint on this host, system-CA included.
 #[test]
 fn every_trust_mode_builds_an_endpoint() {
     for trust in [
@@ -93,8 +77,6 @@ fn every_trust_mode_builds_an_endpoint() {
     }
 }
 
-/// A host that cannot become an authority fails at construction, not as a
-/// connect timeout minutes later.
 #[test]
 fn an_unusable_host_fails_at_construction() {
     for host in ["", "[]", "not a host"] {
@@ -112,9 +94,6 @@ fn keepalive_constants_match_the_server() {
     assert_eq!(KEEP_ALIVE_TIMEOUT, Duration::from_secs(20));
 }
 
-/// `UNAUTHENTICATED` is the one status that becomes a non-retryable auth
-/// failure; the transport codes stay retryable; everything else falls through
-/// to the network bucket.
 #[test]
 fn status_codes_map_into_the_app_failure_vocabulary() {
     let auth = from_status(&Status::unauthenticated("session token expired"));
@@ -145,7 +124,6 @@ fn status_codes_map_into_the_app_failure_vocabulary() {
     }
 }
 
-/// A server-side action refusal is a failure even though the RPC succeeded.
 #[test]
 fn a_refused_action_ack_is_a_failure() {
     assert!(
@@ -164,21 +142,17 @@ fn a_refused_action_ack_is_a_failure() {
     })
     .expect_err("ok == false is a failure");
     assert!(failure.to_string().contains("tab 4 does not exist"));
-    // Detail is for logs; the user sees the generic message.
     assert_eq!(
         failure.user_message(),
         "Connection problem — please try again."
     );
 }
 
-/// The bearer credential is visible on the wire exactly as `muxrd` parses it,
-/// and a rotation reaches an interceptor built before it.
 #[test]
 fn the_bearer_header_is_stamped_and_rotatable() {
     let token = Arc::new(SessionToken::new());
     let mut interceptor = BearerInterceptor::new(Arc::clone(&token));
 
-    // No credential: the call never leaves the process.
     assert_eq!(
         interceptor
             .call(Request::new(()))
@@ -205,8 +179,6 @@ fn the_bearer_header_is_stamped_and_rotatable() {
     assert!(interceptor.call(Request::new(())).is_err());
 }
 
-/// A real dial against a port nothing is listening on surfaces as a retryable
-/// network failure — the transport error path, end to end.
 #[tokio::test]
 async fn a_dial_to_a_closed_port_is_a_retryable_network_failure() {
     // Bind then drop, so the port is known-free rather than guessed.
