@@ -1,8 +1,3 @@
-//! [`ListSessions`] — the session-list loader (and the mock poll's one read),
-//! delegating to an injected `Arc<dyn SessionsRepository + Send + Sync>`
-//! (huddle's `LoadChannels` shape); simulated latency and the failure
-//! boundary live in the data-layer implementation.
-
 use std::sync::Arc;
 
 use clean_signals::{NoParams, UseCase};
