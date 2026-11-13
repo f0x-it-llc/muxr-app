@@ -17,7 +17,6 @@ impl UnlockCredential {
         Self { service }
     }
 
-    /// Unlocks the whole keyring behind one gate.
     pub async fn run_all(&self, reason: &str, endpoints: &[String]) -> UnlockedKeyring {
         self.service.unlock_all(reason, endpoints).await
     }

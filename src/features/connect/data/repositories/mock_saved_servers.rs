@@ -1,25 +1,6 @@
-//! [`MockSavedServersRepository`] — the in-memory
-//! [`SavedServersRepository`] every headless suite runs on, in place of the
-//! real, preferences-backed [`super::prefs_saved_servers`] store.
-//!
-//! The store is a plain [`Mutex`]-guarded [`Vec`], not an `RwSignal` — the
-//! controller owns the reactive copy and re-reads this one. The lock is a
-//! `Send + Sync` obligation, not a concurrency design (muxr is
-//! single-UI-threaded and it's never contended). A poisoned lock is recovered
-//! rather than propagated — a panic on the UI thread has already failed the
-//! frame, and a usable guard keeps a later frame renderable.
-//!
-//! Seed data: three plausible rigs, most-recently-used first, covering every
-//! [`TrustMode`] and one read-only row so badge/trust rendering has something
-//! to show. Recency stamps are relative to the seeding call, so rows read
-//! "2 hours ago"/etc. whenever a suite runs rather than drifting to a fixed date.
-//!
-//! Ordering isn't this store's own rule: [`super::prefs_saved_servers::upsert`]
-//! is what both implementations sort through.
-//!
-//! It answers [`SavedServersRepository::is_persistent`] `true`, standing in
-//! for the real store; [`MockSavedServersRepository::not_persistent`] marks
-//! the production fallback's copy, whose demo rows must never drive a prune.
+//! In-memory [`SavedServersRepository`] for headless suites.
+//! A poisoned lock is recovered: a usable guard keeps a later frame renderable.
+//! Seed rows are relative to the seeding call and cover every [`TrustMode`] and one read-only row.
 
 use std::sync::{Mutex, PoisonError};
 
@@ -30,19 +11,16 @@ use crate::features::connect::domain::repositories::SavedServersRepository;
 
 const HOUR_MS: i64 = 60 * 60 * 1000;
 
-/// The in-memory saved-server store. See the [module docs](self).
 pub struct MockSavedServersRepository {
     servers: Mutex<Vec<SavedServer>>,
     persistent: bool,
 }
 
 impl MockSavedServersRepository {
-    /// See the [module docs](self) for the seeded rigs.
     pub fn seeded() -> Self {
         Self::with_servers(seed())
     }
 
-    /// A store holding exactly `servers` — for tests that need a known list.
     pub fn with_servers(servers: Vec<SavedServer>) -> Self {
         Self {
             servers: Mutex::new(servers),
@@ -50,8 +28,7 @@ impl MockSavedServersRepository {
         }
     }
 
-    /// This store, answering [`SavedServersRepository::is_persistent`]
-    /// `false`.
+    /// Answers `is_persistent` `false`: demo rows must never drive a prune.
     pub fn not_persistent(mut self) -> Self {
         self.persistent = false;
         self

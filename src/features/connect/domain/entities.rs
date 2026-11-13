@@ -1,14 +1,4 @@
-//! `connect` domain entities — the feature's plain-data types, framework-free.
-//!
-//! Two stores, one key: a saved server's metadata ([`SavedServer`]) and its
-//! secret share nothing but [`SavedServer::endpoint`]'s `host:port`.
-//! [`SavedServer::has_credential`]/[`SavedServer::token_name`] are the only
-//! trace the metadata keeps of the secret.
-//!
-//! [`TrustMode`] is reused from [`crate::connection::TrustMode`] rather than
-//! re-minted, so a saved row's posture flows into a connect request with no
-//! mapping layer — a documented layering exception; see
-//! `docs/FEATURES_ARCHITECTURE.md`.
+//! Plain-data types. A saved server's metadata and its secret share only the `host:port` endpoint.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,43 +10,27 @@ use super::keyring::Keyring;
 
 pub use crate::connection::TrustMode;
 
-/// A `muxrd` endpoint the user has connected to before. [`Self::last_used_ms`]
-/// is an epoch timestamp, not a label, since the store outlives restarts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavedServer {
     pub host: String,
     pub port: u16,
-    /// TLS posture last trusted under this endpoint.
     pub trust_mode: TrustMode,
     pub label: String,
-    /// Epoch ms of last connect ([`epoch_millis`]); the list's sort key (recent
-    /// first). `0` for a legacy row (predates this field) — reads as
-    /// never-used, not 1970.
+    /// Epoch ms of last connect; the list's sort key. `0` for a legacy row reads as never-used.
     pub last_used_ms: i64,
-    /// Read-only posture of the last credential used here; shown as a badge and
-    /// re-applied on reconnect.
     pub read_only: bool,
-    /// Whether a gated credential is stored for this endpoint; the secret
-    /// itself never appears here.
     pub has_credential: bool,
-    /// The stored token's name (for revoke-on-delete). `None` with no
-    /// credential, or for a QR-paired one — `muxrctl` never tells this device
-    /// the name.
+    /// `None` with no credential, or for a QR-paired one (`muxrctl` never sends the name).
     pub token_name: Option<String>,
-    /// Pinned certificate SHA-256, 64 lowercase hex. Meaningful only for
-    /// [`TrustMode::Pinned`]; otherwise `None`, so a weaker posture never
-    /// carries a stale pin.
+    /// Pinned certificate SHA-256, 64 lowercase hex; `None` unless [`TrustMode::Pinned`].
     pub fingerprint: Option<String>,
 }
 
 impl SavedServer {
-    /// `host:port` — this row's identity and its secret's storage key.
     pub fn endpoint(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
 
-    /// Coarse recency label relative to `now_ms` — a future stamp reads as
-    /// "just now", never negative.
     pub fn last_used_label(&self, now_ms: i64) -> String {
         if self.last_used_ms <= 0 {
             return NEVER_USED.to_string();
@@ -66,10 +40,8 @@ impl SavedServer {
     }
 }
 
-/// Printed for a row that has never recorded a login.
 const NEVER_USED: &str = "not used yet";
 
-/// Ms since Unix epoch; an unset clock yields `0`, read as never-used.
 pub fn epoch_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -78,44 +50,27 @@ pub fn epoch_millis() -> i64 {
         .unwrap_or(0)
 }
 
-// ---------------------------------------------------------------------------
-// The credential vocabulary
-// ---------------------------------------------------------------------------
-
-/// Outcome of a gated credential operation; shields callers from
-/// `frust_secure_storage`'s own type. [`Self::NotFound`] is unlock-only.
+/// Shields callers from `frust_secure_storage`'s own type. [`Self::NotFound`] is unlock-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CredentialStatus {
-    /// The gate passed and the store answered.
     Success,
-    /// Dismissed by the user or system. Silent by contract — not a failure.
+    /// Dismissed by the user or system; silent by contract.
     Canceled,
-    /// The device has biometric hardware but nothing enrolled.
     NotEnrolled,
-    /// No PIN/pattern/passcode set, so neither biometric nor its fallback can run.
     NoDeviceCredential,
-    /// Too many failed attempts — biometrics are locked out for now.
     LockedOut,
-    /// No usable biometric on this device or this build (desktop included).
     Unavailable,
-    /// Re-enrollment invalidated the store's key — stored data is
-    /// unrecoverable, so the caller clears the metadata claiming it exists.
+    /// Re-enrollment invalidated the store's key; the data is unrecoverable.
     KeyInvalidated,
-    /// Gate passed but nothing was stored for this server.
     NotFound,
-    /// Authentication ran and did not succeed, or the store itself failed.
     Failed,
 }
 
 impl CredentialStatus {
-    /// True only for [`CredentialStatus::Canceled`] — dismissing your own
-    /// prompt needs no message.
     pub fn is_silent(self) -> bool {
         matches!(self, CredentialStatus::Canceled)
     }
 
-    /// User-facing message, or `None` for the two silent outcomes; every
-    /// message points at the manual form.
     pub fn message(self) -> Option<&'static str> {
         match self {
             CredentialStatus::Success | CredentialStatus::Canceled => None,
@@ -145,17 +100,14 @@ impl CredentialStatus {
     }
 }
 
-/// Unlock result: status plus, on success, the recovered token. `Debug`
-/// redacts the token (a derived impl would print the secret).
+/// `Debug` redacts the token.
 #[derive(Clone, PartialEq, Eq)]
 pub struct UnlockedCredential {
     pub status: CredentialStatus,
-    /// `Some` exactly when [`Self::status`] is [`CredentialStatus::Success`].
     pub token: Option<Zeroizing<String>>,
 }
 
 impl UnlockedCredential {
-    /// A non-success outcome, carrying no token.
     pub fn refused(status: CredentialStatus) -> Self {
         Self {
             status,
@@ -163,7 +115,6 @@ impl UnlockedCredential {
         }
     }
 
-    /// A recovered token.
     pub fn recovered(token: Zeroizing<String>) -> Self {
         Self {
             status: CredentialStatus::Success,
@@ -181,20 +132,15 @@ impl std::fmt::Debug for UnlockedCredential {
     }
 }
 
-/// Result of unlocking the whole keyring behind one gate. `Debug` redacts
-/// (the keyring prints endpoints only).
+/// `Debug` prints endpoints only.
 pub struct UnlockedKeyring {
     pub status: CredentialStatus,
-    /// `Some` exactly when [`Self::status`] is [`CredentialStatus::Success`].
     pub keyring: Option<Keyring>,
-    /// Endpoints whose legacy per-server entries were folded into the vault.
     pub migrated: Vec<String>,
-    /// Endpoints whose legacy entries could not be read.
     pub unreadable: Vec<String>,
 }
 
 impl UnlockedKeyring {
-    /// A non-success outcome, carrying no keyring.
     pub fn refused(status: CredentialStatus) -> Self {
         Self {
             status,
@@ -216,14 +162,10 @@ impl std::fmt::Debug for UnlockedKeyring {
     }
 }
 
-/// [`super::repositories::CredentialService::store`]'s parameters.
 #[derive(Clone, PartialEq, Eq)]
 pub struct StoreRequest {
-    /// The server this secret belongs to — [`SavedServer::endpoint`].
     pub server_key: String,
-    /// The raw token to store — the only secret this feature ever writes to disk.
     pub token: Zeroizing<String>,
-    /// Shown in the system prompt. Never carries credential material.
     pub reason: String,
 }
 
@@ -237,31 +179,20 @@ impl std::fmt::Debug for StoreRequest {
     }
 }
 
-/// [`super::repositories::CredentialService::unlock`]'s parameters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnlockRequest {
-    /// The server whose secret to recover — [`SavedServer::endpoint`].
     pub server_key: String,
-    /// The rationale the system prompt shows. See [`StoreRequest::reason`].
     pub reason: String,
 }
 
-/// A decoded, validated `muxr://pair` payload (see
-/// [`super::use_cases::parse_pairing::parse_pairing_uri`]) — every field
-/// already passed the wire grammar, so callers never re-check it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PairingPayload {
     pub host: String,
     pub port: u16,
-    /// Bearer token, base64url-decoded and [`Zeroizing`]-wrapped; this type's
-    /// `Debug` redacts it.
+    /// Base64url-decoded and [`Zeroizing`]-wrapped; `Debug` redacts it.
     pub token: Zeroizing<String>,
-    /// Whether the credential the token names only grants read-only access.
     pub read_only: bool,
-    /// The rig's human label — the QR's `n` field, percent-decoded.
     pub label: String,
-    /// The TLS posture this payload asks the receiving client to trust the server
-    /// under.
     pub trust: PairingTrust,
 }
 
@@ -278,17 +209,10 @@ impl std::fmt::Debug for PairingPayload {
     }
 }
 
-/// TLS posture a [`PairingPayload`] asks the client to trust under. Separate
-/// from [`TrustMode`] (which is `Copy`, no payload) because a QR pin carries
-/// its fingerprint as data.
+/// Separate from the `Copy` [`TrustMode`] because a QR pin carries its fingerprint as data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PairingTrust {
-    /// Pin to this SHA-256 fingerprint of the DER-encoded leaf (64 lowercase hex chars).
-    Pin {
-        /// Already validated against `^[0-9a-f]{64}$` by the parser.
-        fp_hex: String,
-    },
-    /// Trust the platform's system CA store — no fingerprint carried or checked.
+    Pin { fp_hex: String },
     Ca,
 }
 
@@ -389,7 +313,6 @@ mod tests {
 
     #[test]
     fn the_epoch_clock_reads_a_plausible_present() {
-        // Sanity only — an unset clock yields 0, meaningless for recency labels.
         assert!(epoch_millis() > 1_700_000_000_000, "{}", epoch_millis());
     }
 
