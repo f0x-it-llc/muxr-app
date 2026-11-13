@@ -1,16 +1,6 @@
-//! The Tablet detail pane (`docs/tablet.html`'s `.s-detail`): the selected
-//! session's header — name, status/backend chips, the this-device and bell
-//! chips, then rename, kill and the primary attach — over a grid of Glyph
-//! cards: overview stats, the active tab's pane tiles, and the full-width
-//! tabs → panes card whose pane pills carry a tab/pane target (honoured by
-//! the terminal once Phase 4's attach-into-pane card lands; until then it
-//! attaches at the session's server focus). A running session with agents
-//! also gets an `AI AGENTS · N` section above that card.
-//!
-//! Every count reads the session's `LayoutSummary`. No selection, a list
-//! still loading, a failed first load, an empty list and a resurrectible
-//! session each draw their own state; under a read-only credential rename and
-//! kill turn ghost and refuse with a toast, attach never does.
+//! The Tablet detail pane: the selected session's header and actions over a grid of cards
+//! (overview, the active tab's pane tiles, the tabs and panes tree, and an agents section). Under a
+//! read-only credential rename and kill turn ghost and refuse with a toast; attach never does.
 
 use frust::authoring::text::TextOverflow;
 use frust::icons::PANE_MARK;
@@ -34,44 +24,31 @@ use super::super::pages::{self, SessionsState};
 use super::session_card::{bell_mark, status_variant};
 use super::{LoadPhase, active_theme, centered_row, gapped_column, h_gap};
 
-/// `.d-body{padding:20px;gap:14px}`.
 const BODY_PAD: f64 = spacing::XXL;
 const GRID_GAP: f64 = spacing::LG;
-/// `.d-top{padding:8px 20px;gap:10px}`.
 const HEAD_PAD_X: f64 = spacing::XXL;
 const HEAD_PAD_Y: f64 = spacing::SM;
 const HEAD_GAP: f64 = spacing::MD;
-/// Between chips, and between the header's action buttons.
 const CHIP_GAP: f64 = spacing::SM;
-/// Between the overview's stat cards.
 const STAT_GAP: f64 = spacing::SM;
-/// `.lay{height:112px}` — the active tab's tile band, a widget dimension.
 const TILES_HEIGHT: f64 = 112.0;
-/// `.lay{gap:5px}` / `.lp{padding:7px 9px}`, on the shared scale.
 const TILE_GAP: f64 = spacing::TIGHT;
 const TILE_PAD: f64 = spacing::SM;
-/// `.tree-tab-h{padding:9px 11px}` / `.tree-panes{gap:6px}`.
 const TAB_PAD_X: f64 = spacing::MD;
 const TAB_PAD_Y: f64 = spacing::SM;
 const PILL_GAP: f64 = spacing::XS;
-/// `.pp{padding:6px 12px 6px 6px}`.
 const PILL_PAD_X: f64 = spacing::MD;
 const PILL_PAD_Y: f64 = spacing::XS;
-/// The pane mark leading a pill.
 const PANE_ICON: f64 = 14.0;
-/// Pane pills per row: Flex has no wrap, so the focused tab's pills fill
-/// fixed-width rows instead.
+/// Pane pills per row: Flex has no wrap, so the focused tab's pills fill fixed-width rows.
 const PILLS_PER_ROW_FULL: usize = 3;
 const PILLS_PER_ROW_COLLAPSED: usize = 2;
-/// The loading state's skeleton heights (`docs/tablet.html`'s `.skel` rows).
 const SKELETON_TITLE: f64 = 18.0;
 const SKELETON_STATS: f64 = 44.0;
 const SKELETON_ROW: f64 = 38.0;
 
-/// The agent row's height and corner radius — the terminal tree's row anatomy.
 const AGENT_ROW_HEIGHT: f64 = 52.0;
 const AGENT_ROW_RADIUS: f64 = 10.0;
-/// The trailing `space › tab › pane` band, fixed like the terminal row's.
 const AGENT_LOCATION_WIDTH: f64 = 160.0;
 const AGENT_GAP: f64 = spacing::XS;
 const AGENTS_LABEL: &str = "AI AGENTS";
@@ -87,7 +64,6 @@ const RESURRECT_DESC: &str = "This session is kept by the server but has no live
                               Attaching resurrects it with its saved tabs; the layout preview \
                               appears once it runs.";
 
-/// The pane beside the Tablet list column. See the [module docs](self).
 pub(in crate::features::sessions::presentation) fn detail_pane(
     sessions: &[Session],
     agents: &[SessionAgent],
@@ -108,20 +84,16 @@ pub(in crate::features::sessions::presentation) fn detail_pane(
     container(body).fill(colors.base)
 }
 
-/// What the pane shows, before any widget is built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PaneState {
     Loading,
     Empty,
-    /// The selected session's detail, at its index in the list.
     Selected(usize),
     NoSelection,
 }
 
-/// Which state the pane draws: the load phase first, then an empty list,
-/// then whether the selection (an index into the list) still resolves. A
-/// failed first load behaves like a loaded one — its list is just empty
-/// until a refresh lands.
+/// Which state the pane draws: the load phase first, then an empty list, then whether the selection
+/// still resolves. A failed first load behaves like a loaded one with an empty list.
 fn pane_state(phase: LoadPhase, session_count: usize, selected: Option<usize>) -> PaneState {
     match phase {
         LoadPhase::Loading => PaneState::Loading,
@@ -136,14 +108,10 @@ fn selected_index(sessions: &[Session], selected: Option<&str>) -> Option<usize>
     selected.and_then(|id| sessions.iter().position(|s| s.id == id))
 }
 
-/// Which cards a selected session's body carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BodyKind {
-    /// Not running: the resurrect card above the overview.
     Resurrect,
-    /// Running but no tab detail reported: the overview alone.
     OverviewOnly,
-    /// Overview beside the active tab, over the tabs tree.
     Full,
 }
 
@@ -157,13 +125,11 @@ fn body_kind(live: bool, has_tabs: bool) -> BodyKind {
     }
 }
 
-/// How the active tab's panes tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TileLayout {
     None,
     One,
     Two,
-    /// A 2fr tile beside a column of the rest.
     Stacked,
 }
 
@@ -176,7 +142,6 @@ fn tile_layout(pane_count: usize) -> TileLayout {
     }
 }
 
-/// Pane pills per row on the full or collapsed band.
 fn pills_per_row(full: bool) -> usize {
     if full {
         PILLS_PER_ROW_FULL
@@ -185,7 +150,6 @@ fn pills_per_row(full: bool) -> usize {
     }
 }
 
-/// A centered Glyph empty state.
 fn hint(title: &str, desc: &str) -> impl View<SessionsState> {
     Align(
         Alignment::CENTER,
@@ -193,7 +157,6 @@ fn hint(title: &str, desc: &str) -> impl View<SessionsState> {
     )
 }
 
-/// The list's first load in flight: skeleton cards in the detail's grid.
 fn loading_body(full: bool) -> impl View<SessionsState> {
     let stretch = f64::INFINITY;
     let overview = glyph_card()
@@ -208,7 +171,6 @@ fn loading_body(full: bool) -> impl View<SessionsState> {
     body_scroller(cards)
 }
 
-/// Header over the scrolling body for `session`.
 fn selected_detail(
     session: &Session,
     agents: &[SessionAgent],
@@ -264,7 +226,6 @@ fn body_scroller(cards: Vec<AnyView<SessionsState>>) -> impl View<SessionsState>
     ))
 }
 
-/// Two cards to a row on the full band, one on the collapsed band.
 fn grid<V: View<SessionsState>>(cards: Vec<V>, full: bool) -> FlexView<SessionsState> {
     if !full {
         return gapped_column(cards, GRID_GAP);
@@ -287,7 +248,6 @@ fn grid<V: View<SessionsState>>(cards: Vec<V>, full: bool) -> FlexView<SessionsS
     gapped_column(rows, GRID_GAP)
 }
 
-/// `.d-top`: the name and chips, then the actions trailing on their own row.
 fn header(session: &Session, read_only: bool, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let mut chips = vec![
@@ -340,8 +300,7 @@ fn header(session: &Session, read_only: bool, colors: &Palette) -> impl View<Ses
     .fill(colors.surface)
 }
 
-/// Rename or kill: `style` normally, ghost under read-only, where the page's
-/// shim refuses it with the read-only toast.
+/// Rename or kill: `style` normally, ghost under read-only, where the page's shim refuses it with a toast.
 fn mutation_button(
     label: &'static str,
     style: ButtonStyle,
@@ -354,7 +313,6 @@ fn mutation_button(
     button(label, move |state: &mut SessionsState| press(state, &id)).style(style)
 }
 
-/// The primary `→ attach`, worded for a resurrect when nothing is running.
 fn attach_button(session: &Session) -> impl View<SessionsState> {
     let label = if session.status.is_live() {
         "\u{2192} attach"
@@ -367,14 +325,11 @@ fn attach_button(session: &Session) -> impl View<SessionsState> {
     })
 }
 
-/// A card's dim lowercase heading (`.card-title`).
 fn card_title(title: impl Into<String>, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     text(title.into()).style(inked(&theme.type_scale.label_small, colors.fg_dim))
 }
 
-/// Tabs, panes and the backend's third metric, then the age on its own row
-/// (the age wording is the widest value).
 fn overview_card(session: &Session, colors: &Palette) -> impl View<SessionsState> {
     let layout = &session.layout;
     let (third_label, third_value) = third_stat(layout.third);
@@ -394,7 +349,6 @@ fn overview_card(session: &Session, colors: &Palette) -> impl View<SessionsState
         .desc(stats)
 }
 
-/// The third metric as a stat's label and value.
 fn third_stat(third: ThirdMetric) -> (&'static str, u32) {
     match third {
         ThirdMetric::Clients(n) => ("clients", n),
@@ -403,7 +357,6 @@ fn third_stat(third: ThirdMetric) -> (&'static str, u32) {
     }
 }
 
-/// `.resurrect`: what a saved session is, and the attach that revives it.
 fn resurrect_card(session: &Session, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let desc = column()
@@ -419,7 +372,6 @@ fn resurrect_card(session: &Session, colors: &Palette) -> impl View<SessionsStat
         .desc(desc)
 }
 
-/// `space · <space> · ` on herdr when the layout names its space.
 fn space_prefix(session: &Session) -> Option<String> {
     match (session.backend, &session.layout.space) {
         (SessionBackend::Herdr, Some(space)) => Some(space.clone()),
@@ -427,8 +379,6 @@ fn space_prefix(session: &Session) -> Option<String> {
     }
 }
 
-/// The focused tab's panes as tiles: one full, two equal, three or more as
-/// a 2fr tile beside a stacked column.
 fn active_tab_card(session: &Session, colors: &Palette) -> impl View<SessionsState> {
     let tab = session.layout.focused_tab();
     let tab_name = tab.map_or("\u{2014}", |tab| tab.name.as_str());
@@ -467,7 +417,6 @@ fn tile_row(children: Vec<FlexChild<SessionsState>>) -> FlexView<SessionsState> 
         .cross_axis(CrossAxisAlignment::Stretch)
 }
 
-/// `.lp`: one pane tile, amber when focused.
 fn tile(pane: &PaneSummary, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let (fill, border, ink) = if pane.focused {
@@ -488,7 +437,6 @@ fn tile(pane: &PaneSummary, colors: &Palette) -> impl View<SessionsState> {
     .radius(theme.shape.extra_small)
 }
 
-/// Every tab as a rectangle, the focused one open on its pane pills.
 fn tree_card(session: &Session, full: bool, colors: &Palette) -> impl View<SessionsState> {
     let title = match space_prefix(session) {
         Some(space) => format!("tabs \u{2192} panes{SEP}space {space}"),
@@ -505,7 +453,6 @@ fn tree_card(session: &Session, full: bool, colors: &Palette) -> impl View<Sessi
         .desc(gapped_column(tabs, spacing::SM))
 }
 
-/// `.tree-tab`: index badge, name, one chip, and the focused tab's pills.
 fn tab_rect(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let position = (tab.index + 1).to_string();
@@ -549,7 +496,6 @@ fn tab_rect(id: &str, tab: &TabSummary, full: bool, colors: &Palette) -> impl Vi
         .radius(theme.shape.small)
 }
 
-/// `focused tab` | `bell` | `N panes`.
 fn tab_chip(tab: &TabSummary) -> impl View<SessionsState> {
     if tab.focused {
         badge("focused tab", BadgeVariant::Accent)
@@ -568,7 +514,6 @@ fn panes_count(count: usize) -> String {
     }
 }
 
-/// The tab's pills in equal-width rows, the last row padded with blanks.
 fn pane_pills(
     id: &str,
     tab: &TabSummary,
@@ -593,8 +538,7 @@ fn pane_pills(
     gapped_column(rows, PILL_GAP)
 }
 
-/// `.pp`: pane mark, title, cwd, `float` — a tap attaches with the pane's
-/// `(tab, id)` target (see the module docs for who honours it).
+/// `.pp`: pane mark, title, cwd, `float`; a tap attaches with the pane's `(tab, id)` target.
 fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let (fill, border, ink) = if pane.focused {
@@ -637,8 +581,6 @@ fn pane_pill(id: &str, tab: u32, pane: &PaneSummary, colors: &Palette) -> impl V
         .on_tap(move |state: &mut SessionsState| pages::attach_pane(state, &id, tab, pane_id))
 }
 
-/// `AI AGENTS · N` with the count pills, over one row per agent (most urgent
-/// first, as the repository orders them). A tap attaches into the agent's pane.
 fn agents_section(id: &str, agents: &[SessionAgent], colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let summary = AgentSummary::from_statuses(
@@ -670,7 +612,6 @@ fn agents_section(id: &str, agents: &[SessionAgent], colors: &Palette) -> impl V
     gapped_column(parts, HEAD_GAP)
 }
 
-/// `space › tab › p<pane>`, the space left out when the agent reports none.
 fn agent_location(agent: &SessionAgent) -> String {
     let pane = format!("p{}", agent.pane_id);
     let mut parts: Vec<&str> = Vec::with_capacity(3);
@@ -682,10 +623,8 @@ fn agent_location(agent: &SessionAgent) -> String {
     parts.join(LOCATION_SEP)
 }
 
-/// One agent row: status dot, kind tile, `name · kind` over the activity line,
-/// the status word and the location trailing. Blocked rows wear the amber wash.
-/// A tap attaches into the agent's pane; a row the layout could not place
-/// (no tab position) keeps the same anatomy but takes no tap.
+/// One agent row; blocked rows wear the amber wash. A row the layout could not place (no tab
+/// position) keeps the anatomy but takes no tap.
 fn agent_row(id: &str, agent: &SessionAgent, colors: &Palette) -> impl View<SessionsState> {
     let theme = active_theme();
     let (fill, border) = if agent.status == AgentStatus::Blocked {
