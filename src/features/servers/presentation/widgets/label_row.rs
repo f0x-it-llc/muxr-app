@@ -13,12 +13,9 @@ use crate::ui::paint::RADIUS_FULL;
 use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
-/// The status dot's side.
 const DOT: f64 = 8.0;
-/// The lock mark replacing the dot.
 const LOCK_MARK: f64 = 12.0;
 
-/// The trust badge's text: short, since the row sits above a card.
 pub fn trust_badge_label(mode: TrustMode) -> &'static str {
     match mode {
         TrustMode::System => "system TLS",
