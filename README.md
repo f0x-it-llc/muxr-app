@@ -1,61 +1,75 @@
-# muxr
+# Muxr
 
-A Frust app created with `frust create`.
+Muxr is a mobile client for remote terminal-multiplexer sessions, zellij and
+herdr. It talks to `muxrd`, the companion daemon in
+[muxr-core](https://github.com/f0x-it-llc/muxr-core), over TLS and
+bearer-token gRPC. It runs on Android and iOS, on phones and tablets.
 
-## Theming
+## Get the app
 
-This app uses the **Glyph design system** by default, which automatically
-adapts to the device's light/dark preference. To opt back to Material or
-Cupertino:
+<a href="https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967"><img src="docs/badges/app-store.svg" alt="Download on the App Store" height="44"></a>
+<a href="https://play.google.com/store/apps/details?id=com.it.f0x.muxr"><img src="docs/badges/google-play.png" alt="Get it on Google Play" height="44"></a>
 
-```rust
-use frust::{Component, set_app_theme, Theme};
+New here? Follow the [quick start](https://muxr.app/docs.html).
 
-impl Component for MyAppApp {
-    fn build(&self, state: &mut AppState) -> AnyView<AppState> {
-        // Material 3 (M3)
-        set_app_theme(Theme::m3_baseline());
+## Features
 
-        // Or Cupertino
-        set_app_theme(Theme::cupertino_baseline());
-    }
-}
+- Connect to a `muxrd` server by scanning a QR pairing code, or from a list of saved servers.
+- Switch between servers without leaving the app.
+- Browse the sessions on a server and open, create or manage them.
+- A terminal with a key bar and a tree of spaces, tabs and panes.
+- An agents list across sessions.
+- Settings for tokens, fonts and appearance.
+- Muxr Pro unlocks more than one server.
+
+## Requirements
+
+- Rust (stable)
+- The [`frust`](https://frust.dev/) CLI
+- Android SDK and NDK, for Android builds
+- Xcode, for iOS builds
+
+## Build and run
+
+The verify gate:
+
+```
+cargo build && cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --check
 ```
 
-## Custom Fonts
+Desktop preview:
 
-By default, Frust includes IBM Plex Mono and Space Mono fonts. To drop bundled fonts:
-
-```toml
-# Cargo.toml
-frust = { ..., default-features = false, features = ["..."] }
+```
+cargo run
 ```
 
-Then register your own at app startup:
+Device builds:
 
-```rust
-use frust::register_app_fonts;
-
-fn init() {
-    register_app_fonts(&[
-        ("MyFont", include_bytes!("../assets/MyFont.ttf")),
-    ]);
-}
+```
+frust run --flavor develop
+frust run --flavor production
 ```
 
-## Theme Customization
+## Project layout
 
-Customize colors, motion, and spacing using the builder:
+- `src/features/<slice>/` holds one feature per slice (connect, servers, sessions, settings, terminal, pro), split into domain, data and presentation.
+- `src/net/` is the gRPC client, TLS and authentication.
+- `src/ui/` holds the shared widgets and painting helpers.
+- `src/fonts/` is the font catalog and downloader.
+- `tests/` holds the headless test suites.
+- `proto/muxr.proto` is vendored from muxr-core.
+- `docs/` holds design mocks, icon masters and the store badges.
 
-```rust
-use frust::{ColorScheme, Theme};
+## Contributing
 
-let custom = Theme::builder()
-    .light_scheme(ColorScheme {
-        // ... customize roles
-    })
-    .build();
-set_app_theme(custom);
-```
+Pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CLA.md](CLA.md).
 
-See `frust-theme`'s docs in the Frust repo for the full token reference.
+## License
+
+[PolyForm Noncommercial License 1.0.0](LICENSE)
+
+Required Notice: Copyright (c) 2026 F0X IT LLC
+
+The software is free to use, modify and share for noncommercial purposes, including building it and installing it on your own devices. Commercial use needs a license from F0X IT LLC.
+
+Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC. The badge artwork under docs/badges/ is not covered by this repository's license.
