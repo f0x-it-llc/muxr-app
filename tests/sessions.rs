@@ -184,6 +184,8 @@ impl Harness {
         )
     }
 
+    /// The navigator delivers a pusher's `on_result` on the first event pass after the pop's
+    /// rebuild, so the trailing Move hands the answer over.
     fn flush(&mut self) {
         self.settle();
         self.settle();
