@@ -1,4 +1,4 @@
-//! Piece 0 — `.connect-mark`.
+//! Piece 0: `.connect-mark`.
 
 use frust::{
     Align, Alignment, EdgeInsets, Padding, Theme, View, colored_box, container, inflexible,
@@ -12,12 +12,8 @@ use crate::ui::spacing;
 const MARK_SIZE: f64 = 60.0;
 /// Off the app's spacing scale, so it stays local.
 const MARK_GAP: f64 = 5.0;
-/// One grid cell: the tile minus its padding and the single gap, halved.
 const MARK_CELL: f64 = (MARK_SIZE - 2.0 * spacing::BASE - MARK_GAP) / 2.0;
 
-/// Piece 0 — a bordered 60×60 tile holding a 2×2 grid whose diagonal is solid
-/// amber and whose off-diagonal is the faint amber wash, centered in the layer
-/// (`margin:0 auto`). Pure decoration — no [`Live`](super::Live).
 pub fn connect_mark<S: 'static>(theme: &Theme, colors: &Palette) -> impl View<S> {
     let cell_radius = theme.shape.extra_small;
     // Diagonal is a hairline-bordered faint wash; off-diagonal is solid accent fill.
