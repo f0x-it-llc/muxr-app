@@ -1,26 +1,6 @@
-//! [`FontCatalog`] — the downloadable catalog's reactive state, and the
-//! download state machine the picker drives.
-//!
-//! **A thread-local handle, not a context value** (same idiom as
-//! `crate::ui::toasts::app_toasts`): one catalog per UI thread, self-healing
-//! if its signals were disposed with a torn-down owner.
-//!
-//! **Threading.** [`FontCatalog::load`]/[`FontCatalog::install`] are `async`,
-//! awaited from `spawn_local`; each hands the fetch to `frust::spawn`
-//! (reqwest needs a live tokio context) and disk/hash/parse work to
-//! `frust::spawn_blocking`, answering back over a `oneshot` so every signal
-//! write lands on the UI thread.
-//!
-//! **Lifecycle.** The manifest fetches when the picker opens, never at
-//! startup. A failed fetch/parse falls back to the cached copy
-//! ([`FontCatalog::is_stale`]); with no cache either, status becomes
-//! [`CatalogStatus::Unavailable`] with **no toast** — a missing catalog isn't
-//! a user error, and installed fonts still list.
-//!
-//! **Per-font states:** `Available → Downloading → Installed | Failed`,
-//! single-flight per family (a second tap while downloading no-ops, a failed
-//! row's tap retries); a download only makes a font selectable, never selects
-//! it.
+//! [`FontCatalog`]: the downloadable catalog's reactive state and the picker's download state machine.
+//! A failed fetch/parse falls back to the cached copy; with none, status is [`CatalogStatus::Unavailable`], with no toast.
+//! Downloads are single-flight per family (`Available -> Downloading -> Installed | Failed`) and never select the font.
 
 use std::sync::Arc;
 
@@ -31,63 +11,36 @@ use crate::failure::AppFailure;
 use super::manifest::{self, FontEntry};
 use super::{source, store};
 
-/// Where the catalog itself stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CatalogStatus {
-    /// Before a picker has ever opened.
     Idle,
-    /// A fetch is in flight.
     Loading,
-    /// Entries available (see [`FontCatalog::is_stale`] for the offline-cache case).
     Ready,
-    /// The fetch failed and nothing was cached.
     Unavailable,
 }
 
-/// Where one catalog entry stands for this device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FontState {
-    /// Offered, not downloaded.
     Available,
-    /// Downloading, verifying, or registering right now.
     Downloading,
-    /// Cached, registered, and selectable.
     Installed,
-    /// The last attempt failed. A tap retries.
     Failed,
 }
 
-/// The app's font catalog handle — `Copy`, like every other signal-bundle
-/// handle in this app (`ui::toasts::FailureToasts`,
-/// `settings::presentation::scramble::RevokeAnimations`), so a sheet row, a
-/// spawned task and the settings screen all act through the same state.
 #[derive(Clone, Copy)]
 pub struct FontCatalog {
     status: RwSignal<CatalogStatus>,
-    /// Entries last resolved, in manifest order.
     entries: RwSignal<Arc<[FontEntry]>>,
-    /// Whether [`Self::entries`] came from the offline cache after a failed
-    /// fetch.
     stale: RwSignal<bool>,
-    /// Transient per-family states; a family absent here falls back to the
-    /// store (see [`FontCatalog::state_of`]).
     states: RwSignal<Arc<[(String, FontState)]>>,
-    /// Live download fraction (`0.0..=1.0`) per family with a known size hint
-    /// (see [`FontCatalog::progress_of_entry`]) — absent means not
-    /// downloading, or downloading with no hint (indeterminate).
     progress: RwSignal<Arc<[(String, f64)]>>,
 }
 
 thread_local! {
-    /// The one [`FontCatalog`] per UI thread — see [`font_catalog`].
     static CATALOG: std::cell::Cell<Option<FontCatalog>> = const { std::cell::Cell::new(None) };
 }
 
-/// The app's font catalog, created once per thread and reused afterwards.
-///
-/// Self-healing, like `ui::toasts::app_toasts`: a handle whose signals were
-/// disposed with their owner (a headless test that dropped its ambient
-/// `Owner`) reads back `None` and is replaced rather than handed out dead.
+/// Created once per thread; replaced if its signals were disposed with a torn-down owner.
 pub fn font_catalog() -> FontCatalog {
     CATALOG.with(|cell| {
         if let Some(catalog) = cell.get()
@@ -108,31 +61,24 @@ pub fn font_catalog() -> FontCatalog {
 }
 
 impl FontCatalog {
-    /// Tracked — a load landing wakes the sheet rendering it.
     pub fn status(&self) -> CatalogStatus {
         self.status.get()
     }
 
-    /// The entries the catalog last resolved (tracked).
     pub fn entries(&self) -> Arc<[FontEntry]> {
         self.entries.get()
     }
 
-    /// Untracked — for a press handler, which runs outside any rebuild and
-    /// must not subscribe one (`docs/CODE_STANDARDS.md`'s tracked-read rule).
+    /// Untracked, for press handlers that run outside any rebuild.
     pub fn entries_untracked(&self) -> Arc<[FontEntry]> {
         self.entries.get_untracked()
     }
 
-    /// Whether those entries came from the offline cache (tracked).
     pub fn is_stale(&self) -> bool {
         self.stale.get()
     }
 
-    /// Where `entry` stands on this device (tracked), resolved through its
-    /// **effective** family — what it actually registered as, if that
-    /// differs from the manifest's claim (see [`super::store`]) — so a row
-    /// can't claim "available" while already installed under another name.
+    /// Resolved through the effective family, so a row cannot read "available" while installed under another name.
     pub fn state_of(&self, entry: &FontEntry) -> FontState {
         let family = effective_family(entry);
         if let Some((_, state)) = self.states.get().iter().find(|(known, _)| *known == family) {
@@ -145,8 +91,6 @@ impl FontCatalog {
         }
     }
 
-    /// Live download fraction for `family` (tracked); `None` if nothing is
-    /// downloading under that name, or its entry carries no size hint.
     fn progress_of(&self, family: &str) -> Option<f64> {
         self.progress
             .get()
@@ -155,18 +99,12 @@ impl FontCatalog {
             .map(|(_, fraction)| *fraction)
     }
 
-    /// [`Self::progress_of`] through `entry`'s effective family — the same
-    /// key [`Self::state_of`]/[`Self::install`] use. `None` renders the
-    /// indeterminate dots loader, `Some` the determinate bar.
+    /// `None` renders the indeterminate loader, `Some` the determinate bar.
     pub fn progress_of_entry(&self, entry: &FontEntry) -> Option<f64> {
         self.progress_of(&effective_family(entry))
     }
 
-    /// Fetch the catalog unless a fetch is in flight or one already landed —
-    /// the picker calls this on open.
-    ///
-    /// [`CatalogStatus::Unavailable`] is never cached as a verdict:
-    /// re-opening retries. Never fails outward (see the [module docs](self)).
+    /// [`CatalogStatus::Unavailable`] is never cached as a verdict: re-opening retries.
     pub async fn load(&self) {
         match self.status.get_untracked() {
             CatalogStatus::Loading | CatalogStatus::Ready => return,
@@ -186,16 +124,8 @@ impl FontCatalog {
         }
     }
 
-    /// Download, verify, cache and register `entry`.
-    ///
-    /// Single-flight per family: a call for a family already downloading or
-    /// installed answers `Ok(())` without starting a second one. The row's
-    /// state carries the outcome; the returned failure is only for the
-    /// caller's own toast.
-    ///
-    /// While in flight, `received / entry.total_bytes()` publishes for
-    /// [`Self::progress_of_entry`] (see [`Self::spawn_progress_pump`]); a
-    /// zero size hint never publishes one, leaving it indeterminate.
+    /// Single-flight per family: a family already downloading or installed answers `Ok(())`.
+    /// A zero size hint never publishes progress, leaving it indeterminate.
     pub async fn install(&self, entry: FontEntry) -> Result<(), AppFailure> {
         let family = effective_family(&entry);
         match self.state_of_untracked(&family) {
@@ -203,8 +133,7 @@ impl FontCatalog {
             FontState::Available | FontState::Failed => {}
         }
         self.set_state(&family, FontState::Downloading);
-        // A stale fraction from a previous failed attempt must not flash
-        // before this one's first real chunk lands.
+        // Clears a stale fraction left by a failed attempt.
         self.clear_progress(&family);
 
         let total = entry.total_bytes();
@@ -217,9 +146,7 @@ impl FontCatalog {
         self.clear_progress(&family);
         match outcome {
             Ok(registered) => {
-                // The family it registered as may differ from the manifest's
-                // claim; record the state under both so the row flips either
-                // way.
+                // The registered family may differ from the manifest's claim; record both so the row flips either way.
                 self.set_state(&family, FontState::Installed);
                 if registered != family {
                     self.set_state(&registered, FontState::Installed);
@@ -233,8 +160,6 @@ impl FontCatalog {
         }
     }
 
-    /// [`Self::state_of`] by family, without tracking — for the guards above,
-    /// which run outside any rebuild.
     fn state_of_untracked(&self, family: &str) -> FontState {
         if let Some((_, state)) = self
             .states
@@ -251,7 +176,6 @@ impl FontCatalog {
         }
     }
 
-    /// Publish `state` for `family`, replacing any state it already had.
     fn set_state(&self, family: &str, state: FontState) {
         let mut states: Vec<(String, FontState)> = self
             .states
@@ -264,11 +188,7 @@ impl FontCatalog {
         self.states.set(Arc::from(states));
     }
 
-    /// Drain `receiver` on the UI thread, publishing a throttled
-    /// whole-percent fraction for `family` ([`Self::publish_progress`]
-    /// itself refuses non-new values). Ends once the sender (`download`'s
-    /// per-file callback) drops — its own spawned task, not a child of
-    /// [`Self::install`]'s future, so it outlives a torn-down caller.
+    /// Drains `receiver` on the UI thread into throttled whole-percent fractions; its own task, so it outlives a torn-down caller.
     fn spawn_progress_pump(
         self,
         family: String,
@@ -289,9 +209,7 @@ impl FontCatalog {
         });
     }
 
-    /// Publish `fraction` (clamped `0.0..=1.0`) for `family`, never
-    /// backward — the manifest's size hint is advisory, so a fraction no
-    /// higher than what's already published is dropped.
+    /// Never moves backward: the manifest's size hint is advisory.
     fn publish_progress(&self, family: &str, fraction: f64) {
         let fraction = fraction.clamp(0.0, 1.0);
         let current = self.progress.get_untracked();
@@ -310,7 +228,6 @@ impl FontCatalog {
         self.progress.set(Arc::from(next));
     }
 
-    /// Drop `family`'s published fraction, if any.
     fn clear_progress(&self, family: &str) {
         let current = self.progress.get_untracked();
         if !current.iter().any(|(known, _)| known == family) {
@@ -325,19 +242,11 @@ impl FontCatalog {
     }
 }
 
-/// The family `entry` resolves to on this device: the one it actually
-/// registered as when that differed from the manifest's claim, else the claim
-/// itself.
 fn effective_family(entry: &FontEntry) -> String {
     store::registered_family_for(&entry.family).unwrap_or_else(|| entry.family.clone())
 }
 
-/// Run `work` on the background runtime and await its answer here.
-///
-/// `frust::spawn` is required, not just sanctioned, for the fetches below:
-/// reqwest's connector spawns onto the tokio runtime, so its futures must be
-/// polled inside one; the `oneshot` carries the answer back to the awaiting
-/// UI thread since `frust::spawn` itself returns nothing.
+/// Runs `work` on the background runtime (reqwest needs a live tokio context) and awaits its answer over a `oneshot`.
 async fn run_off_thread<T: Send + 'static>(
     work: impl std::future::Future<Output = Result<T, AppFailure>> + Send + 'static,
 ) -> Result<T, AppFailure> {
@@ -352,12 +261,8 @@ async fn run_off_thread<T: Send + 'static>(
     })
 }
 
-/// Fetch + parse the catalog, falling back to the cached copy — the `bool` is
-/// whether that fallback is what answered.
 async fn fetch_catalog() -> Result<(Vec<FontEntry>, bool), AppFailure> {
     let fetched = source::font_source().fetch_manifest().await;
-    // Parse/cache-write/offline-read are blocking/CPU work: the blocking
-    // pool, not the async worker.
     frust::spawn_blocking(move || match fetched {
         Ok(bytes) => match manifest::parse_manifest(&bytes) {
             Ok(entries) => {
@@ -372,8 +277,6 @@ async fn fetch_catalog() -> Result<(Vec<FontEntry>, bool), AppFailure> {
     .map_err(|err| AppFailure::Internal(format!("font catalog worker: {err}")))?
 }
 
-/// The cached catalog if there is a usable one, else `failure` — the offline
-/// grace every fetch/parse error lands in.
 fn cached_catalog_or(failure: AppFailure) -> Result<(Vec<FontEntry>, bool), AppFailure> {
     match store::read_cached_manifest()
         .as_deref()
@@ -384,13 +287,7 @@ fn cached_catalog_or(failure: AppFailure) -> Result<(Vec<FontEntry>, bool), AppF
     }
 }
 
-/// Download every file of `entry`, then verify/cache/register the lot;
-/// answers the family it registered as.
-///
-/// `progress` receives cumulative bytes **across every file**, in manifest
-/// order — [`FontCatalog::install`]'s pump divides this by
-/// `entry.total_bytes()`, so a later file picks up where the previous one
-/// left off rather than resetting toward `0`.
+/// `progress` receives cumulative bytes across every file, so a later file continues where the previous one left off.
 async fn download(
     entry: FontEntry,
     progress: tokio::sync::mpsc::UnboundedSender<u64>,
@@ -436,8 +333,6 @@ mod tests {
         }
     }
 
-    /// A catalog with fresh, empty signals — every unit test below's starting
-    /// point.
     fn test_catalog() -> FontCatalog {
         FontCatalog {
             status: RwSignal::new(CatalogStatus::Idle),
@@ -450,8 +345,6 @@ mod tests {
 
     #[test]
     fn an_untouched_entry_reads_as_available() {
-        // `state_of_untracked`'s store-backed fallback — what a fresh row
-        // resolves through.
         let catalog = test_catalog();
         assert_eq!(
             catalog.state_of_untracked("Nothing Installed Mono"),
@@ -467,7 +360,6 @@ mod tests {
             catalog.state_of_untracked("Fixture Mono"),
             FontState::Downloading
         );
-        // …and re-publishing replaces rather than duplicates.
         catalog.set_state("Fixture Mono", FontState::Failed);
         assert_eq!(catalog.states.get_untracked().len(), 1);
         assert_eq!(
@@ -481,8 +373,6 @@ mod tests {
         assert_eq!(effective_family(&entry("Unaliased Mono")), "Unaliased Mono");
     }
 
-    // -- progress: publish/clear, independent of the async download path ---
-
     #[test]
     fn progress_publishes_monotonically_clamped_and_never_regresses() {
         let catalog = test_catalog();
@@ -491,8 +381,7 @@ mod tests {
         catalog.publish_progress("Fixture Mono", 0.25);
         assert_eq!(catalog.progress_of("Fixture Mono"), Some(0.25));
 
-        // Lower than published is dropped — advisory size hints must never
-        // read back as a regression.
+        // Advisory size hints must never read back as a regression.
         catalog.publish_progress("Fixture Mono", 0.10);
         assert_eq!(catalog.progress_of("Fixture Mono"), Some(0.25));
 
@@ -511,7 +400,6 @@ mod tests {
     fn progress_of_entry_resolves_through_the_effective_family() {
         let catalog = test_catalog();
         let entry = entry("Claimed Mono");
-        // Nothing published yet, under either name.
         assert_eq!(catalog.progress_of_entry(&entry), None);
         catalog.publish_progress("Claimed Mono", 0.4);
         assert_eq!(catalog.progress_of_entry(&entry), Some(0.4));
