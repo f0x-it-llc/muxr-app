@@ -10,14 +10,9 @@
 //! rows the free tier cannot keep — both end in the *same* connect the user
 //! asked for, re-run from the entry point it came from.
 //!
-//! The saved-row tap is gated one level up, in [`gated_saved_row_tap`], rather
-//! than inside `ConnectController::recover_and_connect`: the row's own
-//! no-verification confirmation lives in
-//! [`credential_dialogs::handle_saved_row_tap`](super::credential_dialogs::handle_saved_row_tap)
-//! and dials through that ungated method, so the verdict has to be taken before
-//! the dialog is raised. The retry re-enters the same handler by *row* — a
-//! forget moves every later index — so the confirmation is still asked once,
-//! and only for a connect that will actually happen.
+//! The saved-row tap is gated one level up, in [`gated_saved_row_tap`], so
+//! the verdict is taken before any unlock; the retry re-enters by *row*, since
+//! a forget moves every later index.
 //!
 //! [`scan_blocked`] is the fourth gated entry point, taken at the tap since
 //! the endpoint is unknown until the scan completes; it raises the same
@@ -32,9 +27,7 @@ use std::sync::Arc;
 use frust::{GetUntracked, NavigatorController};
 
 use super::super::controller::{ConnectController, ConnectRetry, GatePrompt, ServerLimitBlock};
-use super::credential_dialogs::{
-    credential_offer_prompt, handle_saved_row_tap, unverified_confirm_prompt,
-};
+use super::credential_dialogs::credential_offer_prompt;
 use crate::AppState;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::features::pro::domain::entities::{
@@ -74,11 +67,8 @@ pub(crate) fn server_limit_prompt(
 }
 
 /// A saved row tapped, with the free-tier verdict taken first: a blocked row
-/// raises the paywall instead of unlocking anything, and everything past the
-/// verdict — the no-verification confirmation, the unlock, the dial — stays
-/// [`handle_saved_row_tap`]'s. See the [module docs](self) for why the verdict
-/// is taken here rather than inside the connect it guards. Busy comes first,
-/// the order the other two entry points take: a paywall raised for a dial
+/// raises the paywall instead of unlocking anything. Busy comes first, the
+/// order the other entry points take: a paywall raised for a dial
 /// `recover_and_connect` then refuses mid-flight would have dropped rows (its
 /// forget-and-connect) for a connect that never runs.
 pub(crate) fn gated_saved_row_tap(
@@ -98,12 +88,12 @@ pub(crate) fn gated_saved_row_tap(
     if controller.saved_row_blocked(&server, &gate) {
         return;
     }
-    handle_saved_row_tap(controller, overlays, nav, index);
+    controller.saved_row_tapped(index, nav);
 }
 
 /// The unlock dock's press. The verdict is taken inside
 /// [`ConnectController::unlock_keyring_and_connect`], ahead of the prompt, so
-/// this only lends it the paywall and the no-verification confirm.
+/// this only lends it the paywall.
 pub(crate) fn gated_keyring_unlock(
     controller: &Arc<ConnectController>,
     overlays: &NavigatorController<AppState>,
@@ -111,7 +101,7 @@ pub(crate) fn gated_keyring_unlock(
     pro: &Arc<ProController>,
 ) {
     let gate = server_limit_prompt(controller, overlays, nav, pro);
-    controller.unlock_keyring_and_connect(nav, gate, unverified_confirm_prompt(overlays));
+    controller.unlock_keyring_and_connect(nav, gate);
 }
 
 /// Whether connecting to `server`'s endpoint raises the paywall while `saved`

@@ -9,7 +9,11 @@ use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{Notify, broadcast};
 
 use crate::agents::agent_sort_key;
+use crate::connection::{ConnectionController, ServerInfo};
 use crate::failure::AppFailure;
+use crate::features::connect::domain::entities::epoch_millis;
+use crate::features::servers::di::{LastSeenHandle, use_last_seen};
+use crate::features::servers::domain::entities::{PageSnapshot, SeenServer, SessionGlimpse};
 use crate::features::sessions::domain::entities::{
     CreateSessionParams, RenameRequest, Session, SessionAgent, SessionBackend,
 };
@@ -24,6 +28,50 @@ use crate::net::wake::WakeReason;
 const NOT_PAUSED: usize = usize::MAX;
 
 pub const POLL_PERIOD_SECS: u32 = 3;
+
+/// Consecutive `Network` failures of the poll and wake refreshes (both feed
+/// the streak; they run only while connected) after which the screen reports
+/// connection trouble; twice as many make it persistent.
+pub const RENEW_AFTER_FAILURES: u32 = 2;
+
+/// Whether `failure` is the connection's to show (the banner), not a toast's.
+fn is_connection_class(failure: &AppFailure) -> bool {
+    matches!(failure, AppFailure::Network(_) | AppFailure::Auth(_))
+}
+
+/// What the failure streak says about the live connection, once per edge
+/// ([`SessionsController::take_trouble`]). `Auth` never counts: it reaches the
+/// connection's session renewal from the repositories.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionTrouble {
+    /// The streak reached [`RENEW_AFTER_FAILURES`].
+    Started,
+    /// The streak reached twice [`RENEW_AFTER_FAILURES`].
+    Persistent,
+    /// A success ended a streak that had reported trouble.
+    Recovered,
+}
+
+/// One session as a non-live switcher face remembers it.
+fn glimpse_of(session: &Session) -> SessionGlimpse {
+    SessionGlimpse {
+        name: session.name.clone(),
+        backend: session.backend.label().to_string(),
+        running: session.status.is_live(),
+        meta_line: format!(
+            "{} · {} tabs · {} panes",
+            session.age_label(),
+            session.layout.tabs,
+            session.layout.panes
+        ),
+    }
+}
+
+/// How many inert Sessions snapshots (the switcher's cached peer cards) this
+/// process has built: what a suite reads to prove a closed stage builds none.
+pub fn snapshots_built_for_tests() -> usize {
+    super::widgets::snapshots_built()
+}
 
 /// Releases a single-flight claim when dropped, however the claimed work ends.
 struct ReleaseClaim<'a>(&'a AtomicBool);
@@ -53,6 +101,12 @@ pub struct SessionsController {
     /// selection change and every poll tick while the detail shows them.
     pub agents: RwSignal<Vec<SessionAgent>>,
     repository: Arc<dyn SessionsRepository + Send + Sync>,
+    /// Where a successful list is remembered for the server switcher's
+    /// non-live faces: the app's last-seen handle and the connection naming
+    /// the endpoint it belongs to. Both resolved once, here; `None` (no
+    /// handle provided, as in every headless suite) makes
+    /// [`publish_glimpse`](Self::publish_glimpse) a no-op.
+    glimpse_sink: Option<(LastSeenHandle, Arc<ConnectionController>)>,
     /// Whether the detail pane is on screen — the page sets it from its size
     /// class each build, so a Compact window never pays for the agent reads.
     detail_visible: AtomicBool,
@@ -64,10 +118,17 @@ pub struct SessionsController {
     /// The poll tick's own single-flight claim on the agents fetch, apart from
     /// [`poll_in_flight`](Self::poll_in_flight): a hung agents read never stalls the list.
     agents_in_flight: AtomicBool,
+    /// Whether the page shows a cached snapshot with no live connection behind
+    /// it: no poll, wake refresh or retry runs, and the page's actions are off.
+    offline: AtomicBool,
     resume_at: AtomicUsize,
     polls: AtomicU32,
     poll_in_flight: AtomicBool,
     generation: AtomicU64,
+    /// Consecutive `Network` failures of the poll and wake refreshes; reset by a success.
+    failure_streak: AtomicU32,
+    /// The streak's latest unreported edge, taken by [`take_trouble`](Self::take_trouble).
+    trouble: Mutex<Option<ConnectionTrouble>>,
 }
 
 impl SessionsController {
@@ -84,14 +145,18 @@ impl SessionsController {
             selected: RwSignal::new(None),
             agents: RwSignal::new(Vec::new()),
             repository,
+            glimpse_sink: use_last_seen().zip(frust::use_context::<Arc<ConnectionController>>()),
             detail_visible: AtomicBool::new(false),
             agents_for: Mutex::new(None),
             agents_generation: AtomicU64::new(0),
             agents_in_flight: AtomicBool::new(false),
+            offline: AtomicBool::new(false),
             resume_at: AtomicUsize::new(NOT_PAUSED),
             polls: AtomicU32::new(0),
             poll_in_flight: AtomicBool::new(false),
             generation: AtomicU64::new(0),
+            failure_streak: AtomicU32::new(0),
+            trouble: Mutex::new(None),
         }
     }
 
@@ -99,22 +164,128 @@ impl SessionsController {
         &self.core
     }
 
+    /// A refresh run on the user's behalf (after create, rename or kill):
+    /// every failure reaches the failure sink.
     pub async fn refresh(&self) {
+        self.refresh_with(false).await;
+    }
+
+    /// A refresh nobody asked for (first load, poll, wake, restart): a
+    /// connection-class failure (Network, Auth, not connected) is the banner's
+    /// to show and raises no toast; any other class still reaches the sink.
+    pub async fn refresh_background(&self) {
+        self.refresh_with(true).await;
+    }
+
+    /// Runs the list. `Some(outcome)` once its reply is current; `None` when a
+    /// newer refresh superseded it (neither a success nor a failure to count).
+    async fn refresh_with(&self, background: bool) -> Option<Result<(), AppFailure>> {
         let my_generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // Named before the await (see `glimpse_source`).
+        let source = self.glimpse_source();
         let result = self
             .core
-            .run(&self.list, NoParams, RunOptions::default())
+            .run(
+                &self.list,
+                NoParams,
+                RunOptions {
+                    emit_failure: !background,
+                    ..RunOptions::default()
+                },
+            )
             .await;
         if self.generation.load(Ordering::SeqCst) != my_generation {
-            return;
+            return None;
         }
-        if let Ok(sessions) = result {
-            self.forget_vanished_selection(&sessions);
-            self.sessions.set(sessions);
-            self.loaded.set(true);
-            self.retarget_agents();
+        if let Err(failure) = &result
+            && background
+            && !is_connection_class(failure)
+            && !self.core.is_disposed()
+        {
+            self.core.failures().emit(failure);
         }
+        let outcome = match result {
+            Ok(sessions) => {
+                self.forget_vanished_selection(&sessions);
+                self.publish_glimpse(source, &sessions);
+                self.sessions.set(sessions);
+                self.loaded.set(true);
+                self.retarget_agents();
+                Ok(())
+            }
+            Err(failure) => Err(failure),
+        };
         self.first_load_settled.set(true);
+        Some(outcome)
+    }
+
+    /// Remember `sessions` as what the connected server last showed, for the
+    /// server switcher's non-live faces: the glimpse list and the whole page
+    /// state (list items as rendered plus the header facts) its snapshot card
+    /// re-renders. Plain data through the servers slice's last-seen handle;
+    /// does nothing without one, or with no connected server to file it under.
+    /// `source` is the handshake facts captured before the list awaited.
+    fn publish_glimpse(&self, source: Option<ServerInfo>, sessions: &[Session]) {
+        let (Some((handle, connection)), Some(info)) = (&self.glimpse_sink, source) else {
+            return;
+        };
+        let endpoint = info.endpoint.clone();
+        let page = PageSnapshot {
+            sessions: sessions.to_vec(),
+            read_only: connection.is_read_only.get_untracked(),
+            info: Some(info),
+        };
+        handle.record_seen(
+            &endpoint,
+            SeenServer {
+                glimpses: sessions.iter().map(glimpse_of).collect(),
+                seen_at_ms: epoch_millis(),
+                page: Some(Arc::new(page)),
+            },
+        );
+    }
+
+    /// The connected server's handshake facts, when a glimpse sink exists to
+    /// file them. Named before the list's await: a switch landing mid-list
+    /// must not file the old server's rows under the new endpoint.
+    fn glimpse_source(&self) -> Option<ServerInfo> {
+        let (_, connection) = self.glimpse_sink.as_ref()?;
+        connection.server_info.get_untracked()
+    }
+
+    /// Replace the list with a cached snapshot, without ever emptying it: the
+    /// rows swap in one write, the first load counts as settled, a reply still
+    /// in flight from the previous server is dropped, and a selection the
+    /// snapshot does not carry is forgotten.
+    pub fn seed_from(&self, page: &PageSnapshot) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.reset_streak();
+        self.poll_in_flight.store(false, Ordering::SeqCst);
+        self.agents_in_flight.store(false, Ordering::SeqCst);
+        self.forget_vanished_selection(&page.sessions);
+        self.sessions.set(page.sessions.clone());
+        self.loaded.set(true);
+        self.first_load_settled.set(true);
+        self.retarget_agents();
+    }
+
+    /// Mark whether the page is showing a snapshot with no live connection.
+    pub fn set_offline(&self, offline: bool) {
+        self.offline.store(offline, Ordering::Relaxed);
+    }
+
+    /// Whether the page is showing a snapshot with no live connection.
+    pub fn is_offline(&self) -> bool {
+        self.offline.load(Ordering::Relaxed)
+    }
+
+    /// The seeded connection landed: refresh in place (no clear, no restart,
+    /// no first-load flags reset) and let the poll run again. The rows are
+    /// replaced where the new list says so; a failed read keeps the snapshot.
+    pub fn refresh_in_place(self: &Arc<Self>) {
+        self.set_offline(false);
+        let controller = Arc::clone(self);
+        frust::spawn_local(async move { controller.refresh_background().await });
     }
 
     /// Starts this mount over for a new connection: the generation bump drops
@@ -123,7 +294,9 @@ impl SessionsController {
     /// agents go, the first-load flags reset so the loading rain can replay, the
     /// poll gate is released, and the first load is kicked as `init` does.
     pub fn restart(self: &Arc<Self>) {
+        self.set_offline(false);
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.reset_streak();
         self.sessions.set(Vec::new());
         self.loaded.set(false);
         self.first_load_settled.set(false);
@@ -132,16 +305,63 @@ impl SessionsController {
         self.agents_in_flight.store(false, Ordering::SeqCst);
         self.retarget_agents();
         let controller = Arc::clone(self);
-        frust::spawn_local(async move { controller.refresh().await });
+        frust::spawn_local(async move { controller.refresh_background().await });
     }
 
     pub async fn refresh_from_poll(&self) {
         {
             let _release = ReleaseClaim(&self.poll_in_flight);
-            self.refresh().await;
+            let outcome = self.refresh_with(true).await;
+            self.count_outcome(outcome);
         }
         // Past the list poll's claim: the next tick's list refresh does not wait on this read.
         self.refresh_agents_from_poll().await;
+    }
+
+    fn reset_streak(&self) {
+        self.failure_streak.store(0, Ordering::SeqCst);
+        *self.trouble_slot() = None;
+    }
+
+    fn trouble_slot(&self) -> std::sync::MutexGuard<'_, Option<ConnectionTrouble>> {
+        self.trouble.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Folds one poll or wake refresh into the failure streak. Only a `Network`
+    /// failure counts: the one making the streak [`RENEW_AFTER_FAILURES`] long
+    /// raises [`ConnectionTrouble::Started`], twice that `Persistent`; a
+    /// success resets it, raising `Recovered` if trouble was raised. Any other
+    /// failure leaves the streak as it is.
+    fn count_outcome(&self, outcome: Option<Result<(), AppFailure>>) {
+        let edge = match outcome {
+            Some(Err(AppFailure::Network(_))) => {
+                match self.failure_streak.fetch_add(1, Ordering::SeqCst) + 1 {
+                    n if n == RENEW_AFTER_FAILURES => Some(ConnectionTrouble::Started),
+                    n if n == 2 * RENEW_AFTER_FAILURES => Some(ConnectionTrouble::Persistent),
+                    _ => None,
+                }
+            }
+            Some(Ok(())) => (self.failure_streak.swap(0, Ordering::SeqCst) >= RENEW_AFTER_FAILURES)
+                .then_some(ConnectionTrouble::Recovered),
+            Some(Err(_)) | None => None,
+        };
+        if edge.is_some() {
+            *self.trouble_slot() = edge;
+        }
+    }
+
+    /// The streak's latest edge not yet reported, clearing it: the page shows
+    /// it through the servers controller's banner.
+    pub fn take_trouble(&self) -> Option<ConnectionTrouble> {
+        self.trouble_slot().take()
+    }
+
+    /// Whether a connection is up behind this page. A controller built with no
+    /// connection to consult (headless suites) counts as connected.
+    fn is_connected(&self) -> bool {
+        self.glimpse_sink
+            .as_ref()
+            .is_none_or(|(_, connection)| connection.connected.get_untracked())
     }
 
     /// The poll tick's agent fetch under its own single-flight claim: a tick finding the
@@ -263,6 +483,8 @@ impl SessionsController {
     /// [`take_poll_tick`](Self::take_poll_tick).
     fn take_retry(&self) -> bool {
         self.is_polling()
+            && !self.is_offline()
+            && self.is_connected()
             && self.first_load_settled.get_untracked()
             && !self.loaded.get_untracked()
             && !self.poll_in_flight.swap(true, Ordering::SeqCst)
@@ -272,7 +494,7 @@ impl SessionsController {
     /// [`take_poll_tick`](Self::take_poll_tick) reads, so the poll re-arms.
     pub async fn retry_first_load(&self) {
         if !self.loaded.get_untracked() {
-            self.refresh().await;
+            self.refresh_background().await;
         }
     }
 
@@ -365,6 +587,8 @@ impl SessionsController {
 
     pub fn take_poll_tick(&self) -> bool {
         let poll = self.is_polling()
+            && !self.is_offline()
+            && self.is_connected()
             && self.loaded.get_untracked()
             && !self.poll_in_flight.swap(true, Ordering::SeqCst);
         if poll {
@@ -502,6 +726,75 @@ mod tests {
 
         assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
         assert!(c.loaded.get_untracked());
+    }
+
+    #[test]
+    fn publish_glimpse_fills_the_last_seen_handle_after_a_successful_list() {
+        use crate::connection::{ConnectTarget, MockConnectionBackend, TrustMode};
+
+        let connection = Arc::new(ConnectionController::with_backend(Arc::new(
+            MockConnectionBackend,
+        )));
+        connection.connect(ConnectTarget {
+            host: "rig".to_string(),
+            port: 7777,
+            trust_mode: TrustMode::NoVerification,
+            label: "rig".to_string(),
+            offer_credential: false,
+            token: zeroize::Zeroizing::new("t".to_string()),
+            remember: false,
+            fingerprint: None,
+        });
+        let handle = LastSeenHandle::new();
+        let mut c = controller();
+        c.glimpse_sink = Some((handle.clone(), connection));
+
+        block_on(c.refresh());
+
+        let seen = handle.snapshot();
+        let filed = seen.get("rig:7777").expect("filed under the endpoint");
+        let glimpses = &filed.glimpses;
+        assert_eq!(glimpses.len(), SEEDED_COUNT);
+        assert!(filed.seen_at_ms > 0);
+        let page = filed.page.as_ref().expect("the full page state is filed");
+        assert_eq!(page.sessions, c.sessions.get_untracked());
+        assert_eq!(
+            page.info.as_ref().map(|info| info.endpoint.as_str()),
+            Some("rig:7777")
+        );
+        assert!(
+            glimpses
+                .iter()
+                .all(|g| !g.name.is_empty() && !g.meta_line.is_empty())
+        );
+    }
+
+    #[test]
+    fn publish_glimpse_files_nothing_without_a_handle_or_without_a_connected_endpoint() {
+        use crate::connection::MockConnectionBackend;
+
+        let c = controller();
+        assert!(
+            c.glimpse_sink.is_none(),
+            "no handle provided in a bare suite"
+        );
+        block_on(c.refresh());
+        assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
+
+        let handle = LastSeenHandle::new();
+        let mut c = controller();
+        c.glimpse_sink = Some((
+            handle.clone(),
+            Arc::new(ConnectionController::with_backend(Arc::new(
+                MockConnectionBackend,
+            ))),
+        ));
+        block_on(c.refresh());
+        assert_eq!(c.sessions.get_untracked().len(), SEEDED_COUNT);
+        assert!(
+            handle.snapshot().is_empty(),
+            "a handle with no connected endpoint to file under stays empty"
+        );
     }
 
     #[test]

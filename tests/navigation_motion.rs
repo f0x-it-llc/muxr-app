@@ -1923,3 +1923,302 @@ fn the_navigator_survives_the_bar_appearing_and_disappearing() {
 // retitling (section 2), overlay modality (3/3b/3c/3d), and the full
 // settings → sessions → connect round trip
 // (`settings_back_sessions_back_connect_retitles_the_bar_at_every_step`).
+
+// ---------------------------------------------------------------------------
+// 4 — the server switcher host (shell page as the live card) and its FAB
+// ---------------------------------------------------------------------------
+
+/// The FAB's accessible name (its tooltip).
+const SERVERS_FAB: &str = "Servers";
+/// The stage bar's accessible names, transcribed.
+const LOCK_CHIP: &str = "Lock keyring";
+const ADD_CHIP: &str = "add server";
+const CLOSE_CHIP: &str = "Close";
+
+fn switcher() -> Arc<muxr::features::servers::presentation::controller::ServersSwitcherController> {
+    muxr::features::servers::di::expect_servers_controller()
+}
+
+fn stage_is_open() -> bool {
+    switcher().open.get_untracked()
+}
+
+/// Raise the stage the way the FAB does and run the loop to its parking point.
+fn open_stage(h: &mut Harness) {
+    switcher().open();
+    h.park();
+}
+
+#[test]
+fn the_servers_fab_exists_only_on_sessions() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+    assert!(
+        h.labels().iter().any(|l| l == SERVERS_FAB),
+        "sessions carries the FAB: {:?}",
+        h.labels()
+    );
+    let fab_role = h
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.label() == Some(SERVERS_FAB))
+        .map(|(_, node)| node.role());
+    assert_eq!(fab_role, Some(Role::Button), "the FAB node is a Button");
+
+    h.push("/settings");
+    h.park();
+    assert!(
+        !h.labels().iter().any(|l| l == SERVERS_FAB),
+        "settings does not: {:?}",
+        h.labels()
+    );
+
+    h.push("/terminal?session=dev");
+    h.park();
+    assert!(
+        !h.labels().iter().any(|l| l == SERVERS_FAB),
+        "…nor does the terminal: {:?}",
+        h.labels()
+    );
+}
+
+#[test]
+fn the_fab_opens_the_stage_and_the_dots_read_the_strip() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+    assert!(!stage_is_open());
+    let fab = node_centers_by_label(&h.root, SERVERS_FAB)[0];
+    h.tap_parked(fab);
+    assert!(stage_is_open(), "a tap on the FAB raised the stage");
+
+    let strip = muxr::features::servers::presentation::controller::peer_endpoints(
+        &switcher().faces.get_untracked(),
+    )
+    .len()
+        + 1;
+    let dots = format!("page 1 of {strip}");
+    assert!(
+        h.labels().contains(&dots),
+        "the dots' status reads {dots:?} (the live card is first): {:?}",
+        h.labels()
+    );
+}
+
+#[test]
+fn the_stage_bar_close_chip_dismisses_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    open_stage(&mut h);
+    let close = node_centers_by_label(&h.root, CLOSE_CHIP)[0];
+    h.tap_parked(close);
+    assert!(!stage_is_open());
+}
+
+#[test]
+fn back_with_the_stage_open_closes_it_before_any_navigator_pops() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    h.park();
+    open_stage(&mut h);
+    let generation = sessions_back_signal().get();
+    let (route_depth, overlay_depth) = (h.depth(), h.overlay_depth());
+
+    press_back(&mut h);
+
+    assert!(!stage_is_open(), "the press closed the stage");
+    assert_eq!(h.depth(), route_depth, "no route popped");
+    assert_eq!(h.overlay_depth(), overlay_depth, "no overlay appeared");
+    assert_eq!(
+        sessions_back_signal().get(),
+        generation + 1,
+        "the route navigator outranks the fallback and bumped Sessions' cell…"
+    );
+    assert!(
+        !showing_confirmation(&h),
+        "…which closed the stage instead of asking about disconnecting"
+    );
+    assert!(connected());
+
+    press_back(&mut h);
+    assert!(
+        showing_confirmation(&h),
+        "with the stage down, back is Sessions' own again"
+    );
+}
+
+#[test]
+fn the_stage_bars_add_chip_pushes_the_add_server_page_under_pro() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    unlock_pro(&mut h);
+    open_stage(&mut h);
+    let add = node_centers_by_label(&h.root, ADD_CHIP)[0];
+
+    h.tap_parked(add);
+    h.settle();
+    h.park();
+
+    assert!(
+        h.values().iter().any(|v| v == ADD_SERVER_HEADING),
+        "the add form is up: {:?}",
+        h.values()
+    );
+    assert_eq!(h.depth(), 3, "pushed over the placed shell");
+    assert!(!stage_is_open(), "the add chip took the stage down with it");
+
+    press_back(&mut h);
+    assert_eq!(h.depth(), 2, "the add page popped back to the shell");
+    assert!(!stage_is_open(), "the stage does not reappear on pop");
+    assert!(
+        h.labels().iter().all(|l| !l.starts_with("page ")),
+        "no dots: {:?}",
+        h.labels()
+    );
+}
+
+#[test]
+fn the_stage_never_outlives_sessions() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    open_stage(&mut h);
+    assert!(stage_is_open());
+
+    app_nav().push("/settings");
+    h.settle();
+    h.park();
+
+    assert!(!stage_is_open(), "leaving /sessions closed the stage");
+    assert!(
+        h.labels().iter().all(|l| !l.starts_with("page ")),
+        "no dots: {:?}",
+        h.labels()
+    );
+}
+
+#[test]
+fn the_stage_bars_lock_chip_locks_the_keyring_and_lands_on_connect() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    let mut keyring = Keyring::new();
+    keyring.insert(SAVED_ENDPOINT, Zeroizing::new(SAVED_TOKEN.to_string()));
+    expect_keyring().publish(keyring);
+    open_stage(&mut h);
+    let lock = node_centers_by_label(&h.root, LOCK_CHIP)[0];
+
+    h.tap_parked(lock);
+    h.settle();
+    h.park();
+
+    assert!(!expect_keyring().is_unlocked(), "the vault is shut");
+    assert!(!connected(), "…and the connection dropped");
+    assert!(!stage_is_open());
+    assert_eq!(h.depth(), 1, "…landing on Connect");
+}
+
+/// On `/sessions` with Pro unlocked and [`SAVED_ENDPOINT`] remembered, its
+/// token in the unlocked keyring, then the stage open.
+fn stage_over_a_saved_server() -> Harness {
+    let mut h = Harness::on_sessions();
+    unlock_pro(&mut h);
+    expect_saved_servers()
+        .save(SavedServer {
+            host: SAVED_HOST.to_string(),
+            port: 50051,
+            trust_mode: TrustMode::System,
+            label: SAVED_LABEL.to_string(),
+            last_used_ms: epoch_millis(),
+            read_only: false,
+            has_credential: true,
+            token_name: None,
+            fingerprint: None,
+        })
+        .expect("the mock store never fails");
+    let mut keyring = Keyring::new();
+    keyring.insert(SAVED_ENDPOINT, Zeroizing::new(SAVED_TOKEN.to_string()));
+    expect_keyring().publish(keyring);
+    open_stage(&mut h);
+    h
+}
+
+#[test]
+fn selecting_a_peer_switches_the_server_and_the_stage_comes_down_on_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = stage_over_a_saved_server();
+    let epoch = expect_connection_controller()
+        .connection_epoch
+        .get_untracked();
+    let endpoints = muxr::features::servers::presentation::controller::peer_endpoints(
+        &switcher().faces.get_untracked(),
+    );
+    let peer = endpoints
+        .iter()
+        .position(|e| e == SAVED_ENDPOINT)
+        .expect("the saved row is a peer card");
+    let gate = muxr::features::servers::presentation::controller::SwitchGate::standard(
+        &h.state.overlays,
+        &expect_pro_controller(),
+        &app_nav(),
+    );
+
+    switcher().select(peer, &gate);
+    pump_until_true(&mut h, || {
+        connected_endpoint().as_deref() == Some(SAVED_ENDPOINT) && !stage_is_open()
+    });
+    h.park();
+
+    assert!(
+        expect_connection_controller()
+            .connection_epoch
+            .get_untracked()
+            > epoch,
+        "the epoch advanced"
+    );
+    assert!(switcher().expanding.get_untracked().is_none());
+    assert_eq!(h.depth(), 2, "still on the shell page, no navigation");
+    assert!(
+        h.labels().iter().any(|l| l == SERVERS_FAB),
+        "the new server's Sessions is up with its FAB: {:?}",
+        h.labels()
+    );
+}
+
+/// The label-row of the card chrome moves with the first open frame under
+/// motion and not under reduce-motion: read the FAB's on-screen centre in the
+/// first frame after the stage rose and again once settled.
+fn first_frame_shift(reduce_motion: bool) -> f64 {
+    let mut h = Harness::themed(theme(reduce_motion));
+    expect_connection_controller().connect(mock_target());
+    h.push("/sessions");
+    h.park();
+    switcher().open();
+    h.requested_frame();
+    let first = node_centers_by_label(&h.root, SERVERS_FAB)[0];
+    h.park();
+    let settled = node_centers_by_label(&h.root, SERVERS_FAB)[0];
+    (first - settled).hypot()
+}
+
+#[test]
+fn reduce_motion_opens_at_card_scale_on_the_first_frame() {
+    let _g = serial();
+    let _ambient = setup();
+    let moving = first_frame_shift(false);
+    let snapped = first_frame_shift(true);
+    assert!(
+        moving > 1.0,
+        "with motion the first frame is mid-flight: {moving}"
+    );
+    assert!(snapped < 1.0, "reduce-motion snaps the scale: {snapped}");
+}

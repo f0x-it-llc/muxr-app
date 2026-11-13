@@ -23,7 +23,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use frust::{provide_context, use_context};
 
 use super::data::repositories::{
-    MockEntitlementRepository, PlayEntitlementRepository, UnavailableEntitlementRepository,
+    DevelopEntitlementRepository, MockEntitlementRepository, PlayEntitlementRepository,
+    UnavailableEntitlementRepository,
 };
 use super::domain::repositories::EntitlementRepository;
 use super::presentation::controller::ProController;
@@ -49,17 +50,55 @@ pub fn provide() {
 /// is built over the very same instance rather than a second lookup's.
 fn provide_entitlement_repository() -> SharedEntitlementRepository {
     let scripted = USE_MOCK_ENTITLEMENT_FOR_TESTS.load(Ordering::Relaxed);
-    let repository = if scripted || cfg!(feature = "mock-iap") {
-        let mock = Arc::new(MockEntitlementRepository::free());
-        if scripted {
-            provide_context(Arc::clone(&mock));
+    let source = select_source(scripted, cfg!(feature = "mock-iap"), flavor_marker());
+    let repository = match source {
+        EntitlementSource::Mock => {
+            let mock = Arc::new(MockEntitlementRepository::free());
+            if scripted {
+                provide_context(Arc::clone(&mock));
+            }
+            mock as SharedEntitlementRepository
         }
-        mock as SharedEntitlementRepository
-    } else {
-        platform_entitlement_repository()
+        EntitlementSource::Develop => {
+            log::info!("pro entitlement: develop build, every Pro feature is unlocked");
+            Arc::new(DevelopEntitlementRepository)
+        }
+        EntitlementSource::Platform => platform_entitlement_repository(),
     };
     provide_context(Arc::clone(&repository));
     repository
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntitlementSource {
+    Mock,
+    Develop,
+    Platform,
+}
+
+/// Build-time `MUXR_FLAVOR` marker (develop builds only); cargo tracks it.
+fn flavor_marker() -> Option<&'static str> {
+    option_env!("MUXR_FLAVOR")
+}
+
+pub fn is_develop_marker(marker: Option<&str>) -> bool {
+    marker == Some("develop")
+}
+
+pub fn is_develop_build() -> bool {
+    is_develop_marker(flavor_marker())
+}
+
+/// Pure selection: tests and `mock-iap` keep precedence over the develop
+/// marker, which in turn beats the real store.
+pub fn select_source(scripted: bool, mock_iap: bool, marker: Option<&str>) -> EntitlementSource {
+    if scripted || mock_iap {
+        EntitlementSource::Mock
+    } else if is_develop_marker(marker) {
+        EntitlementSource::Develop
+    } else {
+        EntitlementSource::Platform
+    }
 }
 
 /// The real store, over the platform's own billing service and preferences.

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use frust::{
     AnyView, Component, GetUntracked, NavigatorController, Set, SizedBox, Stack, WindowMetrics,
-    any, navigator, provide_context,
+    any, navigator, provide_context, spawn_local,
 };
 use frust_core::{NamedKey, PointerPhase, RenderRoot};
 use frust_text::TextContext;
@@ -37,6 +37,19 @@ use kurbo::{Point, Size};
 use muxr::agents::{AgentStatus, AgentSummary};
 use muxr::connection::{ConnectTarget, ServerBackend, TrustMode, expect_connection_controller};
 use muxr::failure::AppFailure;
+use muxr::features::connect::di::{expect_keyring, expect_saved_servers};
+use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
+use muxr::features::connect::domain::keyring::Keyring;
+use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
+use muxr::features::pro::domain::entities::Entitlement;
+use muxr::features::servers::di::{
+    BANNER_CONNECTING_DELAY_MS, expect_servers_controller, set_banner_connecting_delay_for_tests,
+    set_banner_timings_for_tests,
+};
+use muxr::features::servers::di::{
+    PEER_TAIL, keep_peers, set_stage_clock_for_tests, stage_settled,
+};
+use muxr::features::servers::presentation::controller::{SwitchGate, peer_endpoints};
 use muxr::features::sessions::data::repositories::mock_sessions_repository::{
     MockSessionsRepository, SEEDED_DEV_ID, SEEDED_HERDR_ID,
 };
@@ -46,15 +59,18 @@ use muxr::features::sessions::domain::entities::{
     SessionStatus, ThirdMetric,
 };
 use muxr::features::sessions::domain::repositories::SessionsRepository;
-use muxr::features::sessions::presentation::controllers::{POLL_PERIOD_SECS, SessionsController};
+use muxr::features::sessions::presentation::controllers::{
+    ConnectionTrouble, POLL_PERIOD_SECS, SessionsController,
+};
 use muxr::features::sessions::presentation::pages::{
-    resolve_poll_interval, sessions_page, set_loading_rain_for_tests,
+    deferred_rain_arms_for_tests, rain_overlay_builds_for_tests, resolve_poll_interval,
+    sessions_page, set_loading_rain_for_tests, trouble_reconnects_for_tests,
 };
 use muxr::features::settings::data::repositories::MockPreferencesRepository;
 use muxr::features::settings::di::SharedPreferencesRepository;
 use muxr::features::settings::domain::entities::{AppearancePrefs, PollPrefs, Preferences};
 use muxr::features::settings::domain::repositories::PreferencesRepository;
-use muxr::routes::install_app_router;
+use muxr::routes::{app_nav, install_app_router};
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -151,11 +167,24 @@ impl Harness {
     /// [`mount`](Self::mount) laid out at `surface`, over `repository` in
     /// place of the seeded mock when one is given.
     fn mount_over(repository: Option<SharedSessionsRepository>, surface: Size) -> Self {
+        Harness::mount_with(repository, None, surface)
+    }
+
+    /// [`mount_over`](Self::mount_over), also swapping in `preferences` (the
+    /// poll cadence's source) when given.
+    fn mount_with(
+        repository: Option<SharedSessionsRepository>,
+        preferences: Option<SharedPreferencesRepository>,
+        surface: Size,
+    ) -> Self {
         // The real composition root, unbuilt: publishes DI including this
         // feature's repository, but never plays a splash.
         let state = MuxrApp.init();
         if let Some(repository) = repository {
             provide_context(repository);
+        }
+        if let Some(preferences) = preferences {
+            provide_context(preferences);
         }
         let nav: NavigatorController<AppState> = NavigatorController::new();
         // Re-points `routes::app_nav()` at this fixture's own navigator, real
@@ -1790,6 +1819,173 @@ fn a_switch_replays_the_loading_rain_and_the_new_first_load_releases_it() {
     );
 }
 
+/// A pinned stage clock that is released when dropped, even on a panic.
+struct StageClock(Instant);
+
+impl StageClock {
+    /// Pins the clock and walks the stage through open then closed, so the close tail runs.
+    fn closing() -> Self {
+        let at = Instant::now();
+        set_stage_clock_for_tests(Some(at));
+        keep_peers(true);
+        keep_peers(false);
+        assert!(!stage_settled(), "the close tail is running");
+        StageClock(at)
+    }
+
+    fn advance(&self, by: Duration) {
+        set_stage_clock_for_tests(Some(self.0 + by));
+    }
+}
+
+impl Drop for StageClock {
+    fn drop(&mut self) {
+        set_stage_clock_for_tests(None);
+    }
+}
+
+/// Pumps frames for `wall` of real time (the deferred arm polls on a real timer) and returns
+/// how many builds carried the rain overlay meanwhile.
+fn rain_builds_over(h: &mut Harness, wall: Duration) -> usize {
+    let before = rain_overlay_builds_for_tests();
+    let end = Instant::now() + wall;
+    h.frame();
+    while Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(10));
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+        h.frame();
+    }
+    rain_overlay_builds_for_tests() - before
+}
+
+/// Lets the first rain run out on a synthetic clock, then holds host B's list open.
+fn rain_released_then_gated(h: &mut Harness, repo: &SwitchableRepo) {
+    let mut clock = 0.0;
+    let mut runs = h.frame().glyph_runs;
+    assert!(runs > RAIN_RUNS, "the first load opens under rain");
+    while runs >= RAIN_RUNS {
+        assert!(clock < 5_000.0, "the first rain never ended");
+        clock += 100.0;
+        runs = frame_at_sized(
+            &mut h.root,
+            &mut h.logic,
+            &mut h.state,
+            &mut h.tcx,
+            h.surface,
+            support::ms(clock),
+        )
+        .glyph_runs;
+    }
+    repo.gated.store(true, Ordering::SeqCst);
+}
+
+fn switch_hosts(h: &mut Harness) {
+    let connection = expect_connection_controller();
+    connection.disconnect();
+    connection.connect(mock_target(false));
+    h.pump_until("the dial to settle", |_| {
+        connection.connected.get_untracked()
+    });
+    for _ in 0..2 {
+        h.frame();
+    }
+}
+
+#[test]
+fn a_switch_during_the_stage_defers_the_rain_until_the_stage_settles() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one"], "alpha-one");
+    rain_released_then_gated(&mut h, &repo);
+    let stage = StageClock::closing();
+    let arms = deferred_rain_arms_for_tests();
+
+    set_names(&repo, &["beta-one"]);
+    switch_hosts(&mut h);
+    assert!(
+        rain_builds_over(&mut h, Duration::from_millis(250)) == 0,
+        "no rain during the handshake and the tail"
+    );
+    assert_eq!(deferred_rain_arms_for_tests(), arms);
+
+    stage.advance(PEER_TAIL);
+    assert!(
+        rain_builds_over(&mut h, Duration::from_millis(400)) > 0,
+        "the rain arms once the stage settles, the first load still pending"
+    );
+    assert_eq!(deferred_rain_arms_for_tests(), arms + 1);
+}
+
+#[test]
+fn a_first_load_settling_before_the_stage_skips_the_rain() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one"], "alpha-one");
+    rain_released_then_gated(&mut h, &repo);
+    let stage = StageClock::closing();
+    let arms = deferred_rain_arms_for_tests();
+
+    set_names(&repo, &["beta-one"]);
+    switch_hosts(&mut h);
+    repo.open();
+    h.pump_until_values("host B's list", |v| v.iter().any(|s| s == "beta-one"));
+    stage.advance(PEER_TAIL);
+    assert!(
+        rain_builds_over(&mut h, Duration::from_millis(400)) == 0,
+        "the rain never arms over a settled load"
+    );
+    assert_eq!(deferred_rain_arms_for_tests(), arms);
+}
+
+#[test]
+fn a_switch_with_the_stage_at_rest_arms_the_rain_at_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one"], "alpha-one");
+    rain_released_then_gated(&mut h, &repo);
+    let arms = deferred_rain_arms_for_tests();
+
+    set_names(&repo, &["beta-one"]);
+    let connection = expect_connection_controller();
+    connection.disconnect();
+    connection.connect(mock_target(false));
+    h.pump_until("the dial to settle", |_| {
+        connection.connected.get_untracked()
+    });
+    assert!(
+        rain_builds_over(&mut h, Duration::from_millis(100)) > 0,
+        "a Settings-initiated switch replays the rain immediately"
+    );
+    assert_eq!(deferred_rain_arms_for_tests(), arms, "no deferral");
+}
+
+#[test]
+fn a_second_switch_cancels_the_pending_deferred_arm() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rain = RainOn::new();
+    let (mut h, repo) = switchable(&["alpha-one"], "alpha-one");
+    rain_released_then_gated(&mut h, &repo);
+    let stage = StageClock::closing();
+    let arms = deferred_rain_arms_for_tests();
+
+    set_names(&repo, &["beta-one"]);
+    switch_hosts(&mut h);
+    rain_builds_over(&mut h, Duration::from_millis(120));
+    switch_hosts(&mut h);
+
+    stage.advance(PEER_TAIL);
+    assert!(rain_builds_over(&mut h, Duration::from_millis(500)) > 0);
+    assert_eq!(
+        deferred_rain_arms_for_tests(),
+        arms + 1,
+        "the stale arm did not also fire"
+    );
+}
+
 /// Glyph runs above which a frame is the dense rain (`sessions_loading`'s `DENSE_RUNS`).
 const RAIN_RUNS: usize = 100;
 
@@ -2501,9 +2697,19 @@ fn read_only_on_tablet_chips_the_strip_and_leaves_only_attach_working() {
         h.settle();
         assert_eq!(h.depth(), 1, "a read-only {action} opens nothing");
     }
+    // The second identical refusal inside the dedupe window adds no toast.
     let raised = toasts.pending_untracked();
-    assert_eq!(raised.len(), 2, "each refusal says why: {raised:?}");
+    assert_eq!(raised.len(), 1, "one refusal, deduped: {raised:?}");
     assert!(raised.iter().all(|t| t.starts_with("Read-only session")));
+    // Past the window the same refusal shows again.
+    muxr::ui::toasts::advance_toast_clock_for_tests(
+        muxr::ui::toasts::DEDUPE_WINDOW + Duration::from_millis(1),
+    );
+    h.tap_label("kill");
+    h.settle();
+    let raised = toasts.pending_untracked();
+    assert_eq!(raised.len(), 2, "past the window it shows: {raised:?}");
+    assert_eq!(h.depth(), 1, "still nothing opened");
 
     h.tap_label("\u{2192} attach");
     h.settle();
@@ -2758,4 +2964,697 @@ fn the_seeded_herdr_summary_is_the_rollup_of_the_terminal_mocks_default_agents()
         .find(|session| session.id == SEEDED_HERDR_ID)
         .expect("herdr");
     assert_eq!(herdr.agents.as_ref(), Some(&rollup));
+}
+
+// ---------------------------------------------------------------------------
+// 13 — the server switcher stage covers the screen without moving a
+// navigator, so the poll pauses on the stage itself
+// ---------------------------------------------------------------------------
+
+/// Preferences whose poll runs every second, so a pause is observable in a
+/// couple of real seconds.
+struct FastPollPreferences;
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl PreferencesRepository for FastPollPreferences {
+    async fn load_preferences(&self) -> Result<Preferences, AppFailure> {
+        let mut prefs = Preferences::defaults();
+        prefs.poll.layout_refresh_secs = 1;
+        Ok(prefs)
+    }
+
+    async fn save_appearance(
+        &self,
+        _prefs: AppearancePrefs,
+    ) -> Result<AppearancePrefs, AppFailure> {
+        unreachable!("not exercised by the pause test")
+    }
+
+    async fn save_poll_prefs(&self, _prefs: PollPrefs) -> Result<PollPrefs, AppFailure> {
+        unreachable!("not exercised by the pause test")
+    }
+}
+
+#[test]
+fn the_poll_pauses_while_the_switcher_stage_is_open_and_resumes_on_close() {
+    let _g = serial();
+    let _ambient = setup();
+    let repo = Arc::new(CountingSessionsRepo::new());
+    let mut h = Harness::mount_with(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        Some(Arc::new(FastPollPreferences)),
+        support::surface(),
+    );
+    expect_connection_controller().connect(mock_target(false));
+    h.pump_until("the first load", |_| repo.calls() >= 1);
+
+    let switcher = expect_servers_controller();
+    switcher.open();
+    h.frame();
+    // A poll already in flight when the stage rose may still land: wait for
+    // the count to hold still over several frames.
+    let mut stable = 0;
+    let mut last = repo.calls();
+    while stable < 5 {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+        let now = repo.calls();
+        stable = if now == last { stable + 1 } else { 0 };
+        last = now;
+    }
+    let covered_at = last;
+    let until = Instant::now() + Duration::from_millis(2600);
+    while Instant::now() < until {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    assert!(
+        repo.calls() == covered_at,
+        "no ListSessions while the stage is open: {} -> {}",
+        covered_at,
+        repo.calls()
+    );
+    let held = repo.calls();
+
+    switcher.close();
+    h.pump_until("the poll to resume", |_| repo.calls() > held);
+}
+
+// ---------------------------------------------------------------------------
+// 13 — The server switcher on Tablet: the FAB's corner and the card scale
+// ---------------------------------------------------------------------------
+
+/// The Tablet FAB's inset from the window edge, and the Compact one.
+const TABLET_FAB_INSET: f64 = 24.0;
+const COMPACT_FAB_INSET: f64 = 16.0;
+/// The switcher card's scale at full open on a Tablet window / a phone.
+const TABLET_CARD_SCALE: f64 = 0.58;
+const PHONE_CARD_SCALE: f64 = 0.62;
+/// `.s-side{width:300px}` and the collapsed band's 240px, transcribed.
+const FULL_SIDE_WIDTH: f64 = 300.0;
+const COLLAPSED_SIDE_WIDTH: f64 = 240.0;
+const SERVERS_FAB: &str = "Servers";
+const SAVED_HOST: &str = "saved.example";
+const SAVED_ENDPOINT: &str = "saved.example:50051";
+
+/// The whole app (shell, bar, FAB, switcher host) at `size`, on `/sessions`.
+struct Shell {
+    root: RenderRoot<AppState, AnyView<AppState>>,
+    logic: Logic,
+    state: AppState,
+    tcx: TextContext,
+    surface: Size,
+}
+
+impl Shell {
+    fn mount(size: Size) -> Shell {
+        // The splash plays once per process: spend that claim on a throwaway.
+        static SPENT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        SPENT.get_or_init(|| {
+            let mut throwaway = MuxrApp.init();
+            let _ = MuxrApp.build(&mut throwaway);
+        });
+        provide_context(support::metrics_at(size.width, size.height));
+        let mut shell = Shell {
+            root: RenderRoot::new(),
+            logic: Box::new(|state: &mut AppState| AnyView::new(MuxrApp.build(state))),
+            state: MuxrApp.init(),
+            tcx: TextContext::new(),
+            surface: size,
+        };
+        shell.settle();
+        expect_connection_controller().connect(mock_target(false));
+        app_nav().push("/sessions");
+        shell.settle();
+        shell.pump_until("the seeded sessions", |s| s.shows_seeded());
+        shell.settle();
+        shell
+    }
+
+    fn shows_seeded(&self) -> bool {
+        let values = node_values(&self.root);
+        SEEDED.iter().all(|name| values.iter().any(|v| v == name))
+    }
+
+    fn settle(&mut self) -> RecScene {
+        settle_sized(
+            &mut self.root,
+            &mut self.logic,
+            &mut self.state,
+            &mut self.tcx,
+            self.surface,
+        )
+    }
+
+    fn pump_until(&mut self, what: &str, done: impl Fn(&Shell) -> bool) {
+        let deadline = Instant::now() + PUMP_DEADLINE;
+        while !done(self) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            pump_frames(
+                &mut self.root,
+                &mut self.logic,
+                &mut self.state,
+                &mut self.tcx,
+                1,
+            );
+            self.settle();
+        }
+    }
+
+    /// The first node labelled `label`'s on-screen bounds.
+    fn bounds(&self, label: &str) -> frust::accesskit::Rect {
+        self.root
+            .semantics()
+            .nodes
+            .iter()
+            .find(|(_, node)| node.label() == Some(label))
+            .and_then(|(_, node)| node.bounds())
+            .unwrap_or_else(|| panic!("no bounds for {label:?}"))
+    }
+
+    /// Raise the stage and run a real clock past its motion.
+    fn open_stage(&mut self) -> RecScene {
+        expect_servers_controller().open();
+        let mut scene = RecScene::default();
+        for step in 1..=240 {
+            scene = frame_at_sized(
+                &mut self.root,
+                &mut self.logic,
+                &mut self.state,
+                &mut self.tcx,
+                self.surface,
+                support::ms(support::SETTLE_MS + f64::from(step) * 16.0),
+            );
+        }
+        scene
+    }
+}
+
+fn assert_fab_corner(shell: &Shell, size: Size, inset: f64) {
+    let fab = shell.bounds(SERVERS_FAB);
+    assert!(
+        (size.width - fab.x1 - inset).abs() < EPSILON,
+        "right inset {} != {inset}: {fab:?}",
+        size.width - fab.x1
+    );
+    assert!(
+        (size.height - fab.y1 - inset).abs() < EPSILON,
+        "bottom inset {} != {inset}: {fab:?}",
+        size.height - fab.y1
+    );
+}
+
+#[test]
+fn the_tablet_fab_sits_in_the_detail_panes_corner_at_24px() {
+    let _g = serial();
+    let _ambient = setup();
+    let shell = Shell::mount(FULL_TABLET);
+    assert_fab_corner(&shell, FULL_TABLET, TABLET_FAB_INSET);
+    assert!(
+        shell.bounds(SERVERS_FAB).x0 > FULL_SIDE_WIDTH,
+        "right of the list column, over the detail pane"
+    );
+}
+
+#[test]
+fn the_collapsed_tablet_fab_sits_in_the_same_corner_clear_of_the_list_column() {
+    let _g = serial();
+    let _ambient = setup();
+    let shell = Shell::mount(COLLAPSED_TABLET);
+    assert_fab_corner(&shell, COLLAPSED_TABLET, TABLET_FAB_INSET);
+    assert!(shell.bounds(SERVERS_FAB).x0 > COLLAPSED_SIDE_WIDTH);
+}
+
+#[test]
+fn the_phone_fab_keeps_the_compact_16px_corner() {
+    let _g = serial();
+    let _ambient = setup();
+    let shell = Shell::mount(PHONE);
+    assert_fab_corner(&shell, PHONE, COMPACT_FAB_INSET);
+}
+
+/// Every uniform scale the scene pushes a transform for.
+fn scales(scene: &RecScene) -> Vec<f64> {
+    scene
+        .transforms
+        .iter()
+        .map(|t| t.as_coeffs())
+        .filter(|c| (c[0] - c[3]).abs() < 1e-9)
+        .map(|c| c[0])
+        .collect()
+}
+
+/// Whether `scene` pushed a uniform scale of `wanted` (the card's).
+fn paints_scale(scene: &RecScene, wanted: f64) -> bool {
+    scales(scene).iter().any(|s| (s - wanted).abs() < 0.005)
+}
+
+/// Mount at `size`, raise the stage, and say which of the two card scales the
+/// settled open frame paints (and that the closed page painted neither).
+fn open_card_scales(size: Size) -> (bool, bool) {
+    let mut shell = Shell::mount(size);
+    let closed = shell.settle();
+    assert!(
+        !paints_scale(&closed, TABLET_CARD_SCALE) && !paints_scale(&closed, PHONE_CARD_SCALE),
+        "the closed page paints at full size: {:?}",
+        scales(&closed)
+    );
+    let open = shell.open_stage();
+    (
+        paints_scale(&open, TABLET_CARD_SCALE),
+        paints_scale(&open, PHONE_CARD_SCALE),
+    )
+}
+
+#[test]
+fn opening_the_switcher_on_a_full_tablet_scales_the_whole_page_to_0_58() {
+    let _g = serial();
+    let _ambient = setup();
+    assert_eq!(open_card_scales(FULL_TABLET), (true, false));
+}
+
+#[test]
+fn opening_the_switcher_on_a_collapsed_tablet_scales_the_whole_page_to_0_58() {
+    let _g = serial();
+    let _ambient = setup();
+    assert_eq!(open_card_scales(COLLAPSED_TABLET), (true, false));
+}
+
+#[test]
+fn opening_the_switcher_on_a_phone_keeps_the_0_62_scale() {
+    let _g = serial();
+    let _ambient = setup();
+    assert_eq!(open_card_scales(PHONE), (false, true));
+}
+
+fn select_a_peer_at(size: Size) {
+    let mut shell = Shell::mount(size);
+    mock_entitlement()
+        .expect("tests/support opted this process into the mock")
+        .set_entitlement(Entitlement::Pro);
+    let pro = expect_pro_controller();
+    let refreshing = Arc::clone(&pro);
+    spawn_local(async move { refreshing.refresh().await });
+    shell.pump_until("pro", |_| pro.is_pro_untracked());
+    expect_saved_servers()
+        .save(SavedServer {
+            host: SAVED_HOST.to_string(),
+            port: 50051,
+            trust_mode: TrustMode::System,
+            label: "Saved rig".to_string(),
+            last_used_ms: epoch_millis(),
+            read_only: false,
+            has_credential: true,
+            token_name: None,
+            fingerprint: None,
+        })
+        .expect("the mock store never fails");
+    let mut keyring = Keyring::new();
+    keyring.insert(
+        SAVED_ENDPOINT,
+        zeroize::Zeroizing::new("s3cr3t".to_string()),
+    );
+    expect_keyring().publish(keyring);
+    shell.open_stage();
+
+    let switcher = expect_servers_controller();
+    let peer = peer_endpoints(&switcher.faces.get_untracked())
+        .iter()
+        .position(|e| e == SAVED_ENDPOINT)
+        .expect("the saved row is a peer card");
+    let gate = SwitchGate::standard(&shell.state.overlays, &pro, &app_nav());
+    switcher.select(peer, &gate);
+    shell.pump_until("the switch to land", |_| {
+        !switcher.open.get_untracked()
+            && expect_connection_controller()
+                .server_info
+                .get_untracked()
+                .is_some_and(|info| info.endpoint == SAVED_ENDPOINT)
+    });
+    shell.pump_until("the new server's list", |s| s.shows_seeded());
+    assert_fab_corner(&shell, size, TABLET_FAB_INSET);
+    assert!(
+        node_labels(&shell.root)
+            .iter()
+            .any(|l| l == "Select a session"),
+        "{size:?}: the master-detail is up with nothing selected"
+    );
+}
+
+#[test]
+fn selecting_a_peer_on_a_full_tablet_lands_on_the_new_servers_master_detail() {
+    let _g = serial();
+    let _ambient = setup();
+    select_a_peer_at(FULL_TABLET);
+}
+
+#[test]
+fn selecting_a_peer_on_a_collapsed_tablet_lands_on_the_new_servers_master_detail() {
+    let _g = serial();
+    let _ambient = setup();
+    select_a_peer_at(COLLAPSED_TABLET);
+}
+
+#[test]
+fn the_poll_stays_paused_through_the_close_tail_and_resumes_after_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let repo = Arc::new(CountingSessionsRepo::new());
+    let mut h = Harness::mount_with(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        Some(Arc::new(FastPollPreferences)),
+        support::surface(),
+    );
+    expect_connection_controller().connect(mock_target(false));
+    h.pump_until("the first load", |_| repo.calls() >= 1);
+
+    let switcher = expect_servers_controller();
+    switcher.open();
+    h.frame();
+    switcher.close();
+    // The shell's builds, played by hand: open seen, then closed, tail running.
+    let clock = StageClock::closing();
+    h.frame();
+    let mut stable = 0;
+    let mut last = repo.calls();
+    while stable < 5 {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+        let now = repo.calls();
+        stable = if now == last { stable + 1 } else { 0 };
+        last = now;
+    }
+    let held = last;
+    let until = Instant::now() + Duration::from_millis(2600);
+    while Instant::now() < until {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    assert_eq!(repo.calls(), held, "no ListSessions through the close tail");
+
+    clock.advance(PEER_TAIL);
+    h.pump_until("the poll to resume after the tail", |_| repo.calls() > held);
+}
+
+// ---------------------------------------------------------------------------
+// Connection-class failures belong to the banner, never a toast
+// ---------------------------------------------------------------------------
+
+/// A repository whose list and kill fail on demand, counting each list call.
+struct ScriptedRepo {
+    list_failure: Mutex<Option<AppFailure>>,
+    kill_failure: Mutex<Option<AppFailure>>,
+    list_calls: AtomicU32,
+}
+
+impl ScriptedRepo {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            list_failure: Mutex::new(None),
+            kill_failure: Mutex::new(None),
+            list_calls: AtomicU32::new(0),
+        })
+    }
+
+    fn fail_list(&self, failure: Option<AppFailure>) {
+        *self.list_failure.lock().expect("ok") = failure;
+    }
+
+    fn list_calls(&self) -> u32 {
+        self.list_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+#[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+impl SessionsRepository for ScriptedRepo {
+    async fn list_sessions(&self) -> Result<Vec<Session>, AppFailure> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
+        match self.list_failure.lock().expect("ok").clone() {
+            Some(failure) => Err(failure),
+            None => Ok(vec![stub_session("a")]),
+        }
+    }
+
+    async fn create_session(&self, _params: CreateSessionParams) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the banner tests")
+    }
+
+    async fn rename_session(&self, _request: RenameRequest) -> Result<Session, AppFailure> {
+        unreachable!("not exercised by the banner tests")
+    }
+
+    async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+        match self.kill_failure.lock().expect("ok").clone() {
+            Some(failure) => Err(failure),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A controller over `repo` plus a count of the failures it emitted.
+fn counting_controller(repo: &Arc<ScriptedRepo>) -> (SessionsController, Arc<AtomicU32>) {
+    let controller = SessionsController::new(Arc::clone(repo) as SharedSessionsRepository);
+    let emitted = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&emitted);
+    controller
+        .core()
+        .failures()
+        .subscribe(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .forget();
+    (controller, emitted)
+}
+
+#[tokio::test]
+async fn background_refreshes_raise_no_failure_for_connection_class_errors() {
+    let repo = ScriptedRepo::new();
+    let (controller, emitted) = counting_controller(&repo);
+    controller.refresh_background().await;
+    for failure in [
+        AppFailure::Network("not connected to a server".to_string()),
+        AppFailure::Auth("expired".to_string()),
+    ] {
+        repo.fail_list(Some(failure));
+        controller.refresh_background().await;
+        controller.refresh_from_poll().await;
+    }
+    assert_eq!(emitted.load(Ordering::SeqCst), 0, "no toast-bound failure");
+
+    // Any other class still reaches the sink.
+    repo.fail_list(Some(AppFailure::Internal("boom".to_string())));
+    controller.refresh_background().await;
+    assert_eq!(emitted.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_user_action_failure_still_reaches_the_sink() {
+    let repo = ScriptedRepo::new();
+    *repo.kill_failure.lock().expect("ok") = Some(AppFailure::Network("dropped".to_string()));
+    let (controller, emitted) = counting_controller(&repo);
+    controller.kill("a".to_string()).await;
+    assert_eq!(
+        emitted.load(Ordering::SeqCst),
+        1,
+        "the kill's failure shows"
+    );
+}
+
+fn network(message: &str) -> Option<AppFailure> {
+    Some(AppFailure::Network(message.to_string()))
+}
+
+#[tokio::test]
+async fn a_network_streak_raises_trouble_then_persistence_then_recovery_once_each() {
+    let repo = ScriptedRepo::new();
+    let (controller, emitted) = counting_controller(&repo);
+    controller.refresh_background().await;
+    repo.fail_list(network("down"));
+
+    controller.refresh_from_poll().await;
+    assert_eq!(
+        controller.take_trouble(),
+        None,
+        "one failure is not a streak"
+    );
+    controller.refresh_from_poll().await;
+    assert_eq!(controller.take_trouble(), Some(ConnectionTrouble::Started));
+    assert_eq!(controller.take_trouble(), None, "taken once");
+    controller.refresh_from_poll().await;
+    assert_eq!(controller.take_trouble(), None);
+    controller.refresh_from_poll().await;
+    assert_eq!(
+        controller.take_trouble(),
+        Some(ConnectionTrouble::Persistent)
+    );
+    controller.refresh_from_poll().await;
+    assert_eq!(
+        controller.take_trouble(),
+        None,
+        "never again within the streak"
+    );
+
+    repo.fail_list(None);
+    controller.refresh_from_poll().await;
+    assert_eq!(
+        controller.take_trouble(),
+        Some(ConnectionTrouble::Recovered)
+    );
+    controller.refresh_from_poll().await;
+    assert_eq!(controller.take_trouble(), None);
+
+    // A lone failure ended by a success reports nothing either way.
+    repo.fail_list(network("blip"));
+    controller.refresh_from_poll().await;
+    repo.fail_list(None);
+    controller.refresh_from_poll().await;
+    assert_eq!(controller.take_trouble(), None);
+    assert_eq!(emitted.load(Ordering::SeqCst), 0, "no toast-bound failure");
+}
+
+#[tokio::test]
+async fn internal_and_auth_failures_never_count_and_internal_still_reaches_the_sink() {
+    let repo = ScriptedRepo::new();
+    let (controller, emitted) = counting_controller(&repo);
+    controller.refresh_background().await;
+
+    repo.fail_list(Some(AppFailure::Internal("boom".to_string())));
+    for _ in 0..4 {
+        controller.refresh_from_poll().await;
+    }
+    assert_eq!(
+        controller.take_trouble(),
+        None,
+        "Internal is not connection trouble"
+    );
+    assert_eq!(
+        emitted.load(Ordering::SeqCst),
+        4,
+        "each still emits, as before"
+    );
+
+    repo.fail_list(Some(AppFailure::Auth("expired".to_string())));
+    for _ in 0..4 {
+        controller.refresh_from_poll().await;
+    }
+    assert_eq!(
+        controller.take_trouble(),
+        None,
+        "Auth is the renewal's, not the streak's"
+    );
+    assert_eq!(emitted.load(Ordering::SeqCst), 4, "and raises no toast");
+
+    // Neither resets a streak either: two Network failures around them still make one.
+    repo.fail_list(network("down"));
+    controller.refresh_from_poll().await;
+    repo.fail_list(Some(AppFailure::Internal("boom".to_string())));
+    controller.refresh_from_poll().await;
+    repo.fail_list(network("down"));
+    controller.refresh_from_poll().await;
+    assert_eq!(controller.take_trouble(), Some(ConnectionTrouble::Started));
+}
+
+/// Poll every second, so a wall-clock test sees ticks quickly.
+fn poll_fast() -> Option<SharedPreferencesRepository> {
+    Some(Arc::new(FastPollPreferences))
+}
+
+#[test]
+fn a_network_streak_reports_trouble_under_the_banner_and_never_tears_the_connection_down() {
+    use muxr::features::servers::presentation::controller::ReconnectBanner;
+
+    let _g = serial();
+    let _ambient = setup();
+    let repo = ScriptedRepo::new();
+    let mut h = Harness::mount_with(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        poll_fast(),
+        support::surface(),
+    );
+    // No saved credential and a locked keyring: the report needs neither.
+    assert!(!expect_keyring().is_unlocked());
+    assert!(expect_keyring().token_for("mock.example:7777").is_none());
+    expect_connection_controller().connect(mock_target(false));
+    h.pump_until("the first load", |_| repo.list_calls() >= 1);
+    let toasts = muxr::ui::toasts::app_toasts();
+    toasts.clear();
+    let connection = expect_connection_controller();
+    let dials = connection.dial_generation();
+    let rebuilds = trouble_reconnects_for_tests();
+    set_banner_connecting_delay_for_tests(50);
+    set_banner_timings_for_tests(60, 100);
+
+    repo.fail_list(network("deadline exceeded"));
+    let banner = || expect_servers_controller().banner.get_untracked();
+    h.pump_until("the trouble's Connecting banner", |_| {
+        matches!(banner(), Some(ReconnectBanner::Connecting { .. }))
+    });
+    assert_eq!(
+        banner(),
+        Some(ReconnectBanner::Connecting {
+            host: "mock.example".to_string()
+        })
+    );
+    assert!(
+        repo.list_calls() >= 3,
+        "the first load plus two failed ticks"
+    );
+    assert!(
+        trouble_reconnects_for_tests() > rebuilds,
+        "the channel rebuild was asked for"
+    );
+    assert_eq!(connection.dial_generation(), dials, "no teardown, no dial");
+    assert!(connection.connected.get_untracked(), "still connected");
+
+    // Two more failures: `Failed`, kept well past its own timeout.
+    h.pump_until("the persistent trouble's Failed banner", |_| {
+        matches!(banner(), Some(ReconnectBanner::Failed { .. }))
+    });
+    let until = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < until {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+        assert!(matches!(banner(), Some(ReconnectBanner::Failed { .. })));
+    }
+    assert_eq!(connection.dial_generation(), dials, "still no dial");
+    assert!(connection.connected.get_untracked());
+
+    // The next successful poll flashes `Connected`, then clears.
+    repo.fail_list(None);
+    h.pump_until("the recovery's Connected flash", |_| {
+        banner() == Some(ReconnectBanner::Connected)
+    });
+    h.pump_until("the banner to clear", |_| banner().is_none());
+    assert_eq!(connection.dial_generation(), dials);
+    set_banner_connecting_delay_for_tests(BANNER_CONNECTING_DELAY_MS);
+    set_banner_timings_for_tests(1_500, 6_000);
+    assert!(
+        toasts.pending_untracked().is_empty(),
+        "no toast: {:?}",
+        toasts.pending_untracked()
+    );
+}
+
+#[test]
+fn a_disconnected_screen_polls_nothing_and_toasts_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    let repo = ScriptedRepo::new();
+    let mut h = Harness::mount_with(
+        Some(Arc::clone(&repo) as SharedSessionsRepository),
+        poll_fast(),
+        support::surface(),
+    );
+    h.pump_until("the first load", |_| repo.list_calls() >= 1);
+    let after_first = repo.list_calls();
+    repo.fail_list(Some(AppFailure::Network(
+        "not connected to a server".to_string(),
+    )));
+    let toasts = muxr::ui::toasts::app_toasts();
+    toasts.clear();
+    assert!(!expect_connection_controller().connected.get_untracked());
+
+    let until = Instant::now() + Duration::from_millis(2600);
+    while Instant::now() < until {
+        pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
+    }
+    assert_eq!(repo.list_calls(), after_first, "no poll RPC while offline");
+    assert!(toasts.pending_untracked().is_empty());
 }

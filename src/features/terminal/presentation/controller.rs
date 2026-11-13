@@ -68,6 +68,7 @@ use crate::features::terminal::domain::use_cases::{
     DetachSession, ListSpaceTabs, LoadWorkspace, RenameAttachedSession, SwitchTab, WorkspaceQuery,
 };
 use crate::fonts;
+use crate::net::client::MuxrClient;
 
 use super::term;
 
@@ -436,6 +437,18 @@ enum Report {
     /// Swallow it: the poll runs unattended for the life of the mount, so a down link
     /// would toast on a cadence — the card's link strip already says so.
     Silent,
+    /// Log it at debug, no toast: a refresh the user did not ask for, run on the attach-settle
+    /// edge, where a transient failure during a reconnect would toast though the attach succeeds.
+    Quiet,
+}
+
+/// Whether the next tab list answers an error — see [`fail_next_tab_list_for_tests`].
+static FAIL_NEXT_TAB_LIST: AtomicBool = AtomicBool::new(false);
+
+/// Make the next layout fetch's `list_tabs` fail. `pub` rather than `#[cfg(test)]`:
+/// `tests/*.rs` link the normal build. Never called by production code.
+pub fn fail_next_tab_list_for_tests() {
+    FAIL_NEXT_TAB_LIST.store(true, Ordering::SeqCst);
 }
 
 /// Map `settings`' own `CursorStyle` (reached via
@@ -1418,20 +1431,33 @@ impl TerminalController {
         self.refresh_layout(Report::Toast).await;
     }
 
+    /// [`reload_tabs`](Self::reload_tabs) for the attach-settle edge: same refresh, but a
+    /// failure is logged, not toasted.
+    pub async fn reload_tabs_quiet(&self) {
+        self.refresh_layout(Report::Quiet).await;
+    }
+
     /// [`reload_tabs`](Self::reload_tabs)'s body, with the caller's failure policy.
     async fn refresh_layout(&self, report: Report) {
         let generation = self.begin_layout_fetch();
-        match self.terminal.list_tabs().await {
+        let listed = if FAIL_NEXT_TAB_LIST.swap(false, Ordering::SeqCst) {
+            Err(AppFailure::Network(
+                "list_tabs failed (test seam)".to_string(),
+            ))
+        } else {
+            self.terminal.list_tabs().await
+        };
+        match listed {
             Ok(tabs) => {
                 if self.publish_if_newest(generation, tabs, Seed::Heal) {
                     self.apply_attach_target().await;
                 }
             }
-            Err(failure) => {
-                if report == Report::Toast {
-                    self.core.failures().emit(&failure);
-                }
-            }
+            Err(failure) => match report {
+                Report::Toast => self.core.failures().emit(&failure),
+                Report::Quiet => log::debug!("list_tabs on attach settle: {failure}"),
+                Report::Silent => {}
+            },
         }
         if self.agents_relist_due() {
             self.refresh_agents().await;
@@ -2403,6 +2429,9 @@ struct AttachSpec {
     auth_expired: Arc<AtomicBool>,
     /// The controller's resume slot, handed to every feed this spec opens.
     resume: Arc<ResumeSlot>,
+    /// The client the newest feed was attached with, so an auth expiry is fenced to it
+    /// ([`ConnectionController::on_session_expired_for`]) rather than to whatever is live now.
+    client: Arc<Mutex<Option<MuxrClient>>>,
 }
 
 impl LiveSession {
@@ -2428,6 +2457,7 @@ impl LiveSession {
                 session,
                 auth_expired: Arc::new(AtomicBool::new(false)),
                 resume: controller.resume_slot(),
+                client: Arc::new(Mutex::new(None)),
             };
             let (cols, rows) = emulator.borrow().size();
             let feed = spec.attach(cols, rows)?;
@@ -2454,6 +2484,7 @@ impl LiveSession {
                 let mirror = Arc::clone(controller);
                 let expiry = Arc::clone(&spec.connection);
                 let flag = Arc::clone(&spec.auth_expired);
+                let feed_client = Arc::clone(&spec.client);
                 term::spawn_feed_pump_watched(
                     feed_dyn,
                     Rc::clone(&emulator),
@@ -2469,12 +2500,17 @@ impl LiveSession {
                             // no connection id to route it by.
                             let settled = Arc::clone(&mirror);
                             spawn_local(async move {
-                                settled.reload_tabs().await;
+                                settled.reload_tabs_quiet().await;
                                 settled.apply_attach_target().await;
                             });
                         }
                         if flag.swap(false, Ordering::AcqRel) {
-                            expiry.on_session_expired();
+                            // Fenced to the client the feed used; a feed attached with none
+                            // (cannot happen on this path) falls back to the unfenced call.
+                            match lock(&feed_client).clone() {
+                                Some(client) => expiry.on_session_expired_for(&client),
+                                None => expiry.on_session_expired(),
+                            }
                         }
                     },
                 );
@@ -2572,6 +2608,7 @@ impl AttachSpec {
     /// must degrade (fixture replay, "nothing re-attached" on a retry) rather than panic.
     fn attach(&self, cols: u16, rows: u16) -> Option<GrpcTerminalFeed> {
         let client = self.connection.client()?;
+        *lock(&self.client) = Some(client.clone());
         let flag = Arc::clone(&self.auth_expired);
         Some(GrpcTerminalFeed::attach(
             client,

@@ -1012,3 +1012,48 @@ fn not_now_closes_the_sheet_and_runs_no_callback() {
     assert_eq!(sheet.unlocked.get(), 0);
     assert_eq!(sheet.forgotten.get(), 0);
 }
+
+#[test]
+fn the_develop_marker_selects_the_develop_repository_only_outside_tests_and_mock_iap() {
+    use muxr::features::pro::di::{EntitlementSource, is_develop_marker, select_source};
+    assert_eq!(
+        select_source(false, false, Some("develop")),
+        EntitlementSource::Develop
+    );
+    assert_eq!(
+        select_source(false, false, None),
+        EntitlementSource::Platform
+    );
+    assert_eq!(
+        select_source(false, false, Some("production")),
+        EntitlementSource::Platform
+    );
+    assert_eq!(
+        select_source(true, false, Some("develop")),
+        EntitlementSource::Mock
+    );
+    assert_eq!(
+        select_source(false, true, Some("develop")),
+        EntitlementSource::Mock
+    );
+    assert!(is_develop_marker(Some("develop")));
+    assert!(!is_develop_marker(None));
+}
+
+#[test]
+fn the_develop_repository_reports_pro_and_never_reaches_a_store() {
+    use muxr::features::pro::data::repositories::DevelopEntitlementRepository;
+    use muxr::features::pro::domain::entities::RestoreResult;
+    use muxr::features::pro::domain::repositories::EntitlementRepository;
+    let repo = DevelopEntitlementRepository;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    assert_eq!(repo.cached(), Entitlement::Pro);
+    assert_eq!(rt.block_on(repo.refresh()), Ok(Entitlement::Pro));
+    assert_eq!(rt.block_on(repo.purchase()), Ok(PurchaseOutcome::Purchased));
+    assert_eq!(
+        rt.block_on(repo.restore()),
+        Ok(RestoreResult::Found(Entitlement::Pro))
+    );
+}

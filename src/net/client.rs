@@ -104,6 +104,14 @@ impl MuxrClient {
         self.inner.port
     }
 
+    /// Whether `other` is a clone of this client — one shared channel and token
+    /// store — rather than a separate dial, even to the same target. Lets the
+    /// connection tell a failure on the live client from one on a superseded
+    /// client.
+    pub fn is_same(&self, other: &MuxrClient) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Rebuild the channel to the same target, at most once per concurrent
     /// burst (see the module docs). The session token is untouched — a dropped
     /// connection does not invalidate a credential.
@@ -306,5 +314,18 @@ mod tests {
 
         clone.set_session_token(testing::SESSION_TOKEN);
         assert!(client.has_session_token());
+    }
+
+    /// A clone is the same client; a second dial to the very same target is not.
+    #[tokio::test]
+    async fn a_clone_is_the_same_client_and_a_second_dial_is_not() {
+        let fixture = MuxrdFixture::start().await;
+        let client = fixture.connect_pinned().await;
+        let other = fixture.connect_pinned().await;
+
+        assert!(client.is_same(&client.clone()));
+        assert!(client.clone().is_same(&client));
+        assert!(!client.is_same(&other));
+        assert!(!other.is_same(&client));
     }
 }
