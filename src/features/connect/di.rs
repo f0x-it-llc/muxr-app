@@ -1,11 +1,6 @@
-//! [`provide`] is called exactly once, from `crate::MuxrApp::init` — the only
-//! place `connect`'s repositories are constructed; the screen resolves them with
-//! `use_context`, so construction stays single-site across remounts.
-//!
-//! It also publishes the app-scoped [`KeyringHandle`]: one shared
-//! `Mutex<Keyring>` behind an `Arc`, so cloning the handle never copies a
-//! secret, plus two signals screens may track — `unlocked` and a `generation`
-//! bumped on every change. Tokens never sit inside a signal.
+//! Called once from `crate::MuxrApp::init`, the only place `connect`'s repositories are built.
+//! Publishes the app-scoped [`KeyringHandle`]: a shared `Mutex<Keyring>` plus `unlocked` and
+//! `generation` signals. Tokens never sit inside a signal.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -90,23 +85,17 @@ pub fn mock_credentials() -> Option<Arc<MockCredentialService>> {
     use_context::<Arc<MockCredentialService>>()
 }
 
-/// The app's unlocked credentials. See the [module docs](self).
 #[derive(Clone)]
 pub struct KeyringHandle {
     keyring: Arc<Mutex<Keyring>>,
-    /// Whether an unlock has published a keyring since the last [`Self::lock`].
     pub unlocked: RwSignal<bool>,
-    /// Bumped by every publish, insert, remove and lock.
     pub generation: RwSignal<u64>,
-    /// Bumped only by [`Self::lock`]; an unlock compares it across its await
-    /// to learn a lock overtook it. Plain atomics, never a signal.
+    /// Bumped only by [`Self::lock`]; an unlock compares it across its await to detect an overtaking lock.
     lock_epoch: Arc<AtomicU64>,
-    /// Whether an unlock is in flight app-wide ([`Self::begin_unlock`]).
     unlocking: Arc<AtomicBool>,
 }
 
-/// The app-wide unlock single-flight: held for one `unlock_all`, released on
-/// drop. Carries no secret.
+/// App-wide unlock single-flight, released on drop.
 #[must_use = "dropping the ticket releases the single-flight"]
 pub struct UnlockTicket {
     unlocking: Arc<AtomicBool>,
@@ -119,7 +108,6 @@ impl Drop for UnlockTicket {
 }
 
 impl KeyringHandle {
-    /// An empty, locked keyring — [`provide`] is the one production caller.
     pub fn new() -> Self {
         Self {
             keyring: Arc::new(Mutex::new(Keyring::new())),
@@ -130,8 +118,7 @@ impl KeyringHandle {
         }
     }
 
-    /// Claims the app-wide unlock single-flight; `None` while another unlock
-    /// is already in flight (no second prompt may be raised).
+    /// `None` while another unlock is in flight (no second prompt may be raised).
     pub fn begin_unlock(&self) -> Option<UnlockTicket> {
         self.unlocking
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -141,13 +128,10 @@ impl KeyringHandle {
             })
     }
 
-    /// Whether an unlock is in flight.
     pub fn unlock_in_flight(&self) -> bool {
         self.unlocking.load(Ordering::SeqCst)
     }
 
-    /// How many times [`Self::lock`] has run. Unrelated inserts, removes and
-    /// publishes do not move it.
     pub fn lock_epoch(&self) -> u64 {
         self.lock_epoch.load(Ordering::SeqCst)
     }
@@ -160,8 +144,6 @@ impl KeyringHandle {
         self.generation.update(|generation| *generation += 1);
     }
 
-    /// Replace the held keyring with a freshly unlocked one (the old one
-    /// scrubs on drop) and mark the handle unlocked.
     pub fn publish(&self, keyring: Keyring) {
         let previous = std::mem::replace(&mut *self.guard(), keyring);
         drop(previous);
@@ -174,7 +156,6 @@ impl KeyringHandle {
         self.bump();
     }
 
-    /// Removes `endpoint`'s token; true when one was present.
     pub fn remove(&self, endpoint: &str) -> bool {
         let removed = self.guard().remove(endpoint);
         if removed {
@@ -191,13 +172,8 @@ impl KeyringHandle {
         self.guard().endpoints()
     }
 
-    /// A token-by-token copy of the held keyring, taken under one short lock.
-    ///
-    /// The only way to hand the keyring to an async credential call:
-    /// `store_in_vault`/`delete_from_vault` hold their `&mut Keyring` across an
-    /// await, so the handle's mutex must never be held for them. The copy is
-    /// independent of the handle; a caller applies the outcome back
-    /// ([`Self::insert`]/[`Self::remove`]) only on success.
+    /// A token-by-token copy for async credential calls: they hold `&mut Keyring` across an
+    /// await, so the handle's mutex must not be held. Apply the outcome back only on success.
     pub fn snapshot(&self) -> Keyring {
         let held = self.guard();
         let mut copy = Keyring::new();
@@ -213,7 +189,6 @@ impl KeyringHandle {
         self.unlocked.get_untracked()
     }
 
-    /// Zeroize every token and mark the handle locked.
     pub fn lock(&self) {
         self.lock_epoch.fetch_add(1, Ordering::SeqCst);
         self.guard().lock();

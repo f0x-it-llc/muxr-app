@@ -1,21 +1,6 @@
-//! [`MockCredentialService`] — the in-memory [`CredentialService`] every
-//! headless suite runs on, and the only way to exercise the gate's outcome
-//! table without a device.
-//!
-//! It runs the real store's vault algorithms ([`super::secure_credential_service`])
-//! over an in-memory map keyed exactly like the platform store, answering a
-//! scripted [`CredentialStatus`] instead of a biometric result.
-//!
-//! Accounting convention: [`MockCredentialService::prompts`] records the
-//! reason of every gated read (one per vault `get` and per legacy `get`,
-//! present or not), and [`MockCredentialService::writes`] counts every gated
-//! vault `set`. Apple prompts on reads only; Android prompts on both, so a
-//! flow's Android prompt count is `prompts().len() + writes()`. Ungated
-//! `contains`/`remove`, `delete` and `reset_vault` count as neither.
-//!
-//! Selected by `di`'s headless-test seam, never in a real app run. A poisoned
-//! lock is recovered rather than propagated, for the reason
-//! [`super::mock_saved_servers`] records.
+//! In-memory [`CredentialService`] running the real vault algorithms over a map keyed like the platform store.
+//! `prompts()` records every gated read and `writes()` every gated vault `set`; Apple prompts on reads only,
+//! Android on both, so an Android flow's prompt count is `prompts().len() + writes()`.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -33,17 +18,14 @@ use crate::features::connect::domain::entities::{
 use crate::features::connect::domain::keyring::{Keyring, KeyringVault};
 use crate::features::connect::domain::repositories::CredentialService;
 
-/// The in-memory credential service. See the [module docs](self).
 #[derive(Default)]
 pub struct MockCredentialService {
     state: Mutex<MockState>,
 }
 
-/// Everything the mock remembers.
 #[derive(Default)]
 struct MockState {
-    /// Outcome every gated operation answers with, unless [`Self::gate_at`]
-    /// scripts that operation. `Success` lets it through to the map below.
+    /// Outcome for every gated operation unless `gate_at` scripts it.
     gate: Option<CredentialStatus>,
     /// Per-operation outcomes, by 0-based index over every gated read and write.
     gate_at: BTreeMap<usize, CredentialStatus>,
@@ -74,33 +56,25 @@ impl MockState {
 }
 
 impl MockCredentialService {
-    /// A service whose gate always passes and whose store is empty.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Scripts `status` for every later gated operation.
-    /// [`CredentialStatus::Success`] restores pass-through behavior.
     pub fn set_gate(&self, status: CredentialStatus) {
         self.state().gate = Some(status);
     }
 
-    /// Scripts `status` for the `n`th gated operation (0-based, reads and
-    /// writes in order, counted from the mock's creation), overriding
-    /// [`Self::set_gate`] for that one operation.
+    /// Scripts the `n`th gated operation (0-based, reads and writes in order).
     pub fn set_gate_at(&self, n: usize, status: CredentialStatus) {
         self.state().gate_at.insert(n, status);
     }
 
-    /// Pre-stores `token` as `server_key`'s legacy per-server entry, as a save
-    /// before the vault existed would have.
     pub fn seed(&self, server_key: &str, token: &str) {
         self.state()
             .entries
             .insert(storage_key(server_key), Zeroizing::new(token.to_string()));
     }
 
-    /// Replaces the vault with exactly `entries` (endpoint, token).
     pub fn seed_vault(&self, entries: &[(&str, &str)]) {
         let mut keyring = Keyring::new();
         for (endpoint, token) in entries {
@@ -110,14 +84,12 @@ impl MockCredentialService {
         self.state().entries.insert(VAULT_KEY.to_string(), encoded);
     }
 
-    /// Stores `raw` verbatim as the vault blob, e.g. a corrupted one.
     pub fn seed_vault_raw(&self, raw: &str) {
         self.state()
             .entries
             .insert(VAULT_KEY.to_string(), Zeroizing::new(raw.to_string()));
     }
 
-    /// `server_key`'s token: the vault's entry first, then its legacy entry.
     pub fn stored(&self, server_key: &str) -> Option<String> {
         let state = self.state();
         if let Some(token) = state.vault().and_then(|vault| vault.token_for(server_key)) {
@@ -127,14 +99,12 @@ impl MockCredentialService {
         legacy.map(|token| token.to_string())
     }
 
-    /// `server_key`'s legacy per-server entry alone.
     pub fn legacy(&self, server_key: &str) -> Option<String> {
         let state = self.state();
         let legacy = state.entries.get(&storage_key(server_key));
         legacy.map(|token| token.to_string())
     }
 
-    /// The vault's endpoints; `None` when no readable vault exists.
     pub fn vault_endpoints(&self) -> Option<Vec<String>> {
         self.state().vault().map(|vault| vault.endpoints())
     }
@@ -160,7 +130,6 @@ impl MockCredentialService {
     }
 }
 
-/// The mock's [`VaultStore`] for one call, carrying that call's prompt reason.
 struct MockVault<'a> {
     mock: &'a MockCredentialService,
     reason: &'a str,
@@ -275,7 +244,6 @@ impl CredentialService for MockCredentialService {
 }
 
 impl MockCredentialService {
-    /// An ungated remove, failing as [`Self::set_delete_failure`] scripts.
     fn remove_ungated(&self, key: &str) -> Result<(), AppFailure> {
         let mut state = self.state();
         if state.delete_fails {
