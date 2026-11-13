@@ -14,7 +14,8 @@ mod shell;
 use std::rc::Rc;
 
 use frust::{
-    AnyView, Component, Get, NavigatorController, Router, RwSignal, View, any, overlay_host, stack,
+    AnyView, Component, Get, HapticFeedback, NavigatorController, Router, RwSignal, View, any,
+    overlay_host, set_haptic_sink, stack,
 };
 
 use features::connect::domain::entities::SavedServer;
@@ -134,10 +135,32 @@ impl net::wake::WakeSource for FrustWakeSource {
 #[derive(Default)]
 pub struct MuxrApp;
 
+/// Map the framework's haptic vocabulary onto the `frust-haptics` plugin. The
+/// plugin does not depend on `frust`, so the app owns this mapping. Desktop
+/// reports `NotAvailable` by design; the result is cosmetic and ignored.
+fn perform_plugin_haptic(feedback: HapticFeedback) {
+    use frust_haptics::{HapticEffect, Haptics};
+    let effect = match feedback {
+        HapticFeedback::Selection => HapticEffect::SelectionClick,
+        HapticFeedback::Light => HapticEffect::ImpactLight,
+        HapticFeedback::Medium => HapticEffect::ImpactMedium,
+        HapticFeedback::Heavy => HapticEffect::ImpactHeavy,
+        HapticFeedback::Success => HapticEffect::Success,
+        HapticFeedback::Warning => HapticEffect::Warning,
+        HapticFeedback::Error => HapticEffect::Error,
+        _ => return,
+    };
+    let _ = Haptics::perform(effect);
+}
+
 impl Component for MuxrApp {
     type State = AppState;
 
     fn init(&self) -> AppState {
+        // The one process-wide haptic sink; every `frust::perform_haptic`
+        // call in the app routes through it.
+        set_haptic_sink(Some(perform_plugin_haptic));
+
         let connection = connection::provide_connection_controller();
 
         // Once for the process: a second `init` finds the source installed and
