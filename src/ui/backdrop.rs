@@ -1,23 +1,5 @@
-//! `page_backdrop` — the app's full-bleed background fill.
-//!
-//! Hand-rolled [`View`]/[`Widget`] pair against [`frust::authoring`] because
-//! no facade widget paints an unconditional fill (`SizedBox`/`Image` only
-//! tighten under an already-tight constraint, and [`Stack`](frust::Stack)
-//! hands every child a loose one) — this declares a larger-than-any-viewport
-//! intrinsic size and lets [`BoxConstraints::constrain`] clamp it down. Also
-//! needed because the shell clears to `ColorScheme::surface` (Glyph's
-//! `--bg-surface`) while Connect and the splash overlay want the page tone
-//! `--bg-base`.
-//!
-//! One function serves both renderings on purpose: this backdrop and
-//! `features::connect`'s widgets resolve the same role (`Palette::page`), so
-//! the splash overlay and the `/` route paint identical tone by construction
-//! and the handoff cannot develop a one-frame colour step.
-//!
-//! The splash also needs an opaque, input-blocking layer — the navigator
-//! stays mounted underneath the overlay for the whole sequence, so a
-//! transparent pixel would leak it through and an unblocked tap would reach
-//! a field under it. [`BackdropView::block_input`] is that half.
+//! The full-bleed page background. No facade widget paints an unconditional fill, so this
+//! declares an oversized intrinsic size and lets the incoming constraint clamp it down.
 
 use frust::Theme;
 use frust::authoring::{
@@ -25,18 +7,11 @@ use frust::authoring::{
     PaintCtx, PaintScene, Size, View, Widget,
 };
 
-/// Declared larger than any real viewport (logical px) so
-/// [`BoxConstraints::constrain`] always clamps it back down to the incoming
-/// maximum — see the module docs.
+/// Larger than any real viewport (logical px), so `constrain` always clamps to the maximum.
 const INTRINSIC: f64 = 1.0e7;
 
-/// The app's page background: a full-bleed fill of the active theme's
-/// `surface_container_low` (Glyph's `--bg-base` — see the [module
-/// docs](self)).
-///
-/// Resolves the theme at build time through `use_context::<Theme>()`,
-/// falling back to [`frust_glyph::baseline`] — never
-/// `Theme::neutral`/`m3_baseline` — per `lib.rs`'s design-system note.
+/// The theme's `surface_container_low`. The splash overlay and the `/` route both mount this,
+/// so the handoff cannot show a one-frame colour step.
 pub fn page_backdrop<State: 'static>() -> BackdropView<State> {
     let color = frust::use_context::<Theme>()
         .unwrap_or_else(frust_glyph::baseline)
@@ -49,29 +24,21 @@ pub fn page_backdrop<State: 'static>() -> BackdropView<State> {
     }
 }
 
-/// The declarative half of the page background. See [`page_backdrop`].
 pub struct BackdropView<State: 'static> {
     color: Color,
     block_input: bool,
-    /// `View<State>` is generic over the app state even though a decorative
-    /// leaf never touches it.
     state: std::marker::PhantomData<fn() -> State>,
 }
 
 impl<State: 'static> BackdropView<State> {
-    /// Swallow every pointer event that reaches this layer (default `false`).
-    ///
-    /// A [`Stack`](frust::Stack) hit-tests its children top-down and stops at
-    /// the first `Handled`, so a full-bleed backdrop with this set blocks
-    /// everything painted *below* it in the same stack — what the splash
-    /// overlay needs while the live Connect screen sits underneath it.
+    /// Swallows every pointer event, blocking what sits below it in the same stack; the splash
+    /// overlay needs this while the live Connect screen sits underneath.
     pub fn block_input(mut self, block: bool) -> Self {
         self.block_input = block;
         self
     }
 }
 
-/// The retained half of the page background. See [`page_backdrop`].
 pub struct BackdropWidget {
     color: Color,
     block_input: bool,
@@ -112,8 +79,7 @@ impl Widget for BackdropWidget {
     }
 
     fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        // Pointer events only: a key/IME event is focus-routed, never
-        // hit-tested, so it cannot reach a backdrop that never takes focus.
+        // Key and IME events are focus-routed, never hit-tested.
         if self.block_input && matches!(event, InputEvent::Pointer(_)) {
             return EventResult::Handled;
         }
@@ -149,8 +115,6 @@ mod tests {
     #[test]
     fn the_page_tone_is_glyphs_bg_base_not_the_void() {
         // `--bg-base` #10131a, reached through the role rather than the hex.
-        // The splash overlay and the `/` route both mount this one function,
-        // so this pins the tone on *both* sides of the handoff at once.
         let view = page_backdrop::<()>();
         assert_eq!(view.color, Color::from_rgb8(0x10, 0x13, 0x1a));
         assert_ne!(

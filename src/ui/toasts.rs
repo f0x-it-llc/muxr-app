@@ -11,7 +11,7 @@ use crate::failure::AppFailure;
 #[derive(Clone, Copy)]
 pub struct FailureToasts {
     queue: RwSignal<Vec<String>>,
-    /// When each message was last raised, for [`DEDUPE_WINDOW`]. Pruned on every raise.
+    /// When each message was last raised; pruned on every raise.
     recent: RwSignal<Vec<(String, Instant)>>,
 }
 
@@ -19,11 +19,9 @@ pub struct FailureToasts {
 /// repeats on a cadence (a poll, a retry) must read as one event, not a stack of them.
 pub const DEDUPE_WINDOW: Duration = Duration::from_secs(2);
 
-/// How far a test has run the toast clock ahead, in milliseconds.
 static CLOCK_AHEAD_MS: AtomicU64 = AtomicU64::new(0);
 
-/// Run the toast clock ahead by `by`, so a suite can cross [`DEDUPE_WINDOW`] without
-/// waiting it out. `pub` rather than `#[cfg(test)]`: `tests/*.rs` link the normal build.
+/// `pub` rather than `#[cfg(test)]` because `tests/*.rs` link the normal build.
 pub fn advance_toast_clock_for_tests(by: Duration) {
     CLOCK_AHEAD_MS.fetch_add(
         u64::try_from(by.as_millis()).unwrap_or(u64::MAX),
@@ -36,16 +34,11 @@ fn toast_now() -> Instant {
 }
 
 thread_local! {
-    /// The one [`FailureToasts`] per UI thread — see [`app_toasts`].
     static TOASTS: Cell<Option<FailureToasts>> = const { Cell::new(None) };
 }
 
-/// The app's toast handle, created once per thread and reused afterwards.
-///
-/// Self-healing: a cached handle whose signal was disposed with its owner (a
-/// headless test that dropped its ambient `Owner` and re-entered) reads back
-/// `None` from `try_get_untracked` and is replaced rather than handed out
-/// dead.
+/// Created once per thread; a cached handle whose signal was disposed with its owner is
+/// replaced rather than handed out dead.
 pub fn app_toasts() -> FailureToasts {
     TOASTS.with(|cell| {
         if let Some(toasts) = cell.get()
@@ -67,7 +60,6 @@ impl FailureToasts {
         self.show(failure.user_message());
     }
 
-    /// Queue `message`, unless the same text was raised within [`DEDUPE_WINDOW`].
     pub fn show(&self, message: impl Into<String>) {
         let message = message.into();
         let now = toast_now();

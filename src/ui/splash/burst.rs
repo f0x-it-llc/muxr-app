@@ -1,19 +1,5 @@
-//! The glyph burst: [`spec::BURST_COUNT`] mono glyphs thrown outward from the
-//! icon's center as it dissolves — "the seed the rain grows from, not two
-//! unrelated effects stitched together" (`docs/splash.html`).
-//!
-//! Each particle picks a glyph, an angle and a distance once, at build time,
-//! from the widget's seeded RNG; [`particle_motion`] then maps elapsed
-//! milliseconds onto its offset/scale/opacity. The whole thing is one-shot:
-//! after [`spec::BURST_MS`] the widget paints nothing and stops requesting
-//! frames, so an orchestrator can simply leave it mounted (or drop it —
-//! either works).
-//!
-//! # Reduced motion
-//!
-//! Under `MotionScheme::reduce_motion` the burst is a no-op: nothing painted,
-//! no frames requested. There is no "terminal state" worth showing for a
-//! one-shot particle effect — its terminal state *is* nothing.
+//! The one-shot glyph burst thrown outward from the icon's center as it dissolves. Past
+//! [`spec::BURST_MS`] it paints nothing and stops requesting frames; reduced motion skips it.
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
@@ -27,34 +13,23 @@ use super::{
     ShapedGlyph, SplashRng, accent_ink, delta_ms, fill_size, mono_style, reduce_motion, with_alpha,
 };
 
-/// One particle's fixed launch parameters, drawn once at build.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BurstParticle {
-    /// Launch angle in radians (`Math.random()*Math.PI*2`).
+    /// Radians.
     pub angle: f64,
-    /// Total fly-out distance in logical px (`55 + Math.random()*95`).
     pub distance: f64,
-    /// Index into [`spec::BURST_CHARS`].
     pub glyph: usize,
 }
 
-/// A particle's resolved appearance at an instant.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParticleMotion {
-    /// Horizontal offset from the burst center, in logical px.
     pub dx: f64,
-    /// Vertical offset from the burst center, in logical px.
     pub dy: f64,
-    /// Uniform scale about the particle's own center (1 → [`spec::BURST_END_SCALE`]).
     pub scale: f64,
-    /// Alpha, `0..=1`.
     pub opacity: f64,
 }
 
-/// Draw [`spec::BURST_COUNT`] particles from `seed`.
-///
-/// The per-particle draw order (glyph, then angle, then distance) matches the
-/// source's `spawnBurst` loop, so the same seed always yields the same burst.
+/// Draw order per particle (glyph, angle, distance) matches the source's `spawnBurst` loop.
 pub fn spawn_particles(seed: u64) -> Vec<BurstParticle> {
     let mut rng = SplashRng::new(seed);
     (0..spec::BURST_COUNT)
@@ -69,13 +44,7 @@ pub fn spawn_particles(seed: u64) -> Vec<BurstParticle> {
         .collect()
 }
 
-/// Where `particle` is, how big and how opaque, `elapsed_ms` into the burst.
-///
-/// Movement and scale ride [`spec::BURST_MOVE_EASE`] together (the source's
-/// one `transform` transition); opacity rides [`spec::BURST_FADE_EASE`]
-/// separately (its own `opacity .6s ease-out`). Past [`spec::BURST_MS`]
-/// everything is pinned at the terminal state (fully flown, invisible) — see
-/// [`burst_finished`].
+/// Past [`spec::BURST_MS`] the terminal state (fully flown, invisible) is pinned.
 pub fn particle_motion(particle: &BurstParticle, elapsed_ms: f64) -> ParticleMotion {
     let t = (elapsed_ms.max(0.0) / spec::BURST_MS).clamp(0.0, 1.0);
     let travel = spec::BURST_MOVE_EASE.transform(t);
@@ -88,15 +57,10 @@ pub fn particle_motion(particle: &BurstParticle, elapsed_ms: f64) -> ParticleMot
     }
 }
 
-/// Whether the burst has finished (nothing left to paint) at `elapsed_ms`.
 pub fn burst_finished(elapsed_ms: f64) -> bool {
     elapsed_ms >= spec::BURST_MS
 }
 
-/// A one-shot glyph burst filling the surface and firing from its center.
-///
-/// `seed` fixes the particle set — pass a fresh value per launch for variety,
-/// or a constant for a reproducible sequence (what the tests do).
 pub fn burst<State: 'static>(seed: u64) -> BurstView<State> {
     BurstView {
         seed,
@@ -104,27 +68,18 @@ pub fn burst<State: 'static>(seed: u64) -> BurstView<State> {
     }
 }
 
-/// The declarative half of the burst. See [`burst`].
 pub struct BurstView<State: 'static> {
     seed: u64,
-    /// `View<State>` is generic over the app state even though a decorative
-    /// leaf never touches it.
     state: std::marker::PhantomData<fn() -> State>,
 }
 
-/// The retained half of the burst. See [`burst`].
 pub struct BurstWidget {
-    /// The fixed launch parameters, drawn once at build.
     particles: Vec<BurstParticle>,
-    /// One shaped glyph per [`spec::BURST_CHARS`] entry, plus the style they
-    /// were shaped at so a theme swap re-shapes them.
+    /// One per [`spec::BURST_CHARS`] entry; `style` is kept so a theme swap re-shapes them.
     glyphs: Vec<ShapedGlyph>,
     style: Option<TextStyle>,
-    /// The burst center, relative to the widget's own origin.
     center: Point,
-    /// Milliseconds since the first paint.
     elapsed_ms: f64,
-    /// The previous frame's clock, for differencing.
     last_frame: Option<FrameTime>,
 }
 
@@ -148,9 +103,7 @@ impl<State: 'static> View<State> for BurstView<State> {
         element: &mut BurstWidget,
         _ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        // A re-seeded burst re-draws its particles but keeps its clock: the
-        // orchestrator re-passes one constant seed every rebuild, so this is
-        // normally a no-op.
+        // A re-seeded burst redraws its particles but keeps its clock.
         if prev.seed != self.seed {
             element.particles = spawn_particles(self.seed);
             return ChangeFlags::PAINT;
@@ -194,16 +147,14 @@ impl Widget for BurstWidget {
             };
             let motion = particle_motion(particle, self.elapsed_ms);
             let box_size = glyph.size();
-            // Place the glyph's own center at the flown-to point, scaled about
-            // that point: translate(target) · scale(s) · translate(-box/2).
+            // translate(target) · scale(s) · translate(-box/2): scales about the glyph's center.
             let transform = Affine::translate((center.x + motion.dx, center.y + motion.dy))
                 * Affine::scale(motion.scale)
                 * Affine::translate((-box_size.width / 2.0, -box_size.height / 2.0));
             glyph.draw(scene, transform, with_alpha(ink, motion.opacity));
         }
 
-        // A one-shot with a visible endpoint — the unpaced (Transition) class,
-        // not the paced cosmetic-loop one.
+        // A one-shot with a visible endpoint: the unpaced class, not the paced cosmetic loop.
         ctx.request_frame();
     }
 }
@@ -272,8 +223,6 @@ mod tests {
             assert!(dx >= previous - 1e-9, "travel must never go backwards");
             previous = dx;
         }
-        // `cubic-bezier(0.16,1,0.3,1)` is a hard decelerate: most of the
-        // distance is covered in the first third.
         let third = particle_motion(&p, spec::BURST_MS / 3.0).dx;
         assert!(third > 50.0, "front-loaded easing, got {third} of 100");
     }

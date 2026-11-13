@@ -1,33 +1,6 @@
-//! The splash sequence's first beat: the real app icon springs in, holds long
-//! enough to register as "the app icon", then scales up and dissolves.
-//!
-//! ```text
-//!   0ms            350ms                  1000ms            1380ms
-//!   |-- spring-in --|------- hold ---------|--- dissolve ----|-- done
-//!   scale .75 -> 1   scale 1, opacity 1     scale 1 -> 1.2
-//!   opacity 0 -> 1                          opacity 1 -> 0
-//! ```
-//!
-//! [`icon_visual`] is the whole state machine as one pure function of elapsed
-//! milliseconds — the widget only accumulates a clock, calls it, and paints
-//! what it returns. The phase is published through an optional [`RwSignal`]
-//! ([`IconPhaseView::on_phase`]), written only when it changes, so the
-//! orchestrator can start the burst on a reactive edge instead of a timer;
-//! `IconPhase::Dissolve` publishes at exactly [`spec::ICON_DELAY_MS`].
-//!
-//! The framework has no app-reachable way to hand a decoded image's pixels
-//! to `PaintScene::draw_image`, so this widget composes rather than blits:
-//! it retains `frust`'s own `Image` widget as a child pod and paints it
-//! under a scale transform plus a translucent layer. [`IconArt::Vector`] is
-//! the decode-failure fallback: a rounded amber tile with the `▣` brand
-//! glyph centered.
-//!
-//! Reduced motion collapses the whole beat: [`icon_visual`] reports
-//! [`IconPhase::Done`] on the first frame with nothing painted and no
-//! continuation frames requested, cueing an orchestrator mounted under
-//! reduced motion straight to the assembled screen (the orchestrator is
-//! expected to skip the splash entirely rather than flash a frame of
-//! nothing).
+//! The splash's first beat: the app icon springs in, holds, then scales up and dissolves.
+//! No app-reachable path blits decoded pixels, so it composes `frust`'s `Image` widget as a
+//! child pod under a scale transform and a translucent layer.
 
 use frust::authoring::text::TextStyle;
 use frust::authoring::{
@@ -39,53 +12,33 @@ use frust::{FrameTime, Image, ImageFit, ImageSource, ImageView, RwSignal, Set, T
 use super::spec;
 use super::{ShapedGlyph, delta_ms, fill_size, mono_style, reduce_motion};
 
-/// The app icon, embedded so the splash never touches the filesystem on a
-/// cold start (the scaffold's `assets/logo.png` idiom — see
-/// `examples/huddle`'s `settings_about`). This is the 1024px iOS
-/// `AppIcon.appiconset` master, copied to `assets/splash_icon.png`.
+/// Embedded so a cold start never touches the filesystem; the 1024px iOS app-icon master.
 const SPLASH_ICON_PNG: &[u8] = include_bytes!("../../../assets/splash_icon.png");
 
-/// The brand glyph the [`IconArt::Vector`] fallback centers on its tile.
 const FALLBACK_GLYPH: &str = "▣";
-/// The fallback glyph's size as a fraction of the tile — a hand-tuned value
-/// (the design reference has no vector stand-in to match): half the tile
-/// reads as an icon rather than as text.
+/// Hand-tuned: the design has no vector stand-in to match.
 const FALLBACK_GLYPH_FRACTION: f64 = 0.5;
 
-/// Where the icon beat currently is. Published through
-/// [`IconPhaseView::on_phase`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IconPhase {
-    /// Springing in (0 → [`spec::ICON_IN_MS`]).
     #[default]
     SpringIn,
-    /// Held at rest ([`spec::ICON_IN_MS`] → [`spec::ICON_DELAY_MS`]).
     Hold,
-    /// Scaling up and fading out ([`spec::ICON_DELAY_MS`] → +
-    /// [`spec::ICON_DISSOLVE_MS`]). **The burst/assembly cue.**
+    /// The burst and assembly cue.
     Dissolve,
-    /// Gone. Nothing is painted and no more frames are requested.
     Done,
 }
 
-/// The icon's resolved appearance at an instant — the entire animation state,
-/// as plain data.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IconVisual {
-    /// Which beat this instant falls in.
     pub phase: IconPhase,
-    /// Uniform scale about the icon's own center. May exceed 1 during the
-    /// spring's overshoot.
+    /// May exceed 1 during the spring's overshoot.
     pub scale: f64,
-    /// Layer opacity, always within `0..=1`.
     pub opacity: f64,
 }
 
-/// The icon beat's state machine: scale/opacity/phase at `elapsed_ms`.
-///
-/// `reduce_motion` short-circuits to [`IconPhase::Done`] (see the module
-/// docs). Negative elapsed values clamp to zero; values past the end stay at
-/// the terminal state forever, so a late frame can never resurrect the icon.
+/// Negative elapsed clamps to zero; past the end the terminal state holds, so a late frame
+/// never resurrects the icon.
 pub fn icon_visual(elapsed_ms: f64, reduce_motion: bool) -> IconVisual {
     if reduce_motion {
         return IconVisual {
@@ -97,10 +50,7 @@ pub fn icon_visual(elapsed_ms: f64, reduce_motion: bool) -> IconVisual {
 
     let t = elapsed_ms.max(0.0);
     if t < spec::ICON_IN_MS {
-        // One spring drives both properties, exactly as the source's single
-        // `transition: opacity .35s var(--ease-spring), transform .35s
-        // var(--ease-spring)` does. The curve overshoots past 1, which is the
-        // point for scale and must be clamped for opacity.
+        // One spring drives both; its overshoot is wanted for scale, clamped for opacity.
         let p = spec::SPRING.transform(t / spec::ICON_IN_MS);
         IconVisual {
             phase: IconPhase::SpringIn,
@@ -129,23 +79,14 @@ pub fn icon_visual(elapsed_ms: f64, reduce_motion: bool) -> IconVisual {
     }
 }
 
-/// What the icon beat draws: the decoded app icon, or a vector stand-in.
 #[derive(Clone)]
 pub enum IconArt {
-    /// The decoded app icon bitmap.
     Image(ImageSource),
-    /// A rounded amber tile with the `▣` brand glyph centered — the
-    /// decode-failure fallback (see [`splash_icon_art`]).
     Vector,
 }
 
-/// Decode the embedded app icon, falling back to [`IconArt::Vector`] if the
-/// bytes don't decode.
-///
-/// Call once and retain the result (from the composition root's first
-/// `build`, via `AppState::splash_plan()`, not `Component::init`): decoding
-/// is a real PNG decode plus a full-size RGBA allocation, and `IconArt`
-/// clones for free afterwards (`ImageSource` is `Arc`-backed).
+/// Call once and retain the result: decoding is a full PNG decode plus RGBA allocation, and
+/// `IconArt` clones cheaply afterwards.
 pub fn splash_icon_art() -> IconArt {
     match ImageSource::decode(SPLASH_ICON_PNG) {
         Ok(source) => IconArt::Image(source),
@@ -156,15 +97,8 @@ pub fn splash_icon_art() -> IconArt {
     }
 }
 
-/// The icon beat as a full-surface layer that centers a
-/// [`spec::ICON_SIZE`]-square icon.
-///
-/// Chain [`IconPhaseView::on_phase`] to receive the phase cue.
 pub fn icon_phase<State: 'static>(art: IconArt) -> IconPhaseView<State> {
     let child = match &art {
-        // `Contain` on a square source in a square box is an exact fit; it
-        // also degrades gracefully if the asset is ever replaced with a
-        // non-square one.
         IconArt::Image(source) => Some(Image(source.clone()).fit(ImageFit::Contain)),
         IconArt::Vector => None,
     };
@@ -175,50 +109,33 @@ pub fn icon_phase<State: 'static>(art: IconArt) -> IconPhaseView<State> {
     }
 }
 
-/// The declarative half of the icon beat. See [`icon_phase`].
 pub struct IconPhaseView<State: 'static> {
-    /// The `Image` child for [`IconArt::Image`]; `None` selects the vector
-    /// fallback, which the widget paints itself.
     child: Option<ImageView>,
-    /// Where to publish phase changes, if anyone is listening.
     on_phase: Option<RwSignal<IconPhase>>,
-    /// `View<State>` is generic over the app state; this view never touches it.
     state: std::marker::PhantomData<fn() -> State>,
 }
 
 impl<State: 'static> IconPhaseView<State> {
-    /// Publish every [`IconPhase`] change into `signal` (written only on a
-    /// change, so a tracked reader rebuilds four times across the whole beat,
-    /// not once per frame).
+    /// Written only on a change, so a tracked reader rebuilds once per phase, not per frame.
     pub fn on_phase(mut self, signal: RwSignal<IconPhase>) -> Self {
         self.on_phase = Some(signal);
         self
     }
 }
 
-/// The retained half of the icon beat. See [`icon_phase`].
 pub struct IconPhaseWidget {
-    /// The `Image` child pod, or `None` for the vector fallback.
     child: Option<ChildPod>,
-    /// The vector fallback's shaped brand glyph (only ever `Some` when
-    /// `child` is `None`), plus the style it was shaped at so a theme swap
-    /// re-shapes it.
+    /// Shaped only for the vector fallback; the style is kept so a theme swap re-shapes it.
     fallback_glyph: Option<ShapedGlyph>,
     fallback_style: Option<TextStyle>,
-    /// The icon box's origin within the widget's own (full-surface) box.
     icon_origin: Point,
-    /// Milliseconds since the first paint.
     elapsed_ms: f64,
-    /// The previous frame's clock, for differencing.
     last_frame: Option<FrameTime>,
-    /// Where to publish phase changes.
     on_phase: Option<RwSignal<IconPhase>>,
-    /// The last phase published, so a change is published exactly once.
     published: Option<IconPhase>,
 }
 
 impl IconPhaseWidget {
-    /// Publish `phase` if it differs from the last published one.
     fn publish(&mut self, phase: IconPhase) {
         if self.published == Some(phase) {
             return;
@@ -229,11 +146,9 @@ impl IconPhaseWidget {
         }
     }
 
-    /// Paint the vector fallback tile at `origin`.
     fn paint_fallback(&self, ctx: &PaintCtx, scene: &mut dyn PaintScene, origin: Point) {
         let theme = Theme::from_paint_ctx(ctx);
-        // Glyph's accent-role split: `primary_container`/`on_primary_container`
-        // is the bright-fill pair (`primary` is accent ink).
+        // Accent-role split: `primary_container` is the bright fill, `primary` is accent ink.
         let (fill, ink) = theme.map_or((spec::AMBER_FALLBACK, spec::ON_AMBER_FALLBACK), |theme| {
             let scheme = theme.scheme();
             (scheme.primary_container, scheme.on_primary_container)
@@ -283,14 +198,10 @@ impl<State: 'static> View<State> for IconPhaseView<State> {
     ) -> ChangeFlags {
         element.on_phase = self.on_phase;
         match (&prev.child, &self.child, &mut element.child) {
-            // The ordinary path: the same art re-passed every rebuild. The
-            // `Image` view's own rebuild is an `Arc`-pointer check, never a
-            // re-decode.
+            // The `Image` view's rebuild is an `Arc`-pointer check, never a re-decode.
             (Some(prev_child), Some(next_child), Some(pod)) => {
                 rebuild_child::<State, _>(prev_child, next_child, pod, ctx)
             }
-            // Art swapped between bitmap and vector mid-flight (not something
-            // the orchestrator does, but the lifecycle has to be closed).
             (Some(prev_child), None, Some(pod)) => {
                 teardown_child::<State, _>(prev_child, pod, ctx);
                 element.child = None;
@@ -326,7 +237,6 @@ impl Widget for IconPhaseWidget {
                 pod.set_origin(self.icon_origin);
             }
             None => {
-                // Vector fallback: shape the brand glyph once per style.
                 let theme = Theme::from_layout_ctx(ctx).cloned();
                 let style = mono_style(
                     theme.as_ref(),
@@ -353,10 +263,6 @@ impl Widget for IconPhaseWidget {
                 origin.x + spec::ICON_SIZE / 2.0,
                 origin.y + spec::ICON_SIZE / 2.0,
             );
-            // Scale about the icon's own center. Spelled out rather than
-            // reaching for a scale-about helper so the composition order is
-            // visible: translate the center to the origin, scale, translate
-            // back.
             scene.push_transform(
                 Affine::translate(center.to_vec2())
                     * Affine::scale(visual.scale)
@@ -375,17 +281,14 @@ impl Widget for IconPhaseWidget {
             scene.pop_transform();
         }
 
-        // A beat with a visible endpoint, not a decorative loop: the unpaced
-        // `request_frame` (`TickClass::Transition`) is the right class here
-        // (`docs/CODE_STANDARDS.md`'s frame-pacing rule).
+        // A beat with a visible endpoint uses the unpaced `request_frame`, not a decorative loop's.
         if visual.phase != IconPhase::Done {
             ctx.request_frame();
         }
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // Decorative: contributes no node of its own, but a container must
-        // still forward or the child's subtree drops out of the a11y tree.
+        // Decorative, but a container must forward or the child's subtree leaves the a11y tree.
         if let Some(pod) = &self.child {
             pod.semantics_child(ctx);
         }
@@ -411,7 +314,6 @@ mod tests {
 
     #[test]
     fn the_spring_overshoots_past_full_size_before_settling() {
-        // `cubic-bezier(0.34,1.6,0.5,1)` rises above 1 in its middle third.
         let overshot = (1..=9)
             .map(|i| icon_visual(spec::ICON_IN_MS * f64::from(i) / 10.0, false).scale)
             .any(|scale| scale > 1.0);
