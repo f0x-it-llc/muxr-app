@@ -1,7 +1,3 @@
-//! [`RenameSession`] — renames an existing session (a card's "rename" action,
-//! through the same name-input dialog `CreateSession` uses, seeded with the
-//! current name).
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;
