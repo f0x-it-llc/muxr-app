@@ -1,7 +1,3 @@
-//! [`ListTokens`] — the auth-token list loader (the screen's first load, and
-//! the reload every mutation ends with). Plain delegation; the simulated
-//! latency and the failure boundary live in the data-layer implementation.
-
 use std::sync::Arc;
 
 use clean_signals::{NoParams, UseCase};

@@ -1,10 +1,3 @@
-//! [`RevokeToken`] — revokes a token by name (a `.revoke-btn`, behind the
-//! confirmation dialog).
-//!
-//! Destructive and irreversible on a real server, which is why the *screen*
-//! puts `ui::dialogs::confirm_dialog` in front of it; this use case itself is
-//! the plain delegation every other one here is.
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;
