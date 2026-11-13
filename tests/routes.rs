@@ -7,8 +7,7 @@
 //! own navigator rather than a copy of it.
 //!
 //! The shell's persistent top bar is deliberately **not** exercised here: these tests navigate
-//! with a bare `Router::go`, the one navigation entry point that never records the bar's
-//! route-meta mirror (only `muxr::routes::Nav` does). `tests/navigation_motion.rs` owns the bar.
+//! through `app_nav()`, the production entry point. `tests/navigation_motion.rs` owns the bar.
 
 use frust::{AnyView, Component, Resolution};
 use frust_core::RenderRoot;
@@ -39,7 +38,7 @@ fn render(route: &str, connected: bool) -> support::RecScene {
     if connected {
         expect_connection_controller().connect(mock_target());
     }
-    state.nav.go(route);
+    app_nav().go(route);
     frame(&mut root, &mut logic, &mut state, &mut tcx)
 }
 
@@ -67,7 +66,7 @@ fn terminal_route_renders_its_placeholder() {
     assert!(
         scene.glyph_runs > 0,
         "the Terminal placeholder (centered page text — its bar is the shell's \
-         now, and a bare `Router::go` never records the bar mirror) renders text"
+         now) renders text"
     );
 }
 
@@ -77,7 +76,7 @@ fn settings_route_renders_its_placeholder() {
     assert!(
         scene.glyph_runs > 0,
         "the Settings placeholder (centered page text — its bar is the shell's \
-         now, and a bare `Router::go` never records the bar mirror) renders text"
+         now) renders text"
     );
 }
 

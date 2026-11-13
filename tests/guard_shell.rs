@@ -325,6 +325,30 @@ fn a_go_out_of_the_shell_unwinds_it_rather_than_stacking_connect_on_top() {
     assert_unwound(&h);
 }
 
+/// A navigation back into the shell issued on the very frame the unwind was
+/// queued must place a fresh scaffold, not aim at the one that is dying.
+#[test]
+fn a_navigation_into_the_shell_on_the_unwinding_frame_places_a_fresh_scaffold() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    let before = sessions_back_signal();
+
+    app_nav().go("/");
+    h.push("/sessions");
+
+    assert_landed_fresh(&h);
+    let after = sessions_back_signal();
+    assert!(
+        !Rc::ptr_eq(&before, &after),
+        "the placement minted its own dismiss cell"
+    );
+    press_back(&mut h);
+    assert_eq!(after.get(), 1, "a back press asks the page");
+    assert_eq!(h.depth(), 2, "…rather than popping the shell");
+}
+
 /// The dismiss cell each placement mints — asserted here as an `Rc` identity,
 /// which is the only observable a covered-vs-torn-down shell differs on from
 /// outside the navigator.
