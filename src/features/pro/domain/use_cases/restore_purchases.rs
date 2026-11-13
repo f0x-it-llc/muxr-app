@@ -1,6 +1,4 @@
-//! [`RestorePurchases`] — the store's restore, followed by the same re-read
-//! [`RefreshEntitlement`](super::RefreshEntitlement) performs. The two are
-//! separate use cases because only one of them is user-initiated.
+//! [`RestorePurchases`] — the store's restore, then the same re-read as `RefreshEntitlement`.
 
 use std::sync::Arc;
 

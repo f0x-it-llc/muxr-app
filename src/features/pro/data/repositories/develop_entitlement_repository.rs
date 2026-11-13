@@ -1,7 +1,4 @@
-//! [`DevelopEntitlementRepository`] — the develop-build store: develop app ids
-//! (`com.it.f0x.muxr.dev`) can never sell, so a build compiled with
-//! `MUXR_FLAVOR=develop` simply owns Pro. It never contacts a store or the
-//! billing plugin and persists nothing.
+//! Develop builds (app id `com.it.f0x.muxr.dev`) can never sell, so this repository owns Pro and contacts no store.
 
 use crate::failure::AppFailure;
 use crate::features::pro::domain::entities::{
@@ -9,7 +6,6 @@ use crate::features::pro::domain::entities::{
 };
 use crate::features::pro::domain::repositories::EntitlementRepository;
 
-/// See the [module docs](self).
 pub struct DevelopEntitlementRepository;
 
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -23,7 +19,6 @@ impl EntitlementRepository for DevelopEntitlementRepository {
         Ok(Entitlement::Pro)
     }
 
-    /// Nothing to buy: the sheet is never offered to an entitled install.
     async fn offer(&self) -> Result<Option<ProOffer>, AppFailure> {
         Ok(None)
     }

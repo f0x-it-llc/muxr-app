@@ -1,23 +1,11 @@
-//! `pro` domain entities — the entitlement vocabulary, the store's offer and
-//! purchase outcomes, and the free-tier server rule. Framework-free.
-//!
-//! [`ProFeature`] names what Pro unlocks; only [`ProFeature::MultipleServers`]
-//! exists today, and `Notifications` joins it once that feature ships.
-//!
-//! [`server_limit_verdict`] answers in `connect`'s own [`SavedServer`] rows
-//! rather than a copied shape: a `domain` → sibling-`domain` edge, the narrow
-//! widening `docs/FEATURES_ARCHITECTURE.md` sanctions. A rule about how many
-//! servers a free install may keep has to name the *rows* it would forget, and
-//! one store owns those rows.
+//! Entitlement vocabulary, store offer and purchase outcomes, and the free-tier server rule.
+//! `server_limit_verdict` reads `connect`'s `SavedServer` rows: a sanctioned domain-to-domain edge.
 
 use crate::features::connect::domain::entities::SavedServer;
 
-/// The one product this app sells, as both stores know it.
 pub const PRO_PRODUCT_ID: &str = "muxr_pro";
 
-/// What this install is entitled to. [`Entitlement::Pending`] is a purchase
-/// the store has taken but not settled (bank approval, ask-to-buy): it grants
-/// nothing yet, so every rule below treats it exactly as [`Entitlement::Free`].
+/// `Pending` is a purchase taken but not settled (bank approval, ask-to-buy): it grants nothing and counts as Free.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Entitlement {
     Free,
@@ -26,13 +14,10 @@ pub enum Entitlement {
 }
 
 impl Entitlement {
-    /// Whether the Pro features are unlocked — `true` only for
-    /// [`Entitlement::Pro`].
     pub fn is_pro(self) -> bool {
         matches!(self, Entitlement::Pro)
     }
 
-    /// The badge text a screen prints for this state.
     pub fn label(self) -> &'static str {
         match self {
             Entitlement::Free => "Free",
@@ -42,16 +27,13 @@ impl Entitlement {
     }
 }
 
-/// A capability the paywall gates. Exhaustive by design: adding a member is
-/// what forces every gate site to decide about it.
+/// Exhaustive by design: adding a member forces every gate site to decide about it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProFeature {
-    /// Remembering more than one `muxrd` server at a time.
     MultipleServers,
 }
 
 impl ProFeature {
-    /// Whether this feature needs a Pro entitlement.
     pub fn requires_pro(self) -> bool {
         match self {
             ProFeature::MultipleServers => true,
@@ -59,9 +41,7 @@ impl ProFeature {
     }
 }
 
-/// The store's own description of [`PRO_PRODUCT_ID`], as the paywall shows it.
-/// [`Self::display_price`] is the store's localized string, never a number this
-/// app formats.
+/// `display_price` is the store's localized string, never formatted by this app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProOffer {
     pub product_id: String,
@@ -70,54 +50,31 @@ pub struct ProOffer {
     pub display_price: String,
 }
 
-/// How a purchase attempt ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PurchaseOutcome {
-    /// Bought and finalized — the entitlement is live.
     Purchased,
-    /// Taken but not settled yet; nothing is unlocked until it is.
     Pending,
-    /// The user dismissed the store sheet.
     Cancelled,
-    /// The store cannot sell here (no billing service, unknown SKU, desktop).
     Unavailable,
-    /// The store reported an error. Carries a short user-facing message only —
-    /// never a token, receipt, or raw store payload.
+    /// Short user-facing message only; never a token, receipt, or raw store payload.
     Failed(String),
 }
 
-/// What a restore found: the store's answer, or the fact that no store was
-/// asked. A bare `Entitlement` cannot say the second, and reading `Free` off
-/// a store that was never reached tells a paying user the account owns
-/// nothing.
+/// `Unavailable` means no store was asked; reading Free off it would tell a paying user the account owns nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestoreResult {
-    /// The store answered; this is what the account owns now.
     Found(Entitlement),
-    /// No store to ask here (no billing service, a cache that would not
-    /// open) — nothing was checked, so nothing is known about the account.
     Unavailable,
 }
 
-/// Whether a free install may connect to (and remember) one more server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerLimitVerdict {
     Allowed,
-    /// Blocked until the listed rows are forgotten — every remembered server
-    /// that is not the one being connected to.
-    Blocked {
-        to_forget: Vec<SavedServer>,
-    },
+    Blocked { to_forget: Vec<SavedServer> },
 }
 
-/// The free tier's one-server rule: Pro is unlimited; a free install may keep
-/// exactly the server it is connecting to. Remembering nothing yet is allowed
-/// (the row is about to be written), as is reconnecting to the single row
-/// already stored; anything else is [`ServerLimitVerdict::Blocked`], naming
-/// every other row so the caller can offer to forget them.
-///
-/// [`Entitlement::Pending`] counts as free — an unsettled purchase unlocks
-/// nothing.
+/// Pro is unlimited; a free install may keep exactly the server it is connecting to.
+/// `Blocked` names every other row so the caller can offer to forget them. `Pending` counts as free.
 pub fn server_limit_verdict(
     entitlement: Entitlement,
     saved: &[SavedServer],
@@ -138,9 +95,6 @@ pub fn server_limit_verdict(
     }
 }
 
-/// Whether tapping the saved row at `endpoint` would raise the paywall: true
-/// exactly when [`server_limit_verdict`] is [`ServerLimitVerdict::Blocked`] for
-/// that endpoint. Under Free with two or more rows that is every row.
 pub fn row_is_beyond_free_tier(
     entitlement: Entitlement,
     saved: &[SavedServer],
@@ -152,15 +106,7 @@ pub fn row_is_beyond_free_tier(
     )
 }
 
-/// Whether a free install may add a server it has not named yet — the QR
-/// affordance's own gate, taken before any endpoint is known, so there is
-/// nothing yet to compare a saved row against (unlike
-/// [`server_limit_verdict`]). Pro is unlimited; an install remembering
-/// nothing yet may add its first row; anything already remembered stands in
-/// the way of a server it cannot yet name, so every row is
-/// [`ServerLimitVerdict::Blocked`]'s `to_forget`.
-///
-/// [`Entitlement::Pending`] counts as free, as in [`server_limit_verdict`].
+/// Gate taken before any endpoint is known, so any remembered row blocks. `Pending` counts as free.
 pub fn new_server_verdict(entitlement: Entitlement, saved: &[SavedServer]) -> ServerLimitVerdict {
     if entitlement.is_pro() || saved.is_empty() {
         return ServerLimitVerdict::Allowed;

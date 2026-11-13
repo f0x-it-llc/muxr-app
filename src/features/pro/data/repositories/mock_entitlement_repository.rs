@@ -1,18 +1,5 @@
-//! [`MockEntitlementRepository`] — the in-memory [`EntitlementRepository`]
-//! every headless suite runs on, and the only way to walk the purchase outcome
-//! table without a real store account.
-//!
-//! Everything a store would decide is scripted here instead
-//! ([`MockEntitlementRepository::script_purchase`]/[`script_offer`]/
-//! [`fail_next_refresh`] and their siblings), and every store call is counted, so a suite can
-//! assert "the launch refresh ran exactly once" or "the second, overlapping
-//! purchase never reached the store".
-//!
-//! A poisoned lock is recovered rather than propagated: a panicking test must
-//! not cascade into every later one through this shared state.
-//!
-//! [`script_offer`]: MockEntitlementRepository::script_offer
-//! [`fail_next_refresh`]: MockEntitlementRepository::fail_next_refresh
+//! In-memory repository for headless suites: store decisions are scripted and every call is counted.
+//! A poisoned lock is recovered so one panicking test cannot cascade into later ones.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -22,30 +9,19 @@ use crate::features::pro::domain::entities::{
 };
 use crate::features::pro::domain::repositories::EntitlementRepository;
 
-/// The in-memory entitlement store. See the [module docs](self).
 pub struct MockEntitlementRepository {
     state: Mutex<MockState>,
 }
 
-/// Everything the mock remembers.
 struct MockState {
     entitlement: Entitlement,
-    /// What [`EntitlementRepository::offer`] answers; `None` models a store
-    /// that cannot sell here.
     offer: Option<ProOffer>,
-    /// What [`EntitlementRepository::purchase`] answers, from here on.
     purchase: PurchaseOutcome,
-    /// Consumed by the next `refresh`, which fails instead of answering.
+    /// One-shot: consumed by the next `refresh`, which fails instead of answering.
     next_refresh_failure: Option<AppFailure>,
-    /// The same one-shot, for `restore` — an unreachable store mid-restore.
     next_restore_failure: Option<AppFailure>,
-    /// …and for `purchase` — a store call failing outright, as opposed to a
-    /// scripted [`PurchaseOutcome`] the store reported.
     next_purchase_failure: Option<AppFailure>,
-    /// …and for `offer` — a lookup that failed rather than answered `None`.
     next_offer_failure: Option<AppFailure>,
-    /// Every `restore` answers [`RestoreResult::Unavailable`]: no store to
-    /// ask, as the degraded-launch repository and a desktop build have.
     restore_unavailable: bool,
     refresh_calls: usize,
     restore_calls: usize,
@@ -53,13 +29,10 @@ struct MockState {
 }
 
 impl MockEntitlementRepository {
-    /// A free install: the default script (a purchase succeeds, the offer is
-    /// on sale) with nothing bought yet.
     pub fn free() -> Self {
         Self::with(Entitlement::Free)
     }
 
-    /// An install that already owns Pro.
     pub fn pro() -> Self {
         Self::with(Entitlement::Pro)
     }
@@ -82,52 +55,35 @@ impl MockEntitlementRepository {
         }
     }
 
-    /// Force the stored entitlement, as a store answer would have.
     pub fn set_entitlement(&self, entitlement: Entitlement) {
         self.state().entitlement = entitlement;
     }
 
-    /// Script what [`EntitlementRepository::purchase`] answers from here on.
-    /// [`PurchaseOutcome::Purchased`] also flips the stored entitlement to
-    /// [`Entitlement::Pro`], and [`PurchaseOutcome::Pending`] to
-    /// [`Entitlement::Pending`] — the store's own side effect, which a
-    /// controller must not have to fake.
+    /// `Purchased`/`Pending` also flip the stored entitlement, the store's own side effect.
     pub fn script_purchase(&self, outcome: PurchaseOutcome) {
         self.state().purchase = outcome;
     }
 
-    /// Script the product lookup's answer; `None` models an unknown SKU or a
-    /// platform with no billing at all.
     pub fn script_offer(&self, offer: Option<ProOffer>) {
         self.state().offer = offer;
     }
 
-    /// Make the next (and only the next) refresh fail with `failure`.
     pub fn fail_next_refresh(&self, failure: AppFailure) {
         self.state().next_refresh_failure = Some(failure);
     }
 
-    /// Make the next (and only the next) restore fail with `failure` — the
-    /// offline restore an entitlement read alone would report as an empty
-    /// account. The call still counts, exactly as a failed refresh does.
     pub fn fail_next_restore(&self, failure: AppFailure) {
         self.state().next_restore_failure = Some(failure);
     }
 
-    /// Make the next (and only the next) purchase fail with `failure` — the
-    /// store call itself erroring, which is the controller's to turn into a
-    /// [`PurchaseOutcome::Failed`] rather than a scripted outcome.
     pub fn fail_next_purchase(&self, failure: AppFailure) {
         self.state().next_purchase_failure = Some(failure);
     }
 
-    /// Make the next (and only the next) offer lookup fail with `failure`.
     pub fn fail_next_offer(&self, failure: AppFailure) {
         self.state().next_offer_failure = Some(failure);
     }
 
-    /// Script every restore from here on as [`RestoreResult::Unavailable`]:
-    /// there is no store to ask, so nothing is said about the account.
     pub fn script_restore_unavailable(&self) {
         self.state().restore_unavailable = true;
     }
@@ -149,7 +105,6 @@ impl MockEntitlementRepository {
     }
 }
 
-/// The seeded product, as a store that knows [`PRO_PRODUCT_ID`] would report it.
 fn default_offer() -> ProOffer {
     ProOffer {
         product_id: PRO_PRODUCT_ID.to_string(),

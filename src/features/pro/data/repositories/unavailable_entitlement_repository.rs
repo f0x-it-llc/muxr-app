@@ -1,10 +1,5 @@
-//! [`UnavailableEntitlementRepository`] — the degraded-launch store: the
-//! durable cache behind [`super::PlayEntitlementRepository`] could not be
-//! opened, so this app sells nothing and grants nothing until it is fixed.
-//! The upgrade sheet already renders `UNAVAILABLE_COPY` for `offer() == None`
-//! and toasts it for [`PurchaseOutcome::Unavailable`] and
-//! [`RestoreResult::Unavailable`] alike — a restore here reached no store, so
-//! it must never read as "this account owns nothing".
+//! Degraded launch: the entitlement cache could not be opened, so nothing is sold or granted.
+//! A restore here reached no store and must never read as "this account owns nothing".
 
 use crate::failure::AppFailure;
 use crate::features::pro::domain::entities::{
@@ -12,7 +7,6 @@ use crate::features::pro::domain::entities::{
 };
 use crate::features::pro::domain::repositories::EntitlementRepository;
 
-/// See the [module docs](self).
 pub struct UnavailableEntitlementRepository;
 
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]

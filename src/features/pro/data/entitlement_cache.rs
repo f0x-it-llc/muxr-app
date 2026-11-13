@@ -1,16 +1,6 @@
-//! [`EntitlementCache`] — the durable half of the store-backed entitlement
-//! repository: two `frust-shared-preferences` keys holding the last answer the
-//! store gave, so a cold start and an offline launch can gate on something
-//! other than Free-until-proven.
-//!
-//! **Reads never fail**: a missing or wrong-typed value reads as
-//! [`Entitlement::Free`], the safe side of a gate. [`Entitlement::Pending`] is
-//! deliberately not representable on disk — an unsettled purchase unlocks
-//! nothing — so it stores, and reads back, as Free.
-//!
-//! **Writes are fire-and-forget**, the shape `settings`' `PrefsRepository`
-//! savers use: a failed write is logged rather than surfaced, since losing the
-//! cache costs one store round trip on the next launch, never the entitlement.
+//! Durable half of the store-backed entitlement: the last store answer in two preferences keys.
+//! Reads never fail: missing or wrong-typed reads as Free, and Pending is stored as Free.
+//! Writes are fire-and-forget: a failed write is logged, never surfaced.
 
 use frust::spawn_blocking;
 use frust_shared_preferences::{PrefsError, SharedPreferences};
@@ -18,39 +8,27 @@ use frust_shared_preferences::{PrefsError, SharedPreferences};
 use crate::features::connect::domain::entities::epoch_millis;
 use crate::features::pro::domain::entities::Entitlement;
 
-/// Whether the last store answer entitled this install to Pro.
 const KEY_ENTITLEMENT: &str = "pro_entitlement";
-/// When that answer was written, in ms since the Unix epoch.
 const KEY_CHECKED_MS: &str = "pro_entitlement_checked_ms";
 
-/// The persisted entitlement. See the [module docs](self).
 pub(crate) struct EntitlementCache {
     backend: Backend,
 }
 
-/// Where the two keys live.
 enum Backend {
-    /// The platform's standard preferences store — the only arm a real run has.
     Prefs(SharedPreferences),
-    /// An in-process map the unit tests run on. A headless test process has
-    /// neither a platform store nor the reactive runtime [`spawn_blocking`]
-    /// needs, so the real arm cannot be exercised there at all.
+    /// In-process map for unit tests: a headless process has no platform store or reactive runtime.
     #[cfg(test)]
     Memory(std::sync::Mutex<Option<bool>>),
 }
 
 impl EntitlementCache {
-    /// Open the platform's standard preferences store.
-    ///
-    /// # Errors
-    /// See [`SharedPreferences::standard`]'s own contract.
     pub(crate) fn standard() -> Result<Self, PrefsError> {
         Ok(Self {
             backend: Backend::Prefs(SharedPreferences::standard()?),
         })
     }
 
-    /// The last persisted answer, synchronously — what a cold start gates on.
     pub(crate) fn read(&self) -> Entitlement {
         let stored = match &self.backend {
             Backend::Prefs(store) => store.get_bool(KEY_ENTITLEMENT),
@@ -62,9 +40,7 @@ impl EntitlementCache {
         entitlement_from_flag(stored)
     }
 
-    /// Overwrite the cache with `entitlement` and stamp the check time.
-    /// Overwriting rather than merging is what lets a refund propagate back to
-    /// Free on the next refresh.
+    /// Overwrites rather than merges so a refund propagates back to Free.
     pub(crate) fn write(&self, entitlement: Entitlement) {
         let is_pro = entitlement.is_pro();
         match &self.backend {
@@ -88,7 +64,6 @@ impl EntitlementCache {
         }
     }
 
-    /// An empty in-process cache, for the repository's own unit tests.
     #[cfg(test)]
     pub(crate) fn in_memory() -> Self {
         Self {
@@ -97,8 +72,7 @@ impl EntitlementCache {
     }
 }
 
-/// The stored flag's meaning: only an explicit `true` is Pro. A key that was
-/// never written, or holds something that isn't a bool, reads as Free.
+/// Only an explicit `true` is Pro.
 fn entitlement_from_flag(stored: Option<bool>) -> Entitlement {
     match stored {
         Some(true) => Entitlement::Pro,
