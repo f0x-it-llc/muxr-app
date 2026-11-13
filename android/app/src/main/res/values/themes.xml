@@ -14,11 +14,11 @@
 
   ## What this theme changes, and what it deliberately does not
 
-  The activity used to run on the bare platform `@android:style/Theme.NoTitleBar`,
-  which leaves `windowDrawsSystemBarBackgrounds` at `false` — meaning the
-  **system** draws the status/navigation bar backgrounds, opaquely and in its
-  own black, over an app that has already laid itself out edge-to-edge. That is
-  Ed's round-5 device finding: a pitch-black bar sitting on top of the app's own
+  Without this theme the activity runs on the bare platform
+  `@android:style/Theme.NoTitleBar`, which leaves `windowDrawsSystemBarBackgrounds`
+  at `false`: the **system** then draws the status/navigation bar backgrounds,
+  opaquely and in its own black, over an app that has already laid itself out
+  edge-to-edge. The result is a pitch-black bar sitting on top of the app's own
   chrome instead of the app's tone showing through.
 
   So: the window takes ownership of those backgrounds and paints them
