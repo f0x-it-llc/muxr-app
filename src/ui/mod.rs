@@ -1,21 +1,4 @@
-//! Shared, cross-feature widget helpers — the shape `examples/huddle`'s
-//! `ui/` (toast, sheet, scaffold, fill_box, …) suggests this grows into as
-//! muxr needs more app-wide chrome shared by more than one feature.
-//!
-//! | Module | What it owns |
-//! |---|---|
-//! | [`agent_marks`] | The agent vocabulary's presentation: status tone/glyph/dot, kind monogram tiles, count pills and the accessibility summary line (over `crate::agents`) |
-//! | [`backdrop`] | Full-bleed page background the Connect screen and splash overlay paint |
-//! | [`dialogs`] | Confirm / name-input modal helpers over `frust_glyph`'s dialog |
-//! | [`paint`] | Cross-feature paint-primitive tokens (hairline, full-pill radius, status-dot glow, dashed-border step) shared by every feature's hand-rolled chrome |
-//! | [`palette`] | The app's one theme-derived colour vocabulary, union of the four per-feature `Palette`s — not yet adopted |
-//! | [`recency`] | The one coarse age wording ("2 hours ago", "yesterday"), framework-free so a `domain` entity may call it |
-//! | [`sheet`] | The modal bottom-sheet adapter over `frust_glyph`'s own sheet (`show_sheet`, over this module's own [`SheetHandle`]) |
-//! | [`side_sheet`] | The modal side-sheet adapter over `frust_glyph`'s own side sheet (`show_side_sheet`, the x-axis sibling of [`sheet::show_sheet`], over the same [`SheetHandle`]) |
-//! | [`spacing`] | Named spacing tokens on the measured de-facto scale — not yet adopted |
-//! | [`splash`] | The cold-start splash sequence (design reference: `docs/splash.html`/`docs/muxr-app-icons`) |
-//! | [`toasts`] | The failure→toast queue handle and the toast layer the shell mounts |
-//! | [`topbar`] | The app's bar furniture: the brand row and icon slot Glyph's own app bar wears, plus `icon_button` and the page clearance |
+//! Cross-feature widget helpers and app-wide chrome shared by more than one feature.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -34,22 +17,13 @@ pub mod splash;
 pub mod toasts;
 pub mod topbar;
 
-/// The one-shot dismissal gate [`sheet::show_sheet`] and
-/// [`side_sheet::show_side_sheet`] each mint one of per instance: a `close`/
-/// [`close_then`](Self::close_then) fires **at most once**, so a duplicate
-/// close (a second row tap inside the close beat, a scrim tap racing a
-/// commit, …) cannot pop the route or page underneath the sheet a second
-/// time. Shared here — rather than declared once per adapter — because both
-/// modal shapes wire the identical contract onto their own catalog widget's
-/// staged exit.
+/// One-shot dismissal gate shared by both sheet adapters: a close fires at most once, so a
+/// duplicate close cannot pop the route underneath the sheet.
 #[derive(Clone)]
 pub struct SheetHandle {
     inner: Rc<SheetGuard>,
 }
 
-/// [`SheetHandle`]'s shared interior: the latch, the pending-close ticket, the
-/// staged close they gate, and the follow-on
-/// [`close_then`](SheetHandle::close_then) queues onto its completion.
 struct SheetGuard {
     closed: Cell<bool>,
     pending: Cell<u64>,
@@ -58,9 +32,6 @@ struct SheetGuard {
 }
 
 impl SheetHandle {
-    /// Mint a fresh handle whose staged close is `close` — an adapter's own
-    /// seam onto its catalog widget's programmatic-close handle
-    /// (`GlyphSheetHandle::close`/`GlyphSideSheetHandle::close`).
     pub(crate) fn new(close: impl Fn() + 'static) -> Self {
         SheetHandle {
             inner: Rc::new(SheetGuard {
@@ -113,10 +84,6 @@ impl SheetHandle {
 mod tests {
     use super::*;
 
-    /// A handle whose "close" only counts itself — production wires this to
-    /// `frust_glyph::GlyphSheetHandle::close`/`GlyphSideSheetHandle::close`
-    /// (each adapter's own staged exit), so counting invocations here is
-    /// counting how many times that seam fired, not literal pops.
     fn counting_handle() -> (SheetHandle, Rc<Cell<usize>>) {
         let pops = Rc::new(Cell::new(0usize));
         let counted = Rc::clone(&pops);
@@ -128,8 +95,6 @@ mod tests {
 
     #[test]
     fn a_sheet_pops_once_however_many_times_it_is_told_to_close() {
-        // The defect this gate exists for: the second close used to pop the
-        // page *under* the sheet — the route itself.
         let (sheet, pops) = counting_handle();
         assert!(sheet.close(), "the first close is the one that closes it");
         assert!(!sheet.close(), "…and every later one is a no-op");
@@ -139,9 +104,6 @@ mod tests {
 
     #[test]
     fn a_latched_handle_pops_nothing_at_all() {
-        // The page went away some other way (the widget's own staged exit
-        // after a scrim tap, a handle drag or a back press); a close still in
-        // flight must not land on whatever is under it now.
         let (sheet, pops) = counting_handle();
         sheet.mark_closed();
         assert!(!sheet.close(), "the sheet is already gone");
@@ -150,10 +112,6 @@ mod tests {
 
     #[test]
     fn close_then_drives_the_staged_close_and_holds_its_callback_for_run_pending() {
-        // `close_then` fires the same underlying staged close as `close`
-        // immediately, but its own callback waits for `run_pending` — the
-        // stand-in here for an adapter's own `on_close` wiring, which is what
-        // actually calls it once the exit completes.
         let (sheet, pops) = counting_handle();
         let ran = Rc::new(Cell::new(false));
         let ran_write = Rc::clone(&ran);
@@ -178,9 +136,6 @@ mod tests {
 
     #[test]
     fn a_close_then_after_the_sheet_is_already_closed_drops_its_callback() {
-        // Same race `a_sheet_pops_once_however_many_times_it_is_told_to_close`
-        // guards for a plain `close` — `close_then` shares the one gate, so a
-        // duplicate never queues a second follow-on behind someone else's.
         let (sheet, pops) = counting_handle();
         assert!(
             sheet.close(),
