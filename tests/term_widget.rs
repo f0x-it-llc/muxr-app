@@ -1,14 +1,6 @@
-//! Headless behavior coverage for the real terminal grid
-//! (`muxr::features::terminal::presentation::term`) — no GPU, no window.
-//!
-//! Two shapes of test: **widget-level**, the `View`/`Widget` pair driven directly against
-//! [`GridScene`], a recorder keeping the four channels this widget paints into (`tests/support`'s
-//! `RecScene` records neither `stroke_line` nor plain clips, and a leaf widget needs no
-//! `RenderRoot` to lay out); and **mounted**, a one-widget `Component` in a real `RenderRoot` —
-//! the only way to exercise the feed pump's `on_cleanup` cancellation and the semantics pass,
-//! both properties of being *mounted*.
-//!
-//! Clock-driven behavior is **stepped**, never waited on: a paint at `t` is the caret at `t`.
+//! Headless coverage for the terminal grid: widget-level tests against `GridScene`, a recorder
+//! of the four channels the grid paints, and mounted tests in a real `RenderRoot` for the feed
+//! pump's cancellation and the semantics pass. Clock-driven behavior is stepped, never waited on.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -39,33 +31,18 @@ use muxr::features::terminal::presentation::term::{
 mod support;
 use support::{frame_at_sized, ms, node_roles, pump_frames, serial, setup};
 
-/// The font size every test lays out at — the app's own terminal default
-/// (Settings' terminal-appearance group starts at 13px, the incumbent's
-/// default).
 const FONT_SIZE: f32 = 13.0;
 
-/// A phone-shaped content box, in logical px.
 const PHONE: Size = Size::new(392.7, 872.7);
 
-/// The label the grid publishes as its accessible name.
 const LABEL: &str = "dev · zsh";
 
-// ---------------------------------------------------------------------------
-// A recording paint target
-// ---------------------------------------------------------------------------
-
-/// A GPU-free paint target recording exactly what this widget draws.
 #[derive(Default)]
 struct GridScene {
-    /// `(origin, size, colour)` per filled rect, in paint order.
     fills: Vec<(Point, Size, Color)>,
-    /// One entry per shaped glyph run submitted.
     glyph_runs: usize,
-    /// Clip pushes — the grid pushes exactly one.
     clips: usize,
-    /// `(origin, bounding box)` per stroked path — the unfocused caret.
     strokes: Vec<(Point, Size)>,
-    /// Stroked lines (SGR underline decoration).
     lines: usize,
 }
 
@@ -92,7 +69,6 @@ impl PaintScene for GridScene {
 }
 
 impl GridScene {
-    /// Every fill painted in exactly `color`, in paint order.
     fn fills_in(&self, color: Color) -> Vec<(Point, Size)> {
         self.fills
             .iter()
@@ -102,22 +78,15 @@ impl GridScene {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Widget-level harness
-// ---------------------------------------------------------------------------
-
-/// A grid widget over its own emulator, plus the text context it shapes with.
 struct Grid {
     widget: TerminalGridWidget,
     emulator: SharedEmulator,
     tcx: TextContext,
     palette: TerminalPalette,
-    /// The last size `layout` returned.
     size: Size,
 }
 
 impl Grid {
-    /// A grid whose emulator has already been fed `bytes`, at generation 1.
     fn fed(bytes: &[u8]) -> Self {
         Self::new(bytes, CursorStyle::Block, false)
     }
@@ -141,7 +110,6 @@ impl Grid {
         }
     }
 
-    /// Lay out inside `available`, shaping real text.
     fn layout(&mut self, available: Size) -> Size {
         let tcx: &mut dyn Any = &mut self.tcx;
         let mut ctx = LayoutCtx::with_text_context(tcx);
@@ -151,7 +119,6 @@ impl Grid {
         self.size
     }
 
-    /// Paint at `at_ms` on the frame clock.
     fn paint_at(&mut self, at_ms: f64) -> (GridScene, PaintFacts) {
         let mut scene = GridScene::default();
         let mut ctx = PaintCtx::for_test(Point::ZERO, self.size, ms(at_ms));
@@ -164,23 +131,17 @@ impl Grid {
         (scene, facts)
     }
 
-    /// Lay out at [`PHONE`] and paint at t=0 — the common case.
     fn frame(&mut self) -> GridScene {
         self.layout(PHONE);
         self.paint_at(0.0).0
     }
 }
 
-/// What a paint pass asked the shell for.
 struct PaintFacts {
     needs_frame: bool,
     needs_layout: bool,
     paced_only: bool,
 }
-
-// ---------------------------------------------------------------------------
-// Geometry + batching, through the real shaper
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_grid_fills_its_box_and_derives_its_own_cols_and_rows() {
@@ -191,8 +152,6 @@ fn the_grid_fills_its_box_and_derives_its_own_cols_and_rows() {
     assert!(geometry.cols > 20, "{geometry:?}");
     assert!(geometry.rows > 10, "{geometry:?}");
     assert_eq!(geometry.font_size, FONT_SIZE, "the type never moved");
-    // The painted box is the grid, and it fits: no clipped column, no row
-    // beyond the last.
     assert!(
         (size.width - geometry.grid_width()).abs() < 0.01,
         "{size:?}"
@@ -203,7 +162,6 @@ fn the_grid_fills_its_box_and_derives_its_own_cols_and_rows() {
     );
     assert!(size.width <= PHONE.width + 0.01, "{size:?}");
     assert!(size.height <= PHONE.height + 0.01, "{size:?}");
-    // Less than one cell of the box goes unused on each axis.
     assert!(PHONE.width - size.width < geometry.width, "{size:?}");
     assert!(PHONE.height - size.height < geometry.height, "{size:?}");
 }
@@ -232,7 +190,6 @@ fn a_bigger_box_is_a_bigger_grid_at_the_same_font_size() {
 #[test]
 fn the_layout_pass_resizes_the_emulator_to_the_grid_it_derived() {
     let mut grid = Grid::fed(b"");
-    // Before layout: the classic default the emulator was constructed at.
     assert_eq!(grid.emulator.borrow().size(), (80, 24));
 
     grid.layout(PHONE);
@@ -242,7 +199,6 @@ fn the_layout_pass_resizes_the_emulator_to_the_grid_it_derived() {
         (geometry.cols, geometry.rows),
         "the emulator holds exactly the grid on screen"
     );
-    // …and the session has a resize waiting to be told about.
     assert_eq!(
         grid.emulator.borrow_mut().take_pending_resize(),
         Some((geometry.cols, geometry.rows))
@@ -261,8 +217,6 @@ fn one_glyph_run_per_batched_run_inside_one_clip_over_one_backdrop() {
     );
     let runs = grid.widget.run_count();
     assert_eq!(runs, 3, "green tag, plain tail, second row");
-    // Each batched run shapes to at least one glyph run (a monospace ASCII run
-    // is exactly one).
     assert!(
         scene.glyph_runs >= runs,
         "{} glyph runs for {runs} batched runs",
@@ -288,7 +242,6 @@ fn a_coloured_background_paints_a_rect_and_the_default_one_does_not() {
     );
     assert!((size.height - geometry.height).abs() < 0.01, "{size:?}");
 
-    // The plain run adds no rect of its own: the backdrop already covers it.
     let plain_fills = scene
         .fills
         .iter()
@@ -303,19 +256,13 @@ fn a_blank_screen_paints_the_backdrop_and_nothing_else() {
     let scene = grid.frame();
     assert_eq!(grid.widget.run_count(), 0);
     assert_eq!(scene.glyph_runs, 0, "nothing to shape at rest");
-    // The backdrop, plus the caret (a fresh screen shows one at 0,0 — see the
-    // cursor tests): nothing else.
+    // The backdrop plus the caret a fresh screen shows at 0,0.
     assert!(scene.fills.len() <= 2, "{:?}", scene.fills);
 }
 
-// ---------------------------------------------------------------------------
-// Change flags: the layout-skip contract
-// ---------------------------------------------------------------------------
-
 #[test]
 fn a_new_generation_forces_layout_not_just_paint_and_an_unchanged_one_is_free() {
-    // The reshape happens in `layout`, so a bare PAINT would freeze the grid
-    // under the mobile shells' intra-frame layout-skip gate.
+    // The reshape happens in `layout`, so a bare PAINT would freeze the grid under layout-skip.
     let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
     let palette = TerminalPalette::fallback();
     let make = |generation: u64| {
@@ -355,10 +302,7 @@ fn a_font_size_change_relayouts_and_a_cursor_change_only_repaints() {
     assert!(flags.needs_paint(), "the caret's shape is pixels");
 }
 
-/// A different font family can measure a different cell advance at the identical
-/// size, so it rides the same `LAYOUT` contract a font-size change does — not a bare
-/// `PAINT`, which would leave stale runs/geometry behind under the mobile shells'
-/// intra-frame layout-skip gate.
+/// A font family can change the cell advance at the same size, so it rides the `LAYOUT` contract.
 #[test]
 fn a_font_family_change_relayouts_too() {
     let emulator: SharedEmulator = Rc::new(RefCell::new(TerminalEmulator::with_defaults()));
@@ -377,8 +321,6 @@ fn a_font_family_change_relayouts_too() {
         "a font-family change must force LAYOUT, exactly like font-size"
     );
 
-    // …and an identical family on the next rebuild is a no-op, like every
-    // other unchanged field here.
     let same = terminal_grid(Rc::clone(&emulator), 1, palette, FONT_SIZE)
         .font_family(FontFamily::named("Comic Sans"))
         .label(LABEL);
@@ -389,10 +331,7 @@ fn a_font_family_change_relayouts_too() {
     );
 }
 
-/// `run_feed`'s scheduled loop and `InputSeam::dispatch`'s synchronous echo drain
-/// share one `generation` signal via `pump_wake`. This pins the dropped-frame case:
-/// a keystroke's own dispatch bump must not collide with `run_feed`'s very next
-/// wake — if it did, that wake's freshly fed replay content would never reshape.
+/// A keystroke's dispatch bump must not collide with `run_feed`'s next wake on the shared signal.
 #[test]
 fn a_keystroke_during_replay_still_reshapes_on_the_wake_after_it() {
     let _serial = serial();
@@ -412,14 +351,11 @@ fn a_keystroke_during_replay_still_reshapes_on_the_wake_after_it() {
     let mut counter = 0u64;
     let mut ctx = BuildCtx::new(&mut counter);
 
-    // Wake 1 (`run_feed`-style): the replay's own chunk 0 is due at t=0.
     assert!(pump_wake(&feed_dyn, &emulator, generation));
     let g_wake1 = generation.get_untracked();
     let view_wake1 = make(g_wake1);
     let mut widget = View::<()>::build(&view_wake1, &mut ctx);
 
-    // A keystroke lands mid-replay: `InputSeam::dispatch`'s own synchronous
-    // echo drain — the seam's own writer.
     input.dispatch(&Emission {
         bytes: b"q".to_vec(),
         ..Default::default()
@@ -433,10 +369,7 @@ fn a_keystroke_during_replay_still_reshapes_on_the_wake_after_it() {
     let flags = View::<()>::rebuild(&view_dispatch, &view_wake1, &mut widget, &mut ctx);
     assert!(flags.needs_layout(), "the dispatch's own wake must reshape");
 
-    // Wake 2: `run_feed`'s next scheduled wake, with more real replay content due
-    // — the dropped-frame case. Duplicating `g_dispatch` instead of moving past
-    // it would leave the rebuild seeing `prev.generation == self.generation` and
-    // skipping layout, freezing the grid on stale content for that whole wake.
+    // Reusing `g_dispatch` would make the rebuild skip layout and freeze the grid on stale content.
     feed.borrow_mut().set_elapsed(Duration::from_millis(100));
     assert!(pump_wake(&feed_dyn, &emulator, generation));
     let g_wake2 = generation.get_untracked();
@@ -469,15 +402,12 @@ fn reshaping_is_skipped_while_the_generation_is_unchanged() {
 
 #[test]
 fn the_batch_keeps_its_run_slots_across_generations() {
-    // Re-allocating a few hundred `String`s 30 times a second is exactly what
-    // the retained-slot structure exists to avoid.
     let mut grid = Grid::fed(b"\x1b[31mAAA\x1b[32mBBB\x1b[0m");
     grid.layout(PHONE);
     assert_eq!(grid.widget.run_count(), 2);
     let capacity = grid.widget.run_capacity();
     assert!(capacity >= 2);
 
-    // A new generation that batches to fewer runs must keep every slot.
     grid.emulator.borrow_mut().feed(b"\x1b[H\x1b[0maaaaaa");
     let mut counter = 0u64;
     let mut ctx = BuildCtx::new(&mut counter);
@@ -495,10 +425,6 @@ fn the_batch_keeps_its_run_slots_across_generations() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Fixture replay
-// ---------------------------------------------------------------------------
-
 #[test]
 fn replaying_the_build_log_fixture_paints_its_own_first_lines() {
     let mut feed = DemoFeed::manual();
@@ -511,10 +437,7 @@ fn replaying_the_build_log_fixture_paints_its_own_first_lines() {
     }
     grid.layout(PHONE);
 
-    // The grid is narrower than the 80 columns the fixture was captured at, so
-    // each log line wraps onto two rows and the oldest have already scrolled
-    // off — which is itself the point: this is a real emulator scrolling a real
-    // stream, not a list of strings.
+    // Narrower than the fixture's 80 columns, so each line wraps and the oldest have scrolled off.
     let contents = grid.emulator.borrow().screen().contents();
     assert!(
         contents.contains("[00029]"),
@@ -531,9 +454,6 @@ fn replaying_the_build_log_fixture_paints_its_own_first_lines() {
         "…and the first line has scrolled into scrollback: {contents:?}"
     );
 
-    // Each line batches into its own runs (a coloured level tag, a bold
-    // counter, the plain message), so a screenful is many runs and every one
-    // of them shapes.
     let scene = grid.paint_at(0.0).0;
     let runs = grid.widget.run_count();
     assert!(
@@ -542,8 +462,7 @@ fn replaying_the_build_log_fixture_paints_its_own_first_lines() {
     );
     assert!(scene.glyph_runs >= runs);
 
-    // The green `INFO` tags reach the palette's ANSI table, not the default
-    // ink — i.e. the fixture's SGR colours survived the round trip.
+    // `INFO` tags take the palette's ANSI green, so the fixture's SGR colours survived.
     let green = grid.palette.ansi[2];
     assert!(
         !scene.fills_in(green).is_empty() || contents.contains("INFO"),
@@ -552,11 +471,6 @@ fn replaying_the_build_log_fixture_paints_its_own_first_lines() {
     assert_ne!(green, grid.palette.foreground);
 }
 
-// ---------------------------------------------------------------------------
-// Cursor
-// ---------------------------------------------------------------------------
-
-/// The caret's fills in `scene`, in paint order.
 fn caret_fills(scene: &GridScene, palette: &TerminalPalette) -> Vec<(Point, Size)> {
     scene.fills_in(palette.cursor)
 }
@@ -576,8 +490,7 @@ fn a_focused_block_caret_fills_its_cell_and_re_inks_the_glyph_under_it() {
     assert!((size.width - geometry.width).abs() < 0.01, "{size:?}");
     assert!((size.height - geometry.height).abs() < 0.01, "{size:?}");
 
-    // A cursor over a *written* cell re-draws that glyph in the background ink
-    // (one extra glyph run beyond the batched ones).
+    // A cursor over a written cell redraws its glyph in the background ink: one extra glyph run.
     let mut over_text = Grid::new(b"ab\x1b[1;1H", CursorStyle::Block, true);
     let scene = over_text.frame();
     assert!(
@@ -636,7 +549,6 @@ fn an_unfocused_caret_is_a_hollow_outline_that_never_blinks() {
         "and it asks for no frames at all — nothing about it moves"
     );
 
-    // Half a blink period later it is still exactly there.
     let (later, _) = grid.paint_at(CURSOR_BLINK_PERIOD_MS / 2.0 + 1.0);
     assert_eq!(later.strokes.len(), 1);
 }
@@ -657,17 +569,14 @@ fn a_focused_caret_blinks_across_paced_frames_and_never_asks_for_layout() {
     );
     assert!(!facts.needs_layout, "a blink is pixels only");
 
-    // Past the half-period: dark.
     let (dark, _) = grid.paint_at(CURSOR_BLINK_PERIOD_MS / 2.0 + 10.0);
     assert!(
         caret_fills(&dark, &grid.palette).is_empty(),
         "dark on the second half of the cycle"
     );
-    // And back again on the next cycle.
     let (relit, _) = grid.paint_at(CURSOR_BLINK_PERIOD_MS + 10.0);
     assert_eq!(caret_fills(&relit, &grid.palette).len(), 1);
 
-    // The pure function behind it, pinned at its edges.
     assert!(cursor_lit(0.0));
     assert!(cursor_lit(CURSOR_BLINK_PERIOD_MS / 2.0 - 1.0));
     assert!(!cursor_lit(CURSOR_BLINK_PERIOD_MS / 2.0 + 1.0));
@@ -700,16 +609,12 @@ fn reduce_motion_freezes_the_caret_lit_rather_than_hiding_it_half_the_time() {
 
 #[test]
 fn a_hidden_cursor_paints_no_caret_at_all() {
-    // `ESC[?25l` — every full-screen TUI sends it.
+    // `ESC[?25l` hides the cursor.
     let mut grid = Grid::new(b"ab\x1b[?25l", CursorStyle::Block, true);
     let scene = grid.frame();
     assert!(caret_fills(&scene, &grid.palette).is_empty());
     assert!(scene.strokes.is_empty());
 }
-
-// ---------------------------------------------------------------------------
-// The feed pump
-// ---------------------------------------------------------------------------
 
 #[test]
 fn many_due_chunks_publish_exactly_one_generation() {
@@ -735,12 +640,10 @@ fn many_due_chunks_publish_exactly_one_generation() {
         "…and the repaint is: ONE signal write per wake, not one per chunk"
     );
 
-    // A wake with nothing due writes nothing at all.
     assert!(!pump_wake(&feed, &emulator, generation));
     assert_eq!(generation.get_untracked(), 1);
 }
 
-/// A one-widget screen hosting the grid and the pump — the mounted shape.
 struct GridScreen {
     feed: SharedFeed,
     emulator: SharedEmulator,
@@ -771,16 +674,12 @@ impl Component for GridScreen {
     }
 }
 
-/// The app-logic closure `RenderRoot::rebuild` drives (the app's own
-/// `tests/terminal.rs` names its own the same way).
 type Logic = Box<dyn FnMut(&mut bool) -> AnyView<bool>>;
 
-/// The mounted-component harness: the grid inside a real `RenderRoot`.
 struct Mounted {
     root: RenderRoot<bool, AnyView<bool>>,
     logic: Logic,
-    /// The app state is the mounted flag itself — flipping it to `false`
-    /// unmounts the screen, which is how this suite stands in for a back-nav.
+    /// Flipping the app state to `false` unmounts the screen, standing in for a back-nav.
     mounted: bool,
     tcx: TextContext,
     feed: Rc<RefCell<DemoFeed>>,
@@ -832,8 +731,7 @@ impl Mounted {
         );
     }
 
-    /// Pump the UI-thread task queue and rebuild `count` times (each step
-    /// sleeps 1ms, so this also advances real time past the pump's 33ms wake).
+    /// Each step sleeps 1ms, so this also advances real time past the pump's 33ms wake.
     fn pump(&mut self, count: usize) {
         pump_frames(
             &mut self.root,
@@ -845,8 +743,6 @@ impl Mounted {
     }
 }
 
-/// How many pump/rebuild steps comfortably span the pump's 33ms wake — each
-/// step sleeps 1ms, plus the frame's own work.
 const WAKE_STEPS: usize = 80;
 
 #[test]
@@ -885,8 +781,7 @@ fn unmounting_cancels_the_pump_so_nothing_writes_after_teardown() {
     let parsed = mounted.emulator.borrow().fed_writes();
     assert!(parsed > 0);
 
-    // Unmount: `on_cleanup` flips the cancel flag, and the loop returns at its
-    // next wake without draining or publishing again.
+    // `on_cleanup` flips the cancel flag; the loop returns at its next wake without publishing.
     mounted.mounted = false;
     mounted.frame();
     mounted

@@ -229,7 +229,6 @@ fn b(x: f64) -> Point {
     p(x, 5.0)
 }
 
-/// Spread finger B well past the slop and the enter threshold (A never moves).
 fn spread(m: &mut Mounted) {
     use PointerPhase::Move;
     for x in [160.0, 190.0, 220.0] {
@@ -237,7 +236,6 @@ fn spread(m: &mut Mounted) {
     }
 }
 
-/// Hold past the long-press threshold with the clock starting at `from`, flushing the timer.
 fn hold(m: &mut Mounted, from: f64) {
     m.frame(from);
     m.frame(from + HELD_MS);
