@@ -33,7 +33,7 @@ scheme = "muxr"
 # the variant — assemble/bundle/package<Flavor>Release, see
 # android/app/build.gradle.kts).
 #
-# `[signing]` below points the `frust` CLI's own release-signing gate
+# `[signing]` below points the `frust` CLI's own release-signing check
 # (`frust-drive`'s `android_build::signing`, verified against
 # crates/frust-drive/src/manifest.rs's `SigningSection` and
 # crates/frust-drive/src/android_build/signing.rs's key-resolution format
@@ -52,16 +52,16 @@ key-properties = "app/keystores/key.properties"
 prefix = "prod"
 # The CI half: the env-var *names* Gradle's `signingValue()` falls back to for
 # the `prod.*` keys (android/app/build.gradle.kts, android/app/keystores/README.md),
-# so the CLI gate resolves the same variables as Gradle rather than
+# so the CLI check resolves the same variables as Gradle rather than
 # frust-drive's ANDROID_STORE_FILE/… defaults — one rig, one set of names.
 env = { store-file = "KEYSTORE_PATH", store-password = "STORE_PASSWORD", key-alias = "KEY_ALIAS", key-password = "KEY_PASSWORD" }
 # Override the derived iOS bundle identifier (defaults to
 # `org.camelCase(name)`, e.g. `com.it.f0x.muxr`).
 # identifier = "com.it.f0x.muxr"
 
-# `team` is the Apple Developer Team ID (ByneApp, LLC) — read by
-# `frust-drive`'s `ios_build::team` module (precedence: `FRUST_IOS_TEAM` env
-# → this `[ios] team` → auto-detected `DEVELOPMENT_TEAM`) to codesign a
-# device `frust build ios`/`frust run -d <iphone>`.
+# `team` is the Apple Developer Team ID that the frust CLI passes to xcodebuild
+# as DEVELOPMENT_TEAM to codesign device builds (`frust build ios`,
+# `frust run -d <iphone>`). Precedence: `FRUST_IOS_TEAM` env, then this key,
+# then the team auto-detected from the project.
 [ios]
 team = "87MFQ5L648"
