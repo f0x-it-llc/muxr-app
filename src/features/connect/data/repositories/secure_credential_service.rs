@@ -562,8 +562,8 @@ mod tests {
     #[test]
     fn a_key_is_the_flutter_prefix_over_a_sanitized_endpoint() {
         assert_eq!(
-            storage_key("100.71.31.57:50051"),
-            "zelli_cred_100.71.31.57_50051"
+            storage_key("100.64.0.7:50051"),
+            "zelli_cred_100.64.0.7_50051"
         );
     }
 

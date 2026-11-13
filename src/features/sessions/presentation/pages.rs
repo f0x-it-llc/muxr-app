@@ -1368,8 +1368,8 @@ mod tests {
 
     #[test]
     fn the_disconnect_wording_names_the_host_and_promises_the_saved_rows_stay() {
-        let message = disconnect_message("100.71.31.57");
-        assert!(message.contains("100.71.31.57"), "{message}");
+        let message = disconnect_message("100.64.0.7");
+        assert!(message.contains("100.64.0.7"), "{message}");
         assert!(message.contains("Saved servers"), "{message}");
         assert!(
             DISCONNECT_TITLE.ends_with('?'),

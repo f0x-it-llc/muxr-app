@@ -1623,7 +1623,7 @@ fn a_double_tap_on_the_add_pages_connect_switches_and_pops_once() {
     unlock_pro(&mut h);
     h.park();
     // Prefilled from a seeded saved row, so the form needs no typing.
-    h.push(&add_server_location(Some("100.71.31.57:50051")));
+    h.push(&add_server_location(Some("100.64.0.7:50051")));
     h.park();
     h.tap_label(REMEMBER_LABEL);
     h.park();
@@ -1642,7 +1642,7 @@ fn a_double_tap_on_the_add_pages_connect_switches_and_pops_once() {
 
     assert_eq!(
         connected_endpoint().as_deref(),
-        Some("100.71.31.57:50051"),
+        Some("100.64.0.7:50051"),
         "the add page switched"
     );
     assert_eq!(
@@ -1653,7 +1653,7 @@ fn a_double_tap_on_the_add_pages_connect_switches_and_pops_once() {
         "…once"
     );
     assert_eq!(h.depth(), 2, "…and popped once, keeping the shell");
-    assert_titled(&h, "100.71.31.57");
+    assert_titled(&h, "100.64.0.7");
 }
 
 #[test]

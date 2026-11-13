@@ -645,7 +645,7 @@ fn an_idle_card_carries_no_accent_and_no_pane_pills() {
     // Pane pills: the two running cards preview two each, the idle one draws
     // no `.sess-panes` row at all.
     let values = node_values(&h.root);
-    for pill in ["btop", "ed@precision:~"] {
+    for pill in ["btop", "ed@workbench:~"] {
         assert!(
             values.iter().any(|v| v == pill),
             "a running card previews {pill:?}: {values:?}"

@@ -62,7 +62,7 @@ fn seed() -> Vec<SavedServer> {
     let now = epoch_millis();
     vec![
         SavedServer {
-            host: "100.71.31.57".to_string(),
+            host: "100.64.0.7".to_string(),
             port: 50051,
             trust_mode: TrustMode::NoVerification,
             label: "Home rig".to_string(),
