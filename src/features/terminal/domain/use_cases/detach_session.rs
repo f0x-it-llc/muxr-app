@@ -1,6 +1,3 @@
-//! [`DetachSession`] — leaves the attached session running and drops this
-//! client's attachment (the overflow menu's third row).
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;
@@ -8,12 +5,7 @@ use clean_signals::UseCase;
 use crate::failure::AppFailure;
 use crate::features::terminal::domain::repositories::TerminalRepository;
 
-/// Detaches from a session via the injected repository. `Params` is the
-/// session id; there is nothing to hand back.
-///
-/// Distinct from the sessions screen's `KillSession` on purpose: detaching
-/// leaves the multiplexer process up (the session stays `running` in the
-/// list), which is why it is not destructive and carries no confirmation.
+/// Leaves the multiplexer process running, so it is not destructive and needs no confirmation.
 pub struct DetachSession {
     repo: Arc<dyn TerminalRepository + Send + Sync>,
 }
