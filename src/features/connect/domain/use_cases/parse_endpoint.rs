@@ -90,9 +90,9 @@ mod tests {
     #[test]
     fn surrounding_whitespace_is_trimmed() {
         assert_eq!(
-            parse_endpoint("  100.71.31.57 : 50051  ", UNUSED_DEFAULT),
+            parse_endpoint("  100.64.0.7 : 50051  ", UNUSED_DEFAULT),
             Ok(Endpoint {
-                host: "100.71.31.57".to_string(),
+                host: "100.64.0.7".to_string(),
                 port: 50051,
             })
         );

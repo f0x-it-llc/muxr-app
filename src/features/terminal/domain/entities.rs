@@ -137,7 +137,7 @@ pub struct TabEntry {
     /// The tab's stable backend id (the wire's `TabMsg.tab_id`) — what a *switch* addresses it
     /// by; see the struct docs above for why it's distinct from `index`/`key`.
     pub tab_id: u64,
-    /// The pill's human label (`minefit-api`).
+    /// The pill's human label (`lumen-api`).
     pub label: String,
     /// The card status row's pane title (`ed@devbox: ~`).
     pub pane_title: String,

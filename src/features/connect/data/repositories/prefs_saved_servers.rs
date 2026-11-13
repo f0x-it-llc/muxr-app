@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn every_field_survives_a_round_trip() {
-        let mut stored = server("100.71.31.57", 50051, 1_700_000_000_000);
+        let mut stored = server("100.64.0.7", 50051, 1_700_000_000_000);
         stored.trust_mode = TrustMode::Pinned;
         stored.label = "Home rig".to_string();
         stored.read_only = true;

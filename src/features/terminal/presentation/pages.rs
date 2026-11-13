@@ -1613,11 +1613,11 @@ mod tests {
             fullscreen_active: false,
         };
         let tabs = vec![
-            tab("btop", "ed@precision: ~"),
+            tab("btop", "ed@workbench: ~"),
             tab("devbox", "ed@devbox: ~"),
         ];
         assert_eq!(active_title(&tabs, "devbox"), "ed@devbox: ~");
-        assert_eq!(active_title(&tabs, "btop"), "ed@precision: ~");
+        assert_eq!(active_title(&tabs, "btop"), "ed@workbench: ~");
         assert_eq!(active_title(&tabs, "gone"), "", "no tab, no title");
     }
 
