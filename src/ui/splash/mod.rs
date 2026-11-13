@@ -353,11 +353,7 @@ pub(crate) fn mono_style(theme: Option<&Theme>, size: f32) -> TextStyle {
         || FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
         |theme| theme.type_scale.body_medium.family.clone(),
     );
-    TextStyle {
-        family,
-        size,
-        ..TextStyle::default()
-    }
+    TextStyle::default().with_family(family).with_size(size)
 }
 
 /// The amber accent ink: `ColorScheme::primary` (Glyph's `--amber`, and the
