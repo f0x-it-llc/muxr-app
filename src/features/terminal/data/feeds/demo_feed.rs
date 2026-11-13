@@ -1,65 +1,28 @@
-//! [`DemoFeed`] — the mock-era terminal byte source: a checked-in build-log capture, replayed at
-//! its recorded rate, plus a PTY-style echo of anything sent back into it.
-//!
-//! **The fixture is data, never generated at runtime.** [`FIXTURE`] is
-//! `benchmarks/harness/fixtures/terminal/build-log.chunks` from the Frust checkout, copied bit
-//! for bit (sha256 [`FIXTURE_SHA256`], verified by this module's own test) and `include_bytes!`d
-//! rather than read from disk — Android/iOS asset layouts would each need their own loader, and a
-//! stale or missing file would then replay silently. Same 30 Hz, 900-chunk, 80x45 stream the S9
-//! benchmark measured this renderer against. Framing, per that fixture directory's `README.md`:
-//!
-//! ```text
-//! build-log.chunks   repeat [u32 little-endian length][length bytes]
-//!                    no header, no trailer, no padding
-//! replay             emit chunk i at t = i * (1000 / HZ) ms from start
-//! ```
-//!
-//! **Time is injected, never read behind the caller's back**: the port ([`TerminalFeed`]) is
-//! deliberately time-free, so this feed owns a [`Cadence`] — real elapsed wall time in the app,
-//! or a test-driven cursor ([`DemoFeed::manual`]). Echo mode appends what is sent back to the
-//! output stream, the way a real PTY echoes before the program under it answers; whether
-//! [`is_open`] reports closed once the replay drains depends on whether an echo is queued, not
-//! on whether echo is switched on — see that method's own doc.
-//!
-//! [`is_open`]: TerminalFeed::is_open
+//! A checked-in build-log capture replayed at its recorded rate, plus a PTY-style echo. Framing:
+//! repeat `[u32 little-endian length][length bytes]`, no header or padding; chunk `i` is due at
+//! `i * 1000 / HZ` ms. Embedded, so a stale or missing asset can never replay silently.
 
 use std::time::{Duration, Instant};
 
 use crate::features::terminal::domain::feed::TerminalFeed;
 
-/// The embedded fixture: the S9 `build-log` profile, byte-identical to
-/// `benchmarks/harness/fixtures/terminal/build-log.chunks` in the Frust
-/// checkout (see the [module docs](self)).
 pub const FIXTURE: &[u8] = include_bytes!("../fixtures/build-log.chunks");
 
-/// sha256 of [`FIXTURE`], transcribed from that fixture's own `build-log.json`
-/// manifest — the tripwire against a re-generated or truncated copy, which is
-/// exactly the kind of drift a checked-in binary blob hides.
+/// Transcribed from the capture's manifest; the tripwire against a regenerated or truncated copy.
 pub const FIXTURE_SHA256: &str = "f6b62258cdbe1b9f4758c22f3eee8dbe07793dab26e0d1f302f1c39ec93776b1";
 
-/// Chunk emission rate, from the fixture's manifest (`"hz": 30`).
+/// `HZ`, `CHUNK_COUNT` and the capture grid come from the fixture's manifest.
 pub const HZ: f64 = 30.0;
 
-/// Chunks in [`FIXTURE`], from the fixture's manifest (`"chunk_count": 900`) — 30
-/// seconds of build log. Asserted against the embedded bytes by this module.
 pub const CHUNK_COUNT: usize = 900;
 
-/// The grid the fixture was captured against (`"cols": 80, "rows": 45`). Not a
-/// constraint on the widget — the app derives its own cols x rows from the
-/// available box and resizes the emulator to match. Recorded because a narrower
-/// grid wraps these lines, and a reader comparing a phone against S9's
-/// screenshots needs to know why.
+/// The capture grid; not a widget constraint, but a narrower grid wraps these lines.
 pub const FIXTURE_COLS: u16 = 80;
-/// See [`FIXTURE_COLS`].
 pub const FIXTURE_ROWS: u16 = 45;
 
-/// Milliseconds between consecutive chunks (`1000 / HZ`).
 const INTERVAL_MS: f64 = 1000.0 / HZ;
 
-/// Read the next `[u32 le length][length bytes]` chunk at `cursor`, advancing it
-/// past the payload. `None` on a clean end **or** a truncated tail: a bad fixture
-/// must stop the replay, never panic mid-frame; a rejected read leaves `cursor`
-/// untouched.
+/// `None` on a clean end or a truncated tail, leaving `cursor` untouched; never panics.
 pub fn next_chunk<'a>(chunks: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
     let header_end = cursor.checked_add(4)?;
     let header = chunks.get(*cursor..header_end)?;
@@ -70,8 +33,7 @@ pub fn next_chunk<'a>(chunks: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> 
     Some(payload)
 }
 
-/// Count the chunks in a stream and report the byte offset reached — the
-/// fixture-integrity helper (`offset == chunks.len()` means no trailing garbage).
+/// Returns `(chunk count, offset reached)`; `offset == chunks.len()` means no trailing bytes.
 pub fn walk_chunks(chunks: &[u8]) -> (usize, usize) {
     let mut cursor = 0usize;
     let mut count = 0usize;
@@ -81,11 +43,8 @@ pub fn walk_chunks(chunks: &[u8]) -> (usize, usize) {
     (count, cursor)
 }
 
-/// [`DemoFeed`]'s time source (see the [module docs](self)).
 enum Cadence {
-    /// Wall-clock elapsed since construction — the app.
     Real(Instant),
-    /// A cursor a test advances by hand.
     Manual(Duration),
 }
 
@@ -98,38 +57,24 @@ impl Cadence {
     }
 }
 
-/// The checked-in build-log replay, plus a PTY-style echo. See the [module
-/// docs](self).
 pub struct DemoFeed {
-    /// Byte offset of the next unread chunk header.
     cursor: usize,
-    /// Index of the next chunk — drives the `i * (1000 / HZ)` schedule.
     next_index: usize,
     clock: Cadence,
-    /// Whether [`TerminalFeed::send_input`] echoes back into the output stream.
     echo: bool,
-    /// Echoed bytes awaiting the next drain. One `Vec`, reused: a keystroke
-    /// must not allocate.
+    /// Reused so a keystroke does not allocate.
     echoed: Vec<u8>,
-    /// The last size [`TerminalFeed::resize`] was told about — the test hook
-    /// standing in for a `SIGWINCH`/gRPC resize until a real session exists.
     last_resize: Option<(u16, u16)>,
-    /// Diagnostics: chunks and payload bytes actually handed out.
     fed_chunks: usize,
     fed_bytes: usize,
 }
 
 impl DemoFeed {
-    /// A feed positioned at chunk 0, replaying against the wall clock from
-    /// **now**, with echo on.
     pub fn new() -> Self {
         Self::with_clock(Cadence::Real(Instant::now()))
     }
 
-    /// A feed whose clock a test drives by hand with
-    /// [`advance`](Self::advance)/[`set_elapsed`](Self::set_elapsed). Not
-    /// `#[cfg(test)]`: `tests/*.rs` are separate crates, so a test-gated
-    /// constructor would be invisible to the suite that needs it most.
+    /// Not `#[cfg(test)]`: `tests/*.rs` are separate crates and need this constructor.
     pub fn manual() -> Self {
         Self::with_clock(Cadence::Manual(Duration::ZERO))
     }
@@ -147,50 +92,40 @@ impl DemoFeed {
         }
     }
 
-    /// Turn the PTY-style echo (see the [module docs](self)) on or off.
     #[must_use]
     pub fn with_echo(mut self, echo: bool) -> Self {
         self.echo = echo;
         self
     }
 
-    /// Move a [`manual`](Self::manual) clock forward by `delta`. No-op on a
-    /// real clock.
     pub fn advance(&mut self, delta: Duration) {
         if let Cadence::Manual(elapsed) = &mut self.clock {
             *elapsed += delta;
         }
     }
 
-    /// Place a [`manual`](Self::manual) clock at `elapsed` since the start of
-    /// the replay. No-op on a real clock.
     pub fn set_elapsed(&mut self, elapsed: Duration) {
         if let Cadence::Manual(current) = &mut self.clock {
             *current = elapsed;
         }
     }
 
-    /// Elapsed replay time — wall clock, or the manual cursor.
     pub fn elapsed(&self) -> Duration {
         self.clock.elapsed()
     }
 
-    /// Chunks handed out so far.
     pub fn fed_chunks(&self) -> usize {
         self.fed_chunks
     }
 
-    /// Fixture payload bytes handed out so far (echo excluded).
     pub fn fed_bytes(&self) -> usize {
         self.fed_bytes
     }
 
-    /// Whether every fixture chunk has been handed out.
     pub fn is_drained(&self) -> bool {
         self.next_index >= CHUNK_COUNT
     }
 
-    /// The last `(cols, rows)` [`TerminalFeed::resize`] was told about.
     pub fn last_resize(&self) -> Option<(u16, u16)> {
         self.last_resize
     }
@@ -203,10 +138,8 @@ impl Default for DemoFeed {
 }
 
 impl TerminalFeed for DemoFeed {
-    /// Echo first, then every chunk whose scheduled time (`i * 1000 / HZ` ms) has passed. Echo
-    /// leads because a PTY echoes a keystroke before the program under it answers — one write
-    /// however many keys arrived since the last wake. A late wake catches up on every due chunk
-    /// in one pass: the repaint is coalesced, the input is not.
+    /// Echo leads, as a PTY echoes before the program answers; a late wake then catches up on
+    /// every due chunk in one pass.
     fn drain_output(&mut self, sink: &mut dyn FnMut(&[u8])) -> usize {
         let mut writes = 0usize;
         if !self.echoed.is_empty() {
@@ -245,22 +178,11 @@ impl TerminalFeed for DemoFeed {
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
-        // A replay has no window to resize — the fixture's lines were captured
-        // at FIXTURE_COLS x FIXTURE_ROWS and never re-flow. Recorded so the
-        // caller's plumbing is testable before a session exists.
         self.last_resize = Some((cols, rows));
     }
 
-    /// Open while the replay has chunks left, or while an echo is queued and not yet drained —
-    /// not merely because echo is switched on. Echo used to be an unconditional "stay open
-    /// forever" clause; now that [`InputSeam::dispatch`] drains an echo synchronously, a drained
-    /// replay with nothing queued has nothing left to say.
-    ///
-    /// A property of a **finite replay with no live process behind it**, not a rule every
-    /// [`TerminalFeed`] shares — the trait's own default stays `true`, and a live PTY/gRPC
-    /// session's should too, since a real process can answer at any time.
-    ///
-    /// [`InputSeam::dispatch`]: crate::features::terminal::presentation::term::InputSeam::dispatch
+    /// Open while chunks remain or an echo is queued. Specific to a finite replay: a live
+    /// session keeps the trait's `true` default.
     fn is_open(&self) -> bool {
         !self.is_drained() || !self.echoed.is_empty()
     }
@@ -270,8 +192,6 @@ impl TerminalFeed for DemoFeed {
 mod tests {
     use super::*;
 
-    /// Drain into a `Vec` of owned writes — the shape every test below asserts
-    /// on.
     fn drain(feed: &mut DemoFeed) -> Vec<Vec<u8>> {
         let mut writes = Vec::new();
         let reported = feed.drain_output(&mut |bytes| writes.push(bytes.to_vec()));
@@ -285,9 +205,6 @@ mod tests {
 
     #[test]
     fn the_embedded_fixture_is_the_checked_in_capture_byte_for_byte() {
-        // A hand-rolled sha256 rather than a dependency: this is the one place
-        // in the app that needs one, and a crate in the manifest for a single
-        // test assertion is a worse trade than 40 lines of FIPS 180-4.
         assert_eq!(sha256_hex(FIXTURE), FIXTURE_SHA256);
     }
 
@@ -304,13 +221,11 @@ mod tests {
 
     #[test]
     fn chunk_reader_stops_on_a_truncated_tail_instead_of_panicking() {
-        // A 3-byte payload declared, 2 supplied.
         let bytes = [3u8, 0, 0, 0, b'a', b'b'];
         let mut cursor = 0usize;
         assert!(next_chunk(&bytes, &mut cursor).is_none());
         assert_eq!(cursor, 0, "a rejected read must not advance the cursor");
 
-        // A truncated 3-byte header.
         let short = [1u8, 0, 0];
         let mut cursor = 0usize;
         assert!(next_chunk(&short, &mut cursor).is_none());
@@ -320,17 +235,14 @@ mod tests {
     fn replay_emits_chunk_i_at_i_over_hz_and_catches_up_on_a_late_wake() {
         let mut feed = DemoFeed::manual();
 
-        // t=0 releases exactly chunk 0.
         assert_eq!(drain(&mut feed).len(), 1);
-        // Just before chunk 1's slot (33.33ms): nothing new.
+        // Chunk 1 is due at 33.33 ms.
         feed.set_elapsed(Duration::from_micros(33_000));
         assert!(drain(&mut feed).is_empty());
-        // Past it: exactly one more.
         feed.set_elapsed(Duration::from_micros(34_000));
         assert_eq!(drain(&mut feed).len(), 1);
 
-        // A ~1-second-late wake must catch up on every due chunk (chunks
-        // 0..=30 are due by t=1010ms), never skip one.
+        // Chunks 0..=30 are due by t = 1010 ms.
         feed.set_elapsed(Duration::from_millis(1010));
         assert_eq!(drain(&mut feed).len(), 29);
         assert_eq!(feed.fed_chunks(), 31);
@@ -343,7 +255,6 @@ mod tests {
         drain(&mut feed);
         assert!(feed.is_drained());
         assert_eq!(feed.fed_chunks(), CHUNK_COUNT);
-        // Payload bytes = file length minus one 4-byte header per chunk.
         assert_eq!(feed.fed_bytes(), FIXTURE.len() - 4 * CHUNK_COUNT);
         assert!(
             !feed.is_open(),
@@ -351,8 +262,6 @@ mod tests {
         );
     }
 
-    /// Echo no longer means "stay open forever" — a drained replay with nothing
-    /// queued has nothing left to say, so the pump can stop.
     #[test]
     fn a_drained_feed_with_echo_on_closes_once_nothing_is_queued() {
         let mut feed = DemoFeed::manual();
@@ -365,10 +274,6 @@ mod tests {
         );
     }
 
-    /// The other half of the same contract: a keystroke after the replay has
-    /// drained reopens the feed just long enough to hand back its echo, then
-    /// closes again — the exact shape `InputSeam::dispatch`'s synchronous echo
-    /// drain exists to short-circuit.
     #[test]
     fn a_drained_feed_reopens_for_a_queued_echo_and_closes_once_it_drains() {
         let mut feed = DemoFeed::manual();
@@ -391,7 +296,6 @@ mod tests {
     #[test]
     fn echo_round_trips_sent_bytes_into_the_output_stream() {
         let mut feed = DemoFeed::manual();
-        // Drain chunk 0 out of the way first, so the echo write is unambiguous.
         drain(&mut feed);
 
         feed.send_input(b"ls");
@@ -402,7 +306,6 @@ mod tests {
             Some(b"ls -la\r".as_slice()),
             "everything sent since the last wake echoes as ONE write, in order"
         );
-        // …and only once.
         let writes = drain(&mut feed);
         assert!(writes.iter().all(|w| w != b"ls -la\r"));
     }
@@ -433,8 +336,6 @@ mod tests {
         assert!(first.contains("INFO"), "{first:?}");
         assert!(first.contains("[00000]"), "{first:?}");
     }
-
-    // A minimal sha256 (FIPS 180-4) for the fixture-integrity test above.
 
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
