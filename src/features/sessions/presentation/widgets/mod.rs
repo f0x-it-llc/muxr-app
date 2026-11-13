@@ -1,6 +1,5 @@
 //! The `/sessions` screen's widget clusters, page-coupled by design: each reads the page's state
 //! type or calls its `pages::*` action shims.
-//!
 //! Amber is brand/CTA and the Tablet selection wash, never a health signal: liveness is `success`.
 
 mod detail;
