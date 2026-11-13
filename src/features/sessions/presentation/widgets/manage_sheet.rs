@@ -1,8 +1,6 @@
 //! The per-session management sheet a long-press opens: Attach / Rename… / Kill….
-//!
 //! Rename/Kill close through [`SheetHandle::close_then`]: an unchained push would land ahead of the
-//! sheet's own staged exit and the eventual pop would take the dialog. Attach pushes a route on a
-//! different navigator and stays on a plain `close`. `disabled` is never set for Attach.
+//! sheet's staged exit and the eventual pop would take the dialog. Attach uses a plain `close`.
 
 use frust::{
     Axis, ButtonStyle, CrossAxisAlignment, FlexView, SizedBox, View, button, inflexible, text,
