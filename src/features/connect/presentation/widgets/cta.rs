@@ -1,6 +1,4 @@
-//! Piece 7 — the CTA row: the connect button (primary until servers are
-//! saved, when the unlock dock takes that role and it steps down to
-//! secondary) with the QR square beside it, and the pinned pairing CTA above.
+//! Piece 7: the CTA row, the QR square beside it, and the pinned pairing CTA above.
 
 use std::rc::Rc;
 
@@ -14,19 +12,15 @@ use crate::ui::palette::Palette;
 use crate::ui::spacing;
 use crate::ui::splash::spec::CTA_ROW_GAP;
 
-/// The CTA's label. `pub` because `tests/connect.rs` locates the CTA by its
-/// accessibility label.
+/// `pub`: `tests/connect.rs` locates the CTA by this accessibility label.
 pub const CONNECT_LABEL: &str = "→ connect";
 
-/// The platform minimum tap target: `ButtonWidget`'s own vertical padding
-/// lands short of it at this label's size, so a [`SizedBox`] forces the floor.
+/// `ButtonWidget`'s own padding lands short of the platform minimum tap target here.
 const CTA_HEIGHT: f64 = 44.0;
 
-/// How loudly the CTA speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Prominence {
     Primary,
-    /// Saved servers exist, so the unlock dock is the primary action.
     Secondary,
 }
 
@@ -47,17 +41,9 @@ impl Prominence {
     }
 }
 
-/// Piece 7 on Compact: `[cta flex][gap][QR square]`, firing
-/// [`Live::on_connect`] and [`Live::on_scan`], plus the pairing pair above
-/// while a scanned pairing is stashed. `.label_alignment(Alignment::CENTER)`
-/// centers the label on both axes (the stretch default centers only
-/// horizontally).
-///
-/// Known gap: `ButtonView` has no per-instance color/text-style override, so
-/// the label shapes at `TextStyle::default()` rather than the mock's role.
-///
-/// The pairing rows live here rather than as a ninth piece because the
-/// stagger table has exactly eight slots; the splash never sees them.
+/// `ButtonView` has no per-instance color/text-style override, so the label shapes at
+/// `TextStyle::default()` rather than the mock's role. The pairing rows live here because
+/// the stagger table has exactly eight slots.
 pub fn connect_button<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -69,8 +55,6 @@ pub fn connect_button<S: 'static>(
     connect_block(theme, colors, live, prominence, square, CTA_ROW_GAP)
 }
 
-/// The Tablet form's action block: the same pairing rows over a button row,
-/// the CTA taking the free width beside `secondary` at the CTA's own height.
 pub fn connect_actions<S: 'static>(
     theme: &Theme,
     colors: &Palette,
@@ -89,7 +73,6 @@ fn connect_block<S: 'static, V: View<S>>(
     secondary: V,
     gap: f64,
 ) -> impl View<S> {
-    // Shared by every CTA this piece renders; the splash reads `false`.
     let busy = live.is_some_and(|live| live.controller.busy());
     let on_connect = live.map(|live| Rc::clone(&live.on_connect));
     let cta = SizedBox::<S>(None, Some(CTA_HEIGHT)).child(
@@ -100,8 +83,7 @@ fn connect_block<S: 'static, V: View<S>>(
         })
         .style(prominence.style())
         .label_alignment(Alignment::CENTER)
-        // `busy` spans the offer's held redirect too, since the save chain runs
-        // with the form still looking live and this CTA the only guard against a re-tap.
+        // `busy` spans the offer's held redirect: this CTA is the only guard against a re-tap.
         .loading(busy),
     );
     let cta = centered_row::<S>(vec![
@@ -123,7 +105,6 @@ fn connect_block<S: 'static, V: View<S>>(
                 }
             })
             .label_alignment(Alignment::CENTER)
-            // Same connection-controller signal the manual CTA reads.
             .loading(busy),
         ),
         v_gap::<S>(spacing::MD),

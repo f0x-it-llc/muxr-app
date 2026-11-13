@@ -1,25 +1,6 @@
-//! The screen's free-tier server gate: the paywall a blocked dial raises
-//! instead of connecting, and the retry that runs once the block is gone.
-//!
-//! [`server_limit_prompt`] is the `gate_prompt` lent to
-//! [`ConnectController::connect`] and
-//! [`connect_from_pairing`](ConnectController::connect_from_pairing), built per
-//! press like [`credential_offer_prompt`] and never stored (it wraps `Rc`,
-//! while the controller is `Send + Sync`). A block raises `features::pro`'s one
-//! sheet over the overlay host, whose two ways out — unlock Pro, or forget the
-//! rows the free tier cannot keep — both end in the *same* connect the user
-//! asked for, re-run from the entry point it came from.
-//!
-//! The saved-row tap is gated one level up, in [`gated_saved_row_tap`], so
-//! the verdict is taken before any unlock; the retry re-enters by *row*, since
-//! a forget moves every later index.
-//!
-//! [`scan_blocked`] is the fourth gated entry point, taken at the tap since
-//! the endpoint is unknown until the scan completes; it raises the same
-//! sheet with no forget-and-connect action, and leaves the pairing dial a
-//! scan ends in to take its own verdict, the way [`server_limit_prompt`] does.
-//! The unlock dock ([`gated_keyring_unlock`]) takes its verdict inside the
-//! controller, before its one prompt, and a block retries the dock.
+//! The free-tier server gate: the paywall a blocked dial raises, and the retry once the
+//! block is gone. Both ways out re-run the same connect from its entry point; a saved-row
+//! retry re-enters by row, since a forget moves every later index.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -37,7 +18,6 @@ use crate::features::pro::presentation::controller::ProController;
 use crate::features::pro::presentation::{ServerLimitContext, UpgradeContext, show_upgrade_sheet};
 use crate::routes::Nav;
 
-/// Built per press, since nothing retains it past the connect it was made for.
 pub(crate) fn server_limit_prompt(
     controller: &Arc<ConnectController>,
     overlays: &NavigatorController<AppState>,
@@ -66,11 +46,8 @@ pub(crate) fn server_limit_prompt(
     })
 }
 
-/// A saved row tapped, with the free-tier verdict taken first: a blocked row
-/// raises the paywall instead of unlocking anything. Busy comes first, the
-/// order the other entry points take: a paywall raised for a dial
-/// `recover_and_connect` then refuses mid-flight would have dropped rows (its
-/// forget-and-connect) for a connect that never runs.
+/// Busy comes first: a paywall raised for a dial `recover_and_connect` then refuses would
+/// drop rows for a connect that never runs.
 pub(crate) fn gated_saved_row_tap(
     controller: &Arc<ConnectController>,
     overlays: &NavigatorController<AppState>,
@@ -91,9 +68,7 @@ pub(crate) fn gated_saved_row_tap(
     controller.saved_row_tapped(index, nav);
 }
 
-/// The unlock dock's press. The verdict is taken inside
-/// [`ConnectController::unlock_keyring_and_connect`], ahead of the prompt, so
-/// this only lends it the paywall.
+/// The verdict is taken inside the controller, ahead of the prompt.
 pub(crate) fn gated_keyring_unlock(
     controller: &Arc<ConnectController>,
     overlays: &NavigatorController<AppState>,
@@ -104,10 +79,8 @@ pub(crate) fn gated_keyring_unlock(
     controller.unlock_keyring_and_connect(nav, gate);
 }
 
-/// Whether connecting to `server`'s endpoint raises the paywall while `saved`
-/// is remembered ([`row_is_beyond_free_tier`]). The pro tag means that, not
-/// "this tap is gated": a credential-less row is tagged too, though its tap
-/// only refills the form and the paywall fires at Connect.
+/// The pro tag marks a row beyond the free tier, not a gated tap: a credential-less row
+/// only refills the form, and the paywall fires at Connect.
 pub(crate) fn row_is_locked(
     server: &SavedServer,
     saved: &[SavedServer],
@@ -116,8 +89,7 @@ pub(crate) fn row_is_locked(
     row_is_beyond_free_tier(entitlement, saved, &server.endpoint())
 }
 
-/// Drop the rows the free tier cannot keep, then retry — in that order, since
-/// the verdict the retry re-takes reads the same list.
+/// Forget first: the verdict the retry re-takes reads the same list.
 fn forget_then_retry(
     controller: &Arc<ConnectController>,
     to_forget: &[SavedServer],
@@ -132,8 +104,7 @@ fn forget_then_retry(
     })
 }
 
-/// The connect to run once the block is gone: the entry point it came from,
-/// with its prompts freshly built (each is lent for one press).
+/// Prompts are rebuilt: each is lent for one press.
 fn retry_connect(
     controller: &Arc<ConnectController>,
     overlays: &NavigatorController<AppState>,
@@ -163,9 +134,7 @@ fn retry_connect(
     })
 }
 
-/// The QR affordance's own gate — see the [module docs](self). `Blocked`
-/// raises the paywall with no forget-and-connect action and returns `true`;
-/// `Allowed` returns `false` and the affordance proceeds to its permission gate.
+/// Taken at the tap: the endpoint is unknown until the scan completes.
 pub(crate) fn scan_blocked(
     controller: &Arc<ConnectController>,
     overlays: &NavigatorController<AppState>,
