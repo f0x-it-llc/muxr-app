@@ -1,12 +1,3 @@
-//! [`UpdateAppearance`] — persists the `terminal appearance` group after a
-//! picker sheet lands on a new font family / font size / cursor style.
-//!
-//! Takes the **whole** group rather than one changed field: the screen already
-//! holds the current [`AppearancePrefs`] in a signal, so building the next
-//! value there is one struct update, and a per-field API would need three
-//! repository methods (and three use cases) that differ only in which line
-//! they assign.
-
 use std::sync::Arc;
 
 use clean_signals::UseCase;

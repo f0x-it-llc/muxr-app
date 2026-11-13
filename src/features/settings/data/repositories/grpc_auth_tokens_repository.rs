@@ -1,36 +1,4 @@
-//! [`GrpcAuthTokensRepository`] — the real [`AuthTokensRepository`] over the
-//! connected `muxrd` client.
-//!
-//! **Held once, not per-call**: the `ConnectionController` `Arc` is set at DI
-//! time under the ambient owner. Every real call here runs inside a raw
-//! `frust::spawn_local` future with no ambient `Owner`, so a per-call
-//! `use_context` lookup there would panic on the first RPC (masked in tests,
-//! since `tests/support::setup` installs a permanent owner). [`client`](Self::client)
-//! still re-resolves the live `MuxrClient` on every call — the connection can
-//! drop/reconnect between calls on one repository instance; `None` maps to a
-//! retryable [`AppFailure::Network`] rather than panicking, since `/settings`
-//! is never route-guarded.
-//!
-//! This is `data`'s one reach past its own feature into `crate::connection`
-//! (composition-root state, not a sibling feature's layer) — the same
-//! widening `sessions`/`terminal`'s real repositories document.
-//!
-//! **Failure mapping**: every `tonic::Status` crosses
-//! [`crate::net::error::from_status`]; `UNAUTHENTICATED` also fires
-//! `ConnectionController::on_session_expired_for` with the client the call
-//! used (idempotent, and fenced to the live client). `RevokeToken`'s
-//! `ActionAck` maps through [`crate::net::error::ack_result`] instead — a
-//! refused revoke is a successful RPC carrying a refusal, not a transport
-//! error.
-//!
-//! **The one-time secret**: `ListTokens` never carries one (`TokenInfo.token`
-//! is empty on every list entry); only `CreateToken`'s response does, lifted
-//! out with the same `mem::take` hygiene `crate::connection`'s `Login` flow
-//! uses, so the scrubbed wire copy never outlives the call.
-//!
-//! Tests here are mapping-only, over directly constructed proto messages —
-//! `src/net/testing.rs`'s fixture answers these three RPCs with
-//! `UNIMPLEMENTED` today, so a fixture round trip is future work.
+//! The real [`AuthTokensRepository`] over the live `muxrd` client.
 
 use std::sync::Arc;
 
@@ -45,23 +13,19 @@ use crate::features::settings::domain::repositories::AuthTokensRepository;
 use crate::net::proto::{CreateTokenReq, Empty, RevokeTokenReq, TokenInfo};
 use crate::net::{MuxrClient, error};
 
-/// [`GrpcAuthTokensRepository::client`]'s failure detail when disconnected —
-/// retryable, since `/settings` is reachable while disconnected.
 const NOT_CONNECTED: &str = "no connection is open";
 
-/// The real [`AuthTokensRepository`], over the app's live `muxrd` connection.
+/// Holds the controller `Arc`: a per-call `use_context` would panic inside an owner-less `spawn_local` future.
 pub struct GrpcAuthTokensRepository {
     connection: Arc<ConnectionController>,
 }
 
 impl GrpcAuthTokensRepository {
-    /// Resolved once by `di::provide` and held from then on — see the
-    /// [module docs](self).
     pub fn new(connection: Arc<ConnectionController>) -> Self {
         Self { connection }
     }
 
-    /// The live client, or [`NOT_CONNECTED`] when nothing is connected.
+    /// Re-resolved per call since the connection can drop; disconnected is a retryable failure because `/settings` is not route-guarded.
     fn client(&self) -> Result<MuxrClient, AppFailure> {
         self.connection
             .client()
@@ -69,13 +33,12 @@ impl GrpcAuthTokensRepository {
     }
 }
 
-/// Maps a gRPC status via [`error::from_status`], firing the session-expired
-/// hook for `client` — the one the failing call used — on `UNAUTHENTICATED`.
 fn map_status(
     controller: &ConnectionController,
     client: &MuxrClient,
     status: &tonic::Status,
 ) -> AppFailure {
+    // UNAUTHENTICATED fires the session-expired hook for the client the call used.
     let failure = error::from_status(status);
     if matches!(failure, AppFailure::Auth(_)) {
         controller.on_session_expired_for(client);
@@ -83,7 +46,6 @@ fn map_status(
     failure
 }
 
-/// A token's scope from the wire's one `read_only` bool.
 fn scope_from_wire(read_only: bool) -> TokenScope {
     if read_only {
         TokenScope::ReadOnly
@@ -92,8 +54,6 @@ fn scope_from_wire(read_only: bool) -> TokenScope {
     }
 }
 
-/// A `ListTokens`/`CreateToken` entry's metadata half — never its secret (see
-/// the [module docs](self)).
 fn auth_token_from_wire(info: &TokenInfo) -> AuthToken {
     AuthToken {
         name: info.name.clone(),
@@ -102,8 +62,6 @@ fn auth_token_from_wire(info: &TokenInfo) -> AuthToken {
     }
 }
 
-/// A `CreateToken` response's full shape, `secret` already lifted out of the
-/// wire struct by the caller (see the trait impl below).
 fn minted_token_from_wire(info: &TokenInfo, secret: Zeroizing<String>) -> MintedToken {
     MintedToken {
         name: info.name.clone(),
@@ -138,9 +96,7 @@ impl AuthTokensRepository for GrpcAuthTokensRepository {
             .await
             .map_err(|status| map_status(&self.connection, &client, &status))?
             .into_inner();
-        // Lift the secret into `Zeroizing`, leaving the wire response
-        // emptied — the same `mem::take` hygiene `connection.rs`'s `Login`
-        // flow uses.
+        // Lift the secret out so the wire copy is scrubbed.
         let secret = Zeroizing::new(std::mem::take(&mut info.token));
         Ok(minted_token_from_wire(&info, secret))
     }
@@ -153,6 +109,7 @@ impl AuthTokensRepository for GrpcAuthTokensRepository {
             .await
             .map_err(|status| map_status(&self.connection, &client, &status))?
             .into_inner();
+        // A refused revoke is a successful RPC carrying a refusal.
         error::ack_result(&ack)
     }
 }
@@ -164,9 +121,6 @@ mod tests {
     use super::*;
     use crate::net::testing::MuxrdFixture;
 
-    /// A fixture client and an unpublished controller reporting it as the live
-    /// client — `with_live_client_for_tests` is `#[cfg(test)]`-only, reachable
-    /// here since `cargo test` compiles this whole crate under `--cfg test`.
     async fn live_connected(fixture: &MuxrdFixture) -> (Arc<ConnectionController>, MuxrClient) {
         let client = fixture.connect_pinned().await;
         let controller = ConnectionController::with_live_client_for_tests(client.clone());
@@ -200,7 +154,7 @@ mod tests {
 
     #[test]
     fn an_empty_created_at_is_carried_through_rather_than_invented() {
-        // Empty is the proto's own "unknown" — never substituted here.
+        // Empty is the proto's "unknown"; it is never substituted.
         let info = TokenInfo {
             name: "old".to_string(),
             token: String::new(),
@@ -264,8 +218,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_repeated_unauthenticated_status_tears_the_connection_down_exactly_once() {
-        // `on_session_expired_for`'s own idempotence, exercised through this
-        // module's one caller of it.
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let fixture = MuxrdFixture::start().await;
