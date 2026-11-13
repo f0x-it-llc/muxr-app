@@ -1,26 +1,6 @@
-//! Headless behavior coverage for the `/settings` screen
-//! (`src/features/settings/**`) — no GPU, no window: a `RenderRoot` over the
-//! real page builder, driven through `tests/support`.
-//!
-//! `NavigatorWidget` publishes no semantics for its pages, so [`Harness`] mounts
-//! the screen as the bottom layer of a `Stack`, with an otherwise-empty
-//! navigator over it — the same shape `tests/sessions.rs` uses. The screen's
-//! rows stay reachable by value, while its dialogs and picker sheets are
-//! exercised end to end through a real navigator and located by painted
-//! geometry.
-//!
-//! Six groups plus Disconnect run past 1000px, so every frame here lays out at
-//! [`SURFACE`], not `support::surface()`'s default — hence this file's own
-//! [`Harness::pump_once`] rather than `support::pump_frames`, which frames at
-//! the default (smaller) size and would silently re-layout what the next probe
-//! is about to measure.
-//!
-//! A picker sheet's rows are invisible to `node_values` (a sheet is a navigator
-//! page), so they're read through three painted facts instead: row count via
-//! the `glyph_runs` delta (`options + 1` for the title), the selected row via
-//! its full-panel-width fill plus its `✓` vector, and a picked value via the
-//! row on the screen behind changing. Row *k* is addressed relative to the
-//! selected row's own height, since every `.pick-row` is one line tall.
+//! Headless coverage for the `/settings` screen: a `RenderRoot` over the real page builder, driven through `tests/support`.
+//! The screen is the bottom layer of a `Stack` under an empty navigator; dialogs and picker sheets are located by painted geometry.
+//! Every frame lays out at [`SURFACE`] (the screen runs past 1000px), hence the local `pump_once`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -93,42 +73,19 @@ use support::{
     node_values, pointer, serial, settle_sized, setup, smallest, tap,
 };
 
-/// The surface every frame here lays out at — tall enough that the whole screen
-/// (six groups, the dashed create row, the saved-server rows and Disconnect)
-/// is on it at once. See the [module docs](self).
 const SURFACE: Size = Size::new(800.0, 1700.0);
 
-/// A point in the top-left corner — scrim on every overlay this screen pushes
-/// (the dialog centers its panel, the sheet anchors its own to the bottom).
 const SCRIM_POINT: Point = Point::new(4.0, 4.0);
-/// The panel gutter `glyph::dialog` and `ui::sheet` share, transcribed — a
-/// full-bleed child of either is laid out at the panel width minus twice this,
-/// and it is exactly what `.pick-row.sel` bleeds back out.
 const PANEL_PADDING: f64 = 20.0;
-/// How long a pumped wait may run before the test fails rather than hangs.
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
-/// The groups column's max width past `crate::responsive::WIDE_BREAKPOINT_PX`
-/// (the screen's own width-clamp pass), transcribed (private to
-/// `presentation::pages`).
 const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
-/// The mock connection's latency reading, printed (private to `connection`).
 const MOCK_LATENCY_VALUE: &str = "36ms";
-/// `.disconnect-btn`'s own horizontal margin, transcribed (private to
-/// `presentation::widgets`) — what the Disconnect button spans the width
-/// *between*, inside whatever box the scroller itself is laid out at.
 const ROW_PAD_X: f64 = 16.0;
-/// The screen's closing action: its button, the Tablet card's button and the
-/// confirmation's own title and confirm.
 const LOCK_AND_DISCONNECT: &str = "Lock & disconnect";
-/// The connected saved server's chip, and the saved group's closing row.
 const CONNECTED_CHIP: &str = "connected";
 const ADD_SERVER_ROW: &str = "add server";
 
-/// The seeded token names `data`'s mock repository ships — the redesign's two
-/// `.token-item`s, in order.
 const SEEDED_TOKENS: [&str; 2] = ["zelli-mobile-100-71-31-57-mr3g6w5g", "token_2"];
-/// The six group labels, as the screen prints them (the source's
-/// `text-transform:uppercase`, applied in Rust — `text` carries no transform).
 const GROUPS: [&str; 6] = [
     "CONNECTION",
     "AUTH TOKENS",
@@ -138,22 +95,11 @@ const GROUPS: [&str; 6] = [
     "SESSION POLL",
 ];
 
-/// The saved server the credential cases operate on — seeded before the screen
-/// mounts, stamped fresh so it sorts to the top of the group.
 const CRED_ENDPOINT: &str = "cred.example:50051";
-/// …its label, which is what the row prints on its top line.
 const CRED_LABEL: &str = "Cred rig";
-/// …and the secret its stored credential holds.
 const CRED_TOKEN: &str = "stored-s3cr3t";
-/// The token name that credential's server-side token carries — one of the
-/// seeded pair, so a delete has something real to revoke.
 const CRED_TOKEN_NAME: &str = "token_2";
 
-// ---------------------------------------------------------------------------
-// Local harness
-// ---------------------------------------------------------------------------
-
-/// A mock connect target with the given TLS posture.
 fn mock_target(trust_mode: TrustMode) -> ConnectTarget {
     ConnectTarget {
         host: "mock.example".to_string(),
@@ -167,16 +113,10 @@ fn mock_target(trust_mode: TrustMode) -> ConnectTarget {
     }
 }
 
-/// [`Harness::mount`], first publishing `metrics` into context when `Some` —
-/// the shape `muxr`'s pages read for the responsive width-clamp pass. `None`
-/// leaves context unset, the state every other test in this suite mounts under.
 fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
     support::mount_with_metrics(metrics, Harness::mount)
 }
 
-/// The bounds of the first node labelled `label` — `tests/connect.rs`'s
-/// `Harness::bounds` idiom, free-standing here since this suite's `Harness`
-/// doesn't already carry one.
 fn bounds_by_label(root: &RenderRoot<AppState, AnyView<AppState>>, label: &str) -> Rect {
     root.semantics()
         .nodes
@@ -186,8 +126,6 @@ fn bounds_by_label(root: &RenderRoot<AppState, AnyView<AppState>>, label: &str) 
         .unwrap_or_else(|| panic!("nothing labelled {label:?}"))
 }
 
-/// The bounds of **every** node labelled `label` — [`bounds_by_label`]'s
-/// all-matches sibling, for the saved-server group's `forget` (one per row).
 fn all_bounds_by_label(root: &RenderRoot<AppState, AnyView<AppState>>, label: &str) -> Vec<Rect> {
     root.semantics()
         .nodes
@@ -197,10 +135,8 @@ fn all_bounds_by_label(root: &RenderRoot<AppState, AnyView<AppState>>, label: &s
         .collect()
 }
 
-/// The app-logic closure `RenderRoot::rebuild` drives.
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
-/// The screen, an overlay navigator over it, and everything a frame needs.
 struct Harness {
     nav: NavigatorController<AppState>,
     root: RenderRoot<AppState, AnyView<AppState>>,
@@ -210,26 +146,14 @@ struct Harness {
 }
 
 impl Harness {
-    /// Mount the screen (see the [module docs](self) for the shape), leaving
-    /// the connection **disconnected** and the first load un-awaited.
     fn mount() -> Self {
         Self::mount_seeded(|| {})
     }
 
-    /// [`Harness::mount`] with `seed` run in between: after `MuxrApp::init` has
-    /// published every feature's stores, and **before** the screen's own
-    /// controller reads them (which happens once, at construction).
     fn mount_seeded(seed: impl FnOnce()) -> Self {
-        // The real composition root: publishes the connection controller and
-        // every feature's `di::provide`, including `connect`'s own for the
-        // saved-server group.
         let state = MuxrApp.init();
         seed();
         let nav: NavigatorController<AppState> = NavigatorController::new();
-        // Re-points `routes::app_nav()` at this fixture's own navigator, real
-        // route table and session guard included (what makes Disconnect's
-        // `go("/")` real navigation) — playing both of production's
-        // navigators, so every overlay stays a page of this one mounted one.
         let _router = install_app_router(&nav, &nav, expect_connection_controller());
         let logic_nav = nav.clone();
         let logic: Logic = Box::new(move |_state: &mut AppState| {
@@ -238,7 +162,6 @@ impl Harness {
             any(Stack(vec![
                 any(settings_page(screen_nav)),
                 any(navigator(&overlay_nav, || {
-                    // Full-bleed and childless — see the module docs.
                     any(SizedBox::<AppState>(
                         Some(f64::INFINITY),
                         Some(f64::INFINITY),
@@ -257,7 +180,6 @@ impl Harness {
         harness
     }
 
-    /// Mount, mock-connect with `trust_mode`, and wait for the first load.
     fn connected_with(trust_mode: TrustMode) -> Self {
         let mut harness = Harness::mount();
         expect_connection_controller().connect(mock_target(trust_mode));
@@ -265,13 +187,10 @@ impl Harness {
         harness
     }
 
-    /// The common case: connected with no verification, like the redesign's
-    /// own mock (its `insecure (plaintext)` row).
     fn connected() -> Self {
         Harness::connected_with(TrustMode::NoVerification)
     }
 
-    /// One frame at [`SURFACE`], on the zero clock.
     fn frame(&mut self) -> RecScene {
         frame_sized(
             &mut self.root,
@@ -282,8 +201,6 @@ impl Harness {
         )
     }
 
-    /// Drive a pushed/popped overlay past the navigator's input-blocking
-    /// transition, returning the last frame's paint record.
     fn settle(&mut self) -> RecScene {
         settle_sized(
             &mut self.root,
@@ -294,10 +211,7 @@ impl Harness {
         )
     }
 
-    /// Settle, then deliver a pop's result: the navigator flushes a pusher's
-    /// `on_result` at the start of the first event pass **after** the pop's
-    /// rebuild, so a harmless `Move` is what actually hands the answer over
-    /// (`ui_substrate.rs`'s idiom).
+    /// Settle, then deliver a pop's result at the first event pass after the pop's rebuild.
     fn flush(&mut self) {
         self.settle();
         self.settle();
@@ -305,8 +219,6 @@ impl Harness {
             .event(&mut self.state, &pointer(PointerPhase::Move, SCRIM_POINT));
     }
 
-    /// Pump the UI-thread task queue and rebuild once, **at [`SURFACE`]** — see
-    /// the module docs for why `support::pump_frames` is not used here.
     fn pump_once(&mut self) {
         let runtime =
             ReactiveRuntime::get().expect("pump_once: ReactiveRuntime::init must have run");
@@ -315,8 +227,6 @@ impl Harness {
         self.frame();
     }
 
-    /// Pump until `done` accepts the rendered semantics values, or fail at
-    /// [`PUMP_DEADLINE`] rather than hang.
     fn pump_until_values(&mut self, what: &str, done: impl Fn(&[String]) -> bool) {
         let deadline = Instant::now() + PUMP_DEADLINE;
         while !done(&node_values(&self.root)) {
@@ -329,7 +239,6 @@ impl Harness {
         }
     }
 
-    /// Wait for the async first load (the screen renders both seeded tokens).
     fn await_tokens(&mut self) {
         self.pump_until_values("the seeded tokens", |values| {
             SEEDED_TOKENS
@@ -342,14 +251,11 @@ impl Harness {
         tap(&mut self.root, &mut self.state, point);
     }
 
-    /// Tap the first node whose printed text is `value` — how a test presses a
-    /// `.set-row` (its label run) or the dashed create row.
     fn tap_value(&mut self, value: &str) {
         let point = self.center_of(value);
         self.tap(point);
     }
 
-    /// Tap the first node *labelled* `label` (a button, the bell switch).
     fn tap_label(&mut self, label: &str) {
         let point = node_center_by_label(&self.root, label).unwrap_or_else(|| {
             panic!(
@@ -360,7 +266,6 @@ impl Harness {
         self.tap(point);
     }
 
-    /// The smallest scroll viewport holding the point `(x, y)`.
     fn viewport_around(&self, x: f64, y: f64) -> Rect {
         self.root
             .semantics()
@@ -373,7 +278,6 @@ impl Harness {
             .unwrap_or_else(|| panic!("no scroll viewport holds ({x}, {y})"))
     }
 
-    /// Where the first node printing `value` sits.
     fn center_of(&self, value: &str) -> Point {
         node_centers_by_value(&self.root, value)
             .first()
@@ -386,21 +290,16 @@ impl Harness {
             })
     }
 
-    /// Type `text` into whatever holds focus, one already-resolved character
-    /// event at a time (the shape a platform delivers).
     fn type_text(&mut self, text: &str) {
         for c in text.chars() {
             self.root.event(&mut self.state, &char_key(&c.to_string()));
         }
     }
 
-    /// Press a named key against the focused chain.
     fn press(&mut self, key: NamedKey) {
         self.root.event(&mut self.state, &named_key(key));
     }
 
-    /// The bell switch's announced state — the `Role::Switch` node the real
-    /// `frust_glyph::toggle` in `widgets::misc::bell_notifications_row` contributes itself.
     fn bell_state(&self) -> Option<Toggled> {
         self.root
             .semantics()
@@ -410,12 +309,6 @@ impl Harness {
             .and_then(|(_, node)| node.toggled())
     }
 
-    /// The create dialog's read-only toggle's announced role and state —
-    /// addressed by its own label rather than `Role::Switch` alone
-    /// (`tests/connect.rs`'s own `remember_on`, for a screen with only one
-    /// switch mounted at a time): the bell row's switch is still mounted
-    /// underneath while the dialog is open over it, so a role-only match
-    /// would be ambiguous here. `None` once the dialog itself is gone.
     fn read_only_toggle(&self) -> Option<(Role, Toggled)> {
         self.root
             .semantics()
@@ -431,10 +324,6 @@ impl Harness {
             })
     }
 
-    /// Whether the screen currently paints a `Role::ProgressIndicator` node —
-    /// the Downloading font row's determinate glyph progress bar
-    /// (`widgets::font_picker::font_row_progress`; `frust_widgets::glyph::progress` is the
-    /// only widget in this app's tree that contributes this role).
     fn font_progress_bar_visible(&self) -> bool {
         self.root
             .semantics()
@@ -443,21 +332,10 @@ impl Harness {
             .any(|(_, node)| node.role() == Role::ProgressIndicator)
     }
 
-    /// The navigator's page-stack depth (1 = only the harness's base page).
     fn depth(&self) -> usize {
         self.nav.depth()
     }
 
-    /// Push a stand-in for the route a picker sheet floats over, and answer the
-    /// depth the stack now rests at.
-    ///
-    /// A navigator always keeps one page (`NavigatorController::pop`: "a pop of
-    /// the last/root page is ignored"), so an unwanted *second* pop against the
-    /// bare harness is silently absorbed and [`Harness::depth`] never moves. In
-    /// the app there is always a route under the sheet — `/settings` — and that
-    /// page coming off is the defect the race below exists for. This page
-    /// stands in for it. (`tests/terminal.rs` carries the same helper, for the
-    /// same reason.)
     fn push_route_floor(&mut self) -> usize {
         self.nav.push(|| {
             any(SizedBox::<AppState>(
@@ -470,8 +348,6 @@ impl Harness {
     }
 }
 
-/// The chrome a pushed overlay added to the frame — the screen underneath is
-/// diffed out (see [`added`]).
 struct Chrome {
     rounded: Vec<(Point, Size)>,
     strokes: Vec<(Point, Size)>,
@@ -489,20 +365,12 @@ impl Chrome {
         }
     }
 
-    /// The overlay's own panel — the biggest surface it filled.
-    ///
-    /// Both channels, because the two overlays paint their panel differently: a
-    /// dialog's is a plain rounded rect, while the Glyph sheet's is a *path*
-    /// (only its top corners are rounded, which `fill_rounded_rect` cannot
-    /// express).
     fn panel(&self) -> (Point, Size) {
         let mut candidates = self.rounded.clone();
         candidates.extend(self.paths.iter().copied());
         largest(&candidates).expect("an overlay always paints its own panel")
     }
 
-    /// The overlay's own vector paths with its panel taken back out — a picker
-    /// row's `✓`, and nothing else (see [`Chrome::panel`]).
     fn vectors(&self) -> Vec<(Point, Size)> {
         let panel = self.panel();
         self.paths
@@ -512,17 +380,12 @@ impl Chrome {
             .collect()
     }
 
-    /// The overlay's full-content-width child: a dialog's name field.
     fn content_child(&self) -> (Point, Size) {
         let content_w = self.panel().1.width - 2.0 * PANEL_PADDING;
         by_width(&self.rounded, content_w)
             .unwrap_or_else(|| panic!("no full-width child in {:?}", self.rounded))
     }
 
-    /// A picker sheet's **selected** `.pick-row`: the one rect as wide as the
-    /// panel itself but not the panel — `.pick-row.sel{margin:0 -20px}` bleeds
-    /// the sheet's own gutter back out on both sides, and no other row paints a
-    /// fill at all.
     fn selected_pick_row(&self) -> (Point, Size) {
         let (panel_origin, panel_size) = self.panel();
         let mut rows: Vec<(Point, Size)> = self
@@ -543,8 +406,6 @@ impl Chrome {
     }
 }
 
-/// Open a picker sheet by tapping the `.set-row` labelled `row`, and return
-/// what the sheet itself painted.
 fn open_picker(h: &mut Harness, row: &str) -> Chrome {
     let before = h.frame();
     h.tap_value(row);
@@ -554,19 +415,11 @@ fn open_picker(h: &mut Harness, row: &str) -> Chrome {
     sheet
 }
 
-/// Take option `target` out of an open picker whose selected row measured
-/// `selected_row`, given the index that row sits at.
-///
-/// Every `.pick-row` is one line tall, so the selected row's own height is the
-/// pitch — see the [module docs](self).
 fn pick(h: &mut Harness, sheet: &Chrome, selected: usize, target: usize) {
     h.tap(pick_row(sheet, selected, target));
     h.flush();
 }
 
-/// Where option `target`'s row sits, given the picker's own selected row and
-/// the index it sits at — [`pick`]'s geometry, factored out so a test can tap
-/// the same row twice.
 fn pick_row(sheet: &Chrome, selected: usize, target: usize) -> Point {
     let (origin, size) = sheet.selected_pick_row();
     let offset = target as f64 - selected as f64;
@@ -576,8 +429,6 @@ fn pick_row(sheet: &Chrome, selected: usize, target: usize) -> Point {
     )
 }
 
-/// Open a dialog by tapping the node labelled `label`, then return the rects
-/// the dialog itself added.
 fn open_dialog_by_label(h: &mut Harness, label: &str) -> Chrome {
     let before = h.frame();
     h.tap_label(label);
@@ -585,7 +436,6 @@ fn open_dialog_by_label(h: &mut Harness, label: &str) -> Chrome {
     Chrome::diff(&before, &after)
 }
 
-/// …and by tapping the node printing `value` (the dashed create row).
 fn open_dialog_by_value(h: &mut Harness, value: &str) -> Chrome {
     let before = h.frame();
     h.tap_value(value);
@@ -593,17 +443,11 @@ fn open_dialog_by_value(h: &mut Harness, value: &str) -> Chrome {
     Chrome::diff(&before, &after)
 }
 
-/// Confirm an open confirmation dialog: its danger action is the smallest
-/// border it painted (the panel's own being the other one).
 fn confirm(h: &mut Harness, dialog: &Chrome) {
     let action = smallest(&dialog.strokes).expect("the danger action strokes its border");
     h.tap(center(action));
     h.flush();
 }
-
-// ---------------------------------------------------------------------------
-// 1 — the whole screen renders
-// ---------------------------------------------------------------------------
 
 #[test]
 fn all_six_groups_and_the_disconnect_action_render() {
@@ -611,10 +455,6 @@ fn all_six_groups_and_the_disconnect_action_render() {
     let _ambient = setup();
     let h = Harness::connected();
 
-    // The literal `GROUPS` entry is what the screen actually renders
-    // (`text-transform:uppercase` applied in Rust); tying it back to
-    // `PRO_GROUP_LABEL` here is what makes a drift between the two a test
-    // failure instead of a silent mismatch.
     assert_eq!(PRO_GROUP_LABEL.to_uppercase(), "MUXR PRO");
 
     let values = node_values(&h.root);
@@ -624,11 +464,6 @@ fn all_six_groups_and_the_disconnect_action_render() {
             "the {group:?} group label renders: {values:?}"
         );
     }
-    // One row label per `.set-row` the redesign draws. Only `zellij version`
-    // renders here: the mock connection backend reports exactly one backend
-    // (`connection.rs`'s own `MockConnectionBackend`), and the connection
-    // group prints one version row per backend the server actually reports —
-    // never a fixed pair.
     for label in [
         "server url",
         "tls certificate",
@@ -645,10 +480,7 @@ fn all_six_groups_and_the_disconnect_action_render() {
             "the {label:?} row renders: {values:?}"
         );
     }
-    // The dashed create row and the Disconnect button (a real `frust::button`,
-    // so a label rather than a value).
     assert!(values.iter().any(|v| v == "create new token"), "{values:?}");
-    // The freshly-mocked install is Free, so the plan row prints it.
     assert!(values.iter().any(|v| v == "Free"), "{values:?}");
     let labels = node_labels(&h.root);
     assert!(
@@ -688,10 +520,6 @@ fn a_disconnected_latency_row_says_not_connected() {
     assert_eq!(values[at + 1], "not connected", "{values:?}");
 }
 
-// ---------------------------------------------------------------------------
-// 2 — the `connection` group tracks `ServerInfo`
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_connection_group_prints_the_live_servers_facts() {
     let _g = serial();
@@ -707,9 +535,6 @@ fn the_connection_group_prints_the_live_servers_facts() {
         values.iter().any(|v| v == "0.44.3"),
         "the zellij row prints the version without the product name: {values:?}"
     );
-    // Exactly one version row: the mock backend reports exactly one entry in
-    // `ServerInfo::backend_versions`, and the connection group renders one row
-    // per reported backend rather than a fixed pair.
     assert_eq!(
         values
             .iter()
@@ -725,8 +550,6 @@ fn the_tls_row_warns_only_for_the_posture_that_skips_validation() {
     let _g = serial();
     let _ambient = setup();
 
-    // Sequential, not interleaved: each harness re-provides the app-scoped
-    // connection controller, so only the most recently mounted one is live.
     let insecure = Harness::connected_with(TrustMode::NoVerification);
     let values = node_values(&insecure.root);
     assert!(
@@ -749,8 +572,6 @@ fn the_tls_row_warns_only_for_the_posture_that_skips_validation() {
 
 #[test]
 fn a_disconnected_settings_screen_still_renders_every_row() {
-    // `/settings` is deliberately unguarded, so this is reachable — and a
-    // blank connection group would be the worse failure.
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount();
@@ -774,9 +595,6 @@ fn the_connection_rows_are_informational_like_version_rows() {
     let mut h = Harness::connected();
     app_toasts().clear();
 
-    // Tapping server url and tls certificate rows does nothing — they are
-    // inert like version rows, not chevron rows with destinations. The gesture
-    // detector is not attached, so no tap handler fires.
     h.tap_value("server url");
     h.frame();
     let pending = app_toasts().pending_untracked();
@@ -797,10 +615,6 @@ fn the_connection_rows_are_informational_like_version_rows() {
     assert_eq!(h.depth(), 1, "…and it pushed nothing");
 }
 
-// ---------------------------------------------------------------------------
-// 3 — auth tokens
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_token_group_is_the_redesigns_two_tokens_verbatim() {
     let _g = serial();
@@ -814,13 +628,10 @@ fn the_token_group_is_the_redesigns_two_tokens_verbatim() {
     for meta in ["created 2026-07-02", "created 2026-07-10"] {
         assert!(values.iter().any(|v| v == meta), "{meta:?}: {values:?}");
     }
-    // Both scope chips, which is what the redesign's own note is about
-    // ("token scope is now a visible chip on every token, not just some").
     assert!(
         values.iter().any(|v| v == "read-write") && values.iter().any(|v| v == "read-only"),
         "both scope chips render: {values:?}"
     );
-    // One `revoke` action per token.
     assert_eq!(
         node_centers_by_label(&h.root, "revoke").len(),
         SEEDED_TOKENS.len()
@@ -832,12 +643,8 @@ fn revoking_a_token_confirms_first_then_removes_it() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
-    // A confirmed revoke plays a timeline before the row goes (see the
-    // animation section below), so this pins its *end*: with the clock pinned,
-    // one advance past `TIMELINE_MS` is the whole animation.
     let clock = AnimationClock::pinned();
 
-    // A dismissed confirmation revokes nothing.
     open_dialog_by_label(&mut h, "revoke");
     assert_eq!(h.depth(), 2, "the confirmation is its own page");
     h.tap(SCRIM_POINT);
@@ -851,12 +658,9 @@ fn revoking_a_token_confirms_first_then_removes_it() {
         "…and nothing was revoked"
     );
 
-    // Confirming does.
     let dialog = open_dialog_by_label(&mut h, "revoke");
     confirm(&mut h, &dialog);
     clock.advance(TIMELINE_MS + 1.0);
-    // The `created` line rather than the name: the name is noise from the first
-    // frame of the scramble, so it is gone long before the row is.
     h.pump_until_values("the revoked row to disappear", |values| {
         !values.iter().any(|v| v == "created 2026-07-02")
     });
@@ -872,24 +676,16 @@ fn revoking_a_token_confirms_first_then_removes_it() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 3a — the revoke animation (scramble, then collapse)
-// ---------------------------------------------------------------------------
-
-/// The revoke timeline runs off a wall clock; pinning it (through
-/// `presentation::scramble`'s test seam) makes "three scramble frames in" an
-/// exact position instead of an "eventually". Restores the wall clock on drop,
-/// so a later test is never left holding a frozen one.
+/// The revoke timeline runs off a wall clock; pinning it through a test seam makes "three scramble
+/// frames in" exact. Restores the wall clock on drop.
 struct AnimationClock;
 
 impl AnimationClock {
-    /// Pin the clock at the timeline's own zero.
     fn pinned() -> Self {
         set_animation_clock_for_tests(Some(0.0));
         AnimationClock
     }
 
-    /// Move it `ms` forward.
     fn advance(&self, ms: f64) {
         advance_animation_clock_for_tests(ms);
     }
@@ -901,10 +697,6 @@ impl Drop for AnimationClock {
     }
 }
 
-/// The rendered value that is `name` mid-scramble, if one is on screen. The
-/// noise substitutes characters one for one and never a space, so a scrambled
-/// name is exactly as long as `name`, whitespace-free, and not `name` itself —
-/// which no other value this screen prints at that length is.
 fn scrambled_variant(values: &[String], name: &str) -> Option<String> {
     values
         .iter()
@@ -916,9 +708,6 @@ fn scrambled_variant(values: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
-/// An [`AuthTokensRepository`] that lists and mints like the mock but refuses
-/// every revoke — the only way a headless suite reaches the RPC's failure path,
-/// since the mock store happily revokes anything it actually holds.
 struct RefusingRevoke {
     inner: MockAuthTokensRepository,
 }
@@ -946,9 +735,6 @@ impl AuthTokensRepository for RefusingRevoke {
     }
 }
 
-/// Mount connected with `reduce_motion` forced on: the theme every piece of
-/// this screen reads through `use_context::<Theme>()`, published before the
-/// app's own `init` exactly as [`mount_with_metrics`] publishes window metrics.
 fn mount_with_reduced_motion() -> Harness {
     let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = true;
@@ -959,9 +745,6 @@ fn mount_with_reduced_motion() -> Harness {
     harness
 }
 
-/// Pump until `done`, or fail at [`PUMP_DEADLINE`] rather than hang — the
-/// value-blind sibling of [`Harness::pump_until_values`], for the cases below
-/// that wait on the toast queue instead of the screen.
 fn pump_until(h: &mut Harness, what: &str, done: impl Fn() -> bool) {
     let deadline = Instant::now() + PUMP_DEADLINE;
     while !done() {
@@ -970,9 +753,6 @@ fn pump_until(h: &mut Harness, what: &str, done: impl Fn() -> bool) {
     }
 }
 
-/// Whether the confirmation toast for `name`'s revoke has been raised — which
-/// the screen only does on the far side of the RPC *and* the token-list refresh
-/// it ends with, so it doubles as "the token has left `tokens`".
 fn revoke_landed(name: &str) -> bool {
     app_toasts()
         .pending_untracked()
@@ -1027,8 +807,7 @@ fn the_scrambling_row_outlives_the_refresh_that_removes_its_token() {
     let dialog = open_dialog_by_label(&mut h, "revoke");
     confirm(&mut h, &dialog);
 
-    // Hold the timeline early while the RPC — and the refresh it ends with —
-    // actually land, which is the moment `tokens` stops holding this token.
+    // Hold the timeline early while the RPC and its refresh land.
     clock.advance(200.0);
     pump_until(&mut h, "the revoke to land", || {
         revoke_landed(SEEDED_TOKENS[0])
@@ -1051,7 +830,6 @@ fn the_scrambling_row_outlives_the_refresh_that_removes_its_token() {
         "…and the row under it never jumped up into the gap"
     );
 
-    // Past the end of the timeline, the row is gone for good.
     clock.advance(TIMELINE_MS);
     h.pump_once();
     let values = node_values(&h.root);
@@ -1079,9 +857,6 @@ fn a_refused_revoke_restores_the_row_and_raises_the_failure_toast() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::mount_seeded(|| {
-        // Overrides the repository `settings::di::provide` published moments
-        // ago, in the same owner — the screen resolves it later still, in its
-        // own `Component::init`.
         let refusing: SharedAuthTokensRepository = Arc::new(RefusingRevoke::seeded());
         provide_context(refusing);
     });
@@ -1106,9 +881,6 @@ fn a_refused_revoke_restores_the_row_and_raises_the_failure_toast() {
         "…the screen's own failure bridge speaks instead: {toasted:?}"
     );
 
-    // The row keeps collapsing (the refusal landed inside the first frames),
-    // and once the timeline is over it is back — intact, and revocable again —
-    // rather than stranded at zero height.
     clock.advance(TIMELINE_MS + 1.0);
     h.pump_once();
     h.pump_once();
@@ -1139,9 +911,6 @@ fn reduced_motion_revokes_instantly_with_no_scramble_frames() {
     let dialog = open_dialog_by_label(&mut h, "revoke");
     confirm(&mut h, &dialog);
 
-    // Every frame from the confirmation to the landed RPC: no noise, ever, and
-    // the row gone from the first of them — the behaviour that shipped before
-    // this animation existed.
     let deadline = Instant::now() + PUMP_DEADLINE;
     while !revoke_landed(SEEDED_TOKENS[0]) {
         let values = node_values(&h.root);
@@ -1157,7 +926,6 @@ fn reduced_motion_revokes_instantly_with_no_scramble_frames() {
         h.pump_once();
     }
 
-    // Nothing is left waiting on a clock that never moves.
     h.pump_once();
     h.pump_once();
     let values = node_values(&h.root);
@@ -1172,12 +940,6 @@ fn reduced_motion_revokes_instantly_with_no_scramble_frames() {
     );
 }
 
-/// Open the dashed create row's dialog, type `name` into its field, flip the
-/// read-only toggle when `read_only`, and submit. The two submit paths differ
-/// on purpose: with no toggle tap the field still holds focus, so Enter
-/// submits it; tapping the switch first blurs it, so Save submits instead. An
-/// explicit [`Harness::frame`] after typing lets `can_submit` see the typed
-/// name before either path fires (it's captured at the body's last rebuild).
 fn mint_token(h: &mut Harness, name: &str, read_only: bool) {
     let dialog = open_dialog_by_value(h, "create new token");
     assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
@@ -1193,9 +955,6 @@ fn mint_token(h: &mut Harness, name: &str, read_only: bool) {
     h.flush();
 }
 
-/// A landed mint's dialog pop and its secret-reveal sheet push land in the
-/// same async continuation, so [`Harness::pump_until_values`] often returns
-/// mid-transition; one extra [`Harness::settle`] finishes it.
 fn await_secret_reveal(h: &mut Harness, minted_name: &str) {
     h.pump_until_values("the minted token", |values| {
         values.iter().any(|v| v == minted_name)
@@ -1208,7 +967,6 @@ fn await_secret_reveal(h: &mut Harness, minted_name: &str) {
     );
 }
 
-/// Dismiss the currently open secret-reveal sheet via its `Done` action.
 fn dismiss_secret_reveal(h: &mut Harness) {
     h.tap_label("Done");
     h.flush();
@@ -1225,8 +983,6 @@ fn the_dashed_row_mints_a_token_then_reveals_and_reloads() {
     mint_token(&mut h, "laptop", false);
     await_secret_reveal(&mut h, "laptop");
 
-    // The reveal prints the mock's own deterministic one-time secret — never
-    // shown anywhere before this sheet, and never again after it closes.
     let secret = format!("{MOCK_MINTED_SECRET_PREFIX}laptop");
     let values = node_values(&h.root);
     assert!(
@@ -1241,11 +997,9 @@ fn the_dashed_row_mints_a_token_then_reveals_and_reloads() {
         !values.iter().any(|v| v.contains(MOCK_MINTED_SECRET_PREFIX)),
         "the secret is gone for good once dismissed: {values:?}"
     );
-    // Appended, not replacing: both seeded tokens are still there…
     for name in SEEDED_TOKENS {
         assert!(values.iter().any(|v| v == name), "{name:?}: {values:?}");
     }
-    // …and the new one carries the mock's own mint date and full scope.
     assert!(
         values.iter().any(|v| v == "created 2026-07-31"),
         "the minted token is dated today (mock): {values:?}"
@@ -1275,7 +1029,6 @@ fn the_read_only_toggle_mints_a_read_only_token_that_reloads_into_the_list() {
 
     let values = node_values(&h.root);
     assert!(values.iter().any(|v| v == "phone"), "{values:?}");
-    // The seeded read-only token plus the freshly minted one.
     assert_eq!(
         values.iter().filter(|v| *v == "read-only").count(),
         2,
@@ -1283,12 +1036,6 @@ fn the_read_only_toggle_mints_a_read_only_token_that_reloads_into_the_list() {
     );
 }
 
-/// The create dialog's toggle is the real `frust::switch` — a `Role::Switch`
-/// node carrying the read-only label, whose state tracks a tap landing on the
-/// switch itself. `mint_token`'s own pins exercise the same tap through a
-/// full mint round trip; this one pins the semantics node directly, the same
-/// shape `tests/connect.rs`'s `remember_on`/`toggling_remember_off_…` pair
-/// pins for Connect's remember toggle.
 #[test]
 fn the_read_only_toggle_is_a_real_switch_role_whose_own_tap_flips_it() {
     let _g = serial();
@@ -1308,9 +1055,6 @@ fn the_read_only_toggle_is_a_real_switch_role_whose_own_tap_flips_it() {
     );
     assert_eq!(state, Toggled::False, "unchecked by default");
 
-    // No outer row-wide `GestureDetector` wraps the switch, so a tap must land
-    // inside its own semantics bounds. `RwSignal::set` is synchronous, so one
-    // `Harness::frame` is enough to see it reflected.
     h.tap_label("read-only");
     h.frame();
     let (_, state) = h
@@ -1321,18 +1065,12 @@ fn the_read_only_toggle_is_a_real_switch_role_whose_own_tap_flips_it() {
 
 #[test]
 fn a_rejected_mint_never_claims_to_have_created_anything() {
-    // The mock rejects a duplicate name, which is the one reachable failure on
-    // this screen — and the confirmation toast must not contradict the failure
-    // toast raised for the same call.
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
     app_toasts().clear();
 
     mint_token(&mut h, SEEDED_TOKENS[1], false);
-    // The mock's own 20ms latency outlasts a handful of pumps, so wait for the
-    // call to land rather than counting frames — what lands is the *failure*
-    // toast the screen's `use_failure_listener` bridge raises.
     let deadline = Instant::now() + PUMP_DEADLINE;
     while app_toasts().pending_untracked().is_empty() {
         assert!(
@@ -1347,9 +1085,7 @@ fn a_rejected_mint_never_claims_to_have_created_anything() {
         !pending.iter().any(|m| m.starts_with("Created")),
         "a rejected mint raises no confirmation: {pending:?}"
     );
-    // A rejection never parks a secret or opens the reveal.
     assert_eq!(h.depth(), 1, "a rejected mint opens no secret reveal");
-    // And the list is untouched: still exactly the two seeded tokens.
     let values = node_values(&h.root);
     assert_eq!(
         values.iter().filter(|v| *v == "created 2026-07-31").count(),
@@ -1360,10 +1096,7 @@ fn a_rejected_mint_never_claims_to_have_created_anything() {
 
 #[test]
 fn a_read_only_connected_session_disables_minting_and_revoking() {
-    // `ConnectionController::is_read_only` gates both mutating token
-    // controls; the mock connect flow always logs in read-write
-    // (`connection.rs`'s own `MockConnectionBackend`), so this test flips the
-    // signal directly rather than through a login round trip.
+    // The mock connect flow always logs in read-write, so this flips the read-only signal directly.
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
@@ -1394,23 +1127,11 @@ fn a_read_only_connected_session_disables_minting_and_revoking() {
         "…and says why: {toasted:?}"
     );
 
-    // Neither guarded control actually touched the store.
     let values = node_values(&h.root);
     for name in SEEDED_TOKENS {
         assert!(values.iter().any(|v| v == name), "{name:?}: {values:?}");
     }
 }
-
-// -- Keyboard-aware dialogs ---------------------------------------------------
-//
-// App-level pin for `frust-widgets`' keyboard-avoidance behavior (the panel
-// centers in the keyboard-free band, not the full window), exercised against
-// the New Token dialog — the tallest content any dialog here pushes. No app
-// production code changed for this; it's the framework's path dep proven at
-// this app's own scale.
-//
-// The other half — a `Down` on dead panel space blurs the field without
-// dismissing the dialog — is pinned below.
 
 #[test]
 fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
@@ -1426,9 +1147,6 @@ fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
     let ime_bottom = 216.0;
     let free_bottom = se.height - ime_bottom;
 
-    // Sanity first: at this size, with no keyboard published, the panel
-    // really does reach past where the keyboard-free band would end — so the
-    // pin below is exercising real avoidance, not a size that always fits.
     frame_sized(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, se);
     let baseline_save = bounds_by_label(&h.root, "Save");
     assert!(
@@ -1437,8 +1155,7 @@ fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
          at this size: {baseline_save:?} vs free_bottom={free_bottom}"
     );
 
-    // Publish the keyboard inset (the shell's IME listener → `set_insets`),
-    // then re-layout at the same short frame.
+    // Publish the keyboard inset, as the shell's IME listener does.
     h.root.set_insets(ime_bottom_inset(ime_bottom));
     frame_sized(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, se);
 
@@ -1452,10 +1169,6 @@ fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
     }
 }
 
-/// The fix's other half (see the [module comment](self) above): a `Down` on
-/// the dialog's dead panel space blurs the focused field's IME session
-/// without dismissing the dialog, and a second tap re-engages it.
-/// `panel.origin + (2, 2)` sits inside `DIALOG_PADDING`, above every child.
 #[test]
 fn a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog() {
     let _g = serial();
@@ -1488,12 +1201,6 @@ fn a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 3b — saved servers and their credentials
-// ---------------------------------------------------------------------------
-
-/// A saved row for [`CRED_ENDPOINT`], stamped now so it sorts to the top of the
-/// group (the list is most-recently-used first).
 fn credential_row(has_credential: bool) -> SavedServer {
     SavedServer {
         host: "cred.example".to_string(),
@@ -1508,8 +1215,6 @@ fn credential_row(has_credential: bool) -> SavedServer {
     }
 }
 
-/// Mount connected, with [`credential_row`] in the saved-server store and its
-/// secret in the credential store.
 fn with_saved_credential(has_credential: bool) -> Harness {
     let mut harness = Harness::mount_seeded(|| {
         expect_saved_servers()
@@ -1523,9 +1228,6 @@ fn with_saved_credential(has_credential: bool) -> Harness {
     });
     expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
     harness.await_tokens();
-    // The saved-server read is the *last* step of the screen's first load (the
-    // token list and both preference groups land ahead of it), so awaiting the
-    // tokens is not enough to see it.
     harness.pump_until_values("the saved-server rows", |values| {
         values.iter().any(|v| v == CRED_LABEL)
     });
@@ -1551,8 +1253,6 @@ fn the_saved_server_group_lists_each_rig_and_flags_the_one_with_a_credential() {
         values.iter().any(|v| v == "credential saved"),
         "the stored credential is visible as such: {values:?}"
     );
-    // One `forget` per saved rig (the seeded three plus this one), and a
-    // `delete credential` only where there is one to delete.
     assert_eq!(node_centers_by_label(&h.root, "forget").len(), 4);
     assert_eq!(
         node_centers_by_label(&h.root, "delete credential").len(),
@@ -1568,7 +1268,6 @@ fn deleting_a_credential_confirms_first_then_clears_the_row_and_revokes_its_toke
     let mut h = with_saved_credential(true);
     let credentials = mock_credentials().expect("the mock service is published");
 
-    // A dismissed confirmation deletes nothing.
     open_dialog_by_label(&mut h, "delete credential");
     assert_eq!(h.depth(), 2, "the confirmation is its own page");
     h.tap(SCRIM_POINT);
@@ -1580,7 +1279,6 @@ fn deleting_a_credential_confirms_first_then_clears_the_row_and_revokes_its_toke
         "the secret survives a dismissed confirmation"
     );
 
-    // Confirming does.
     let dialog = open_dialog_by_label(&mut h, "delete credential");
     confirm(&mut h, &dialog);
     h.pump_until_values("the credential chip to disappear", |values| {
@@ -1592,9 +1290,6 @@ fn deleting_a_credential_confirms_first_then_clears_the_row_and_revokes_its_toke
         None,
         "the secret is gone from the store"
     );
-    // Locked, the delete keeps the row, so it unlocks the keyring rather
-    // than claim a vault copy it could not reach: its only prompt is the
-    // keyring's own.
     let prompts = credentials.prompts();
     assert!(
         !prompts.is_empty() && prompts.iter().all(|reason| reason.starts_with("Unlock ")),
@@ -1636,14 +1331,6 @@ fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 3b — the keyring: switching servers, eviction, the add-server row
-// ---------------------------------------------------------------------------
-
-/// Mount connected (to the mock host, which is no saved row) with
-/// [`credential_row`]'s token in the **vault**, the keyring published over it
-/// when `unlocked`, and Pro unlocked when `pro` — the seeded rows past the
-/// first make a free install's switch a blocked one.
 fn with_vault_credential(unlocked: bool, pro: bool) -> Harness {
     let mut harness = Harness::mount_seeded(|| {
         expect_saved_servers()
@@ -1679,7 +1366,6 @@ fn with_vault_credential(unlocked: bool, pro: bool) -> Harness {
     harness
 }
 
-/// The connected endpoint, as the connection reports it.
 fn connected_endpoint() -> Option<String> {
     expect_connection_controller()
         .server_info
@@ -1723,8 +1409,6 @@ fn tapping_a_saved_row_with_the_keyring_unlocked_switches_to_it_without_a_prompt
     );
 }
 
-/// Re-save [`credential_row`] as a trust-anyway row: choosing "Trust anyway"
-/// when it was added is the consent, so no switch path asks again.
 fn make_credential_row_unverified() {
     let mut row = credential_row(true);
     row.trust_mode = TrustMode::NoVerification;
@@ -1778,7 +1462,6 @@ fn a_saved_unverified_row_switches_locked_with_exactly_one_prompt_and_no_confirm
     );
 }
 
-/// The mock host's saved row, without a stored credential.
 fn mock_row_without_credential() -> SavedServer {
     SavedServer {
         host: "mock.example".to_string(),
@@ -2086,10 +1769,6 @@ fn the_add_server_row_closes_the_group_and_pushes_the_add_page() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 3c — the `muxr pro` group
-// ---------------------------------------------------------------------------
-
 #[test]
 fn the_pro_group_prints_free_and_its_plan_row_opens_the_paywall() {
     let _g = serial();
@@ -2172,9 +1851,6 @@ fn restoring_from_the_paywall_flips_the_plan_row_and_closes_the_sheet() {
     h.pump_until_values("the plan row to flip to Pro", |values| {
         values.iter().any(|v| v == "Pro")
     });
-    // The value flip lands on the restore's own reactive write; the sheet's
-    // `close_then` still has to play out its staged close before the pop
-    // actually lands — the same clock-driven finish `flush` gives Not now.
     h.flush();
 
     assert_eq!(mock.restore_calls(), 1);
@@ -2187,10 +1863,6 @@ fn restoring_from_the_paywall_flips_the_plan_row_and_closes_the_sheet() {
 
 #[test]
 fn mounting_settings_refreshes_the_pro_entitlement_beside_the_apps_own_launch_refresh() {
-    // `MuxrApp::init` already fires one launch refresh of its own
-    // (`tests/pro.rs`'s `app_init_publishes_the_pro_seam_and_fires_one_launch_refresh`);
-    // this pins the *second* call — Settings' own refresh of the entitlement
-    // on every mount — landing beside it, not in place of it.
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
@@ -2209,18 +1881,6 @@ fn mounting_settings_refreshes_the_pro_entitlement_beside_the_apps_own_launch_re
     );
 }
 
-// ---------------------------------------------------------------------------
-// 4 — the picker sheets (screen 6)
-// ---------------------------------------------------------------------------
-
-/// Every picker the screen offers: the row that opens it, how many options it
-/// lists, which index is selected out of the box, and what picking the last
-/// option should leave in the row's value.
-///
-/// The `font family` row is **not** here: its options are not a
-/// domain-declared list but the faces this device has installed plus a
-/// downloadable catalog, so it has a sheet of its own — covered by section 4b
-/// below.
 const PICKERS: [(&str, usize, usize, &str); 3] = [
     ("font size", 15, 2, "24px"),
     ("cursor style", 3, 0, "bar"),
@@ -2247,9 +1907,6 @@ fn every_picker_opens_with_its_own_options_and_the_stored_one_checked() {
             "{row}: exactly one row carries the check vector"
         );
 
-        // The selected row fills amber **past** the sheet's own gutter, which
-        // is screen 6's whole "full-bleed" look — and it is the row the stored
-        // value sits at.
         let (origin, size) = sheet.selected_pick_row();
         let (panel_origin, panel_size) = sheet.panel();
         assert!(
@@ -2260,8 +1917,6 @@ fn every_picker_opens_with_its_own_options_and_the_stored_one_checked() {
             (size.width - panel_size.width).abs() < EPSILON,
             "{row}: …and spans its whole width"
         );
-        // The scroll viewport clips what it holds, so the fill must lie inside
-        // it — the bleed past the sheet's own gutter included.
         let viewport = h.viewport_around(origin.x + size.width / 2.0, origin.y + size.height / 2.0);
         assert!(
             viewport.x0 <= origin.x + EPSILON
@@ -2270,15 +1925,12 @@ fn every_picker_opens_with_its_own_options_and_the_stored_one_checked() {
                 && origin.y + size.height <= viewport.y1 + EPSILON,
             "{row}: the fill {origin:?} {size:?} escapes the scroll viewport {viewport:?}"
         );
-        // Row 0's top edge is the same distance above the selected row for
-        // every picker, so a wrong `selected` shows up as a shifted fill.
         let first_row_top = origin.y - selected as f64 * size.height;
         assert!(
             first_row_top > panel_origin.y,
             "{row}: the first row sits inside the panel: {first_row_top} vs {panel_origin:?}"
         );
 
-        // A scrim tap closes it and changes nothing.
         h.tap(SCRIM_POINT);
         h.flush();
         assert_eq!(h.depth(), 1, "{row}: dismissed");
@@ -2303,11 +1955,7 @@ fn picking_an_option_persists_it_and_updates_the_row() {
 
 #[test]
 fn a_second_tap_on_a_picker_row_closes_the_sheet_once_and_keeps_the_route() {
-    // The picker's close is immediate, but a pop only *lands* at the next
-    // rebuild — so for one whole frame the row that just closed the sheet is
-    // still there to be tapped again. That second tap used to pop the
-    // `/settings` route out from under the picker; `ui::sheet`'s dismissal gate
-    // is what makes it a no-op (see that module's "One sheet, one dismissal").
+    // The picker's close is immediate, but a pop only lands at the next rebuild.
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
@@ -2319,21 +1967,18 @@ fn a_second_tap_on_a_picker_row_closes_the_sheet_once_and_keeps_the_route() {
     let sheet = Chrome::diff(&before, &after);
     assert_eq!(h.depth(), floor + 1, "the picker is up over the route");
 
-    // Twice, with no frame in between — the whole point.
+    // Twice, with no frame in between.
     let row = pick_row(&sheet, 0, 2);
     h.tap(row);
     h.tap(row);
     h.flush();
 
     assert_eq!(h.depth(), floor, "one pop, and the route is still under it");
-    // …and the pick itself still lands exactly once, unchanged.
     h.pump_until_values("bar", |values| values.iter().any(|v| v == "bar"));
 }
 
 #[test]
 fn a_picked_value_is_still_checked_when_the_sheet_is_reopened() {
-    // The round trip that proves the choice reached the repository rather than
-    // just the row: the reopened sheet's check has moved to the new row.
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
@@ -2355,23 +2000,17 @@ fn a_picked_value_is_still_checked_when_the_sheet_is_reopened() {
 
 #[test]
 fn picking_font_size_20px_through_the_picker_persists_and_reads_back() {
-    // The range now spans 10–24, so 20px sits in the middle. Verify the picker
-    // can select and persist values beyond the old max of 14px.
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
 
     let sheet = open_picker(&mut h, "font size");
-    // 20px is at index 10 in [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, ...]
-    // The default (currently selected) is at index 2 (12px); pick from there to index 10.
     pick(&mut h, &sheet, 2, 10);
 
     h.pump_until_values("20px", |values| values.iter().any(|v| v == "20px"));
     assert_eq!(h.depth(), 1, "the sheet closed behind the choice");
 }
 
-/// Mount at `width`×`height`, open the font-size picker, wheel its list until
-/// the last size is reachable, pick it, and read it back from the row.
 fn picks_the_largest_font_size_at(width: f64, height: f64) {
     let _g = serial();
     let _ambient = setup();
@@ -2423,43 +2062,19 @@ fn the_font_size_picker_scrolls_to_24px_on_the_smallest_tablet() {
     picks_the_largest_font_size_at(1024.0, 720.0);
 }
 
-// ---------------------------------------------------------------------------
-// 4b — the font picker sheet (its own sheet, not one of the four above)
-// ---------------------------------------------------------------------------
-//
-// Two sections — installed faces, and the downloadable catalog — over one
-// scrolling body, read the same way as any other sheet (see the module docs).
-//
-// No test here touches the network: `support::setup` installs the offline
-// font source, and the two catalog cases install their own in-memory fixture.
-
-/// The bytes every fixture "download" serves — a real, parseable TTF, so the
-/// install path's own registration probe has something to resolve. It resolves
-/// to `JetBrains Mono` (`crate::fonts`' own unit test pins that), which is
-/// exactly what makes it a fixture for the *reported name wins* rule: the
-/// manifest below claims something else entirely.
+/// The bytes every fixture download serves: a real, parseable TTF.
 const FIXTURE_FONT: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Light.ttf");
 
-/// The catalog entry the download case installs.
 const FIXTURE_A_FAMILY: &str = "FixtureA Nerd Font Mono";
 const FIXTURE_A_DISPLAY: &str = "Fixture A Nerd Font Mono";
-/// …and the one it leaves alone (whose two names agree, like 7 of the real
-/// catalog's 34 entries).
 const FIXTURE_B_FAMILY: &str = "Fixture B Nerd Font Mono";
 
-/// The pre-seeded cache's family and catalog label — installed by writing the
-/// cache directly, the way a previous launch's download would have left it.
 const CACHED_FAMILY: &str = "Cached Nerd Font Mono";
 const CACHED_DISPLAY: &str = "Cached Display Nerd Font";
 
-/// A catalog served straight out of memory: two entries, both pointing at
-/// [`FIXTURE_FONT`], with `family` and `displayName` deliberately different on
-/// the first one.
 struct FixtureFontSource {
     manifest: Vec<u8>,
     fetched: Arc<Mutex<Vec<String>>>,
-    /// Serve a font whose bytes no longer hash to what the manifest vouched
-    /// for — a truncated download, or a tampered mirror.
     corrupt: bool,
 }
 
@@ -2480,21 +2095,17 @@ impl FontSource for FixtureFontSource {
             .push(url.to_string());
         let mut bytes = FIXTURE_FONT.to_vec();
         if self.corrupt {
-            // Still a font by its magic bytes — only the hash can catch this.
+            // Still a font by its magic bytes; only the hash can catch this.
             bytes[400] ^= 0xff;
         }
         Ok(bytes)
     }
 }
 
-/// Install the fixture catalog as this process's font source; answer the log
-/// every fetch is recorded in.
 fn use_fixture_catalog() -> Arc<Mutex<Vec<String>>> {
     use_fixture_catalog_serving(false)
 }
 
-/// [`use_fixture_catalog`], with `corrupt` deciding whether the font bytes it
-/// serves still match the hash its own manifest advertises.
 fn use_fixture_catalog_serving(corrupt: bool) -> Arc<Mutex<Vec<String>>> {
     let digest = sha256_hex(FIXTURE_FONT);
     let manifest = format!(
@@ -2521,8 +2132,6 @@ fn use_fixture_catalog_serving(corrupt: bool) -> Arc<Mutex<Vec<String>>> {
     fetched
 }
 
-/// SHA-256 as lowercase hex — the manifest's own spelling (the store's copy of
-/// this is private to it).
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(bytes)
@@ -2531,9 +2140,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Point the font cache at a fresh temp directory of its own and forget every
-/// family this process has installed — so each case below starts from "only
-/// the bundled faces".
 fn fresh_font_cache(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "muxr-settings-fonts-{tag}-{}-{:?}",
@@ -2547,8 +2153,6 @@ fn fresh_font_cache(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-/// Seed `dir` with a downloaded family the way a previous launch would have
-/// left it, then run the startup scan that re-registers it.
 fn seed_cached_family(dir: &std::path::Path) {
     let family_dir = dir.join("Cached_Nerd_Font_Mono");
     std::fs::create_dir_all(&family_dir).expect("a family dir");
@@ -2570,7 +2174,6 @@ fn seed_cached_family(dir: &std::path::Path) {
     );
 }
 
-/// Open the font-family sheet and answer what it painted.
 fn open_font_picker(h: &mut Harness) -> Chrome {
     let before = h.frame();
     h.tap_value("font family");
@@ -2580,15 +2183,12 @@ fn open_font_picker(h: &mut Harness) -> Chrome {
     sheet
 }
 
-/// Dismiss the open sheet through its scrim.
 fn close_sheet(h: &mut Harness) {
     h.tap(SCRIM_POINT);
     h.flush();
     assert_eq!(h.depth(), 1, "the sheet dismissed");
 }
 
-/// Pump until the catalog settles at `expected` — the async fetch the sheet
-/// starts when it opens.
 fn await_catalog(h: &mut Harness, expected: CatalogStatus) {
     let deadline = Instant::now() + PUMP_DEADLINE;
     while muxr::fonts::catalog::font_catalog().status() != expected {
@@ -2600,8 +2200,6 @@ fn await_catalog(h: &mut Harness, expected: CatalogStatus) {
     }
 }
 
-/// The preferences the screen actually persisted — read straight out of the
-/// repository `di` published, which is what "persisted" means here.
 fn stored_font_family() -> String {
     let repository = expect_preferences_repository();
     tokio::runtime::Builder::new_current_thread()
@@ -2620,10 +2218,6 @@ fn stored_font_family() -> String {
 
 #[test]
 fn the_font_sheet_lists_the_bundled_face_and_says_so_quietly_when_the_catalog_is_gone() {
-    // Offline (`support::setup`'s own default source) with nothing cached: the
-    // installed section still lists the bundled face, the catalog section says
-    // one quiet line, and **no toast is raised** — an unreachable catalog is
-    // not something the user did.
     let _g = serial();
     let _ambient = setup();
     let _cache = fresh_font_cache("offline");
@@ -2643,8 +2237,6 @@ fn the_font_sheet_lists_the_bundled_face_and_says_so_quietly_when_the_catalog_is
         font_sheet_runs(1, 0, true),
         "the bundled face, and one quiet line where the catalog would be"
     );
-    // The one full-bleed amber fill is the selected installed row — the same
-    // geometry screen 6's own picker paints (see `Chrome::selected_pick_row`).
     let (origin, size) = sheet.selected_pick_row();
     let (panel_origin, panel_size) = sheet.panel();
     assert!((origin.x - panel_origin.x).abs() < EPSILON, "{origin:?}");
@@ -2662,9 +2254,6 @@ fn the_font_sheet_lists_the_bundled_face_and_says_so_quietly_when_the_catalog_is
 
 #[test]
 fn a_cached_download_is_offered_beside_the_bundled_face_and_persists_its_family() {
-    // The whole point of the two names: the row (and the settings row behind
-    // it) prints the catalog's `displayName`, while what reaches the store is
-    // the `family` a font stack can actually resolve.
     let _g = serial();
     let _ambient = setup();
     let cache = fresh_font_cache("cached");
@@ -2678,8 +2267,6 @@ fn a_cached_download_is_offered_beside_the_bundled_face_and_persists_its_family(
     );
 
     let sheet = open_font_picker(&mut h);
-    // Two installed rows now (bundled + cached), the bundled one still
-    // selected: its fill is row 0, and every font row is the same height.
     pick(&mut h, &sheet, 0, 1);
 
     h.pump_until_values(CACHED_DISPLAY, |values| {
@@ -2700,14 +2287,6 @@ fn a_cached_download_is_offered_beside_the_bundled_face_and_persists_its_family(
 
 #[test]
 fn selecting_a_font_row_plays_the_staged_exit_rather_than_vanishing_the_sheet() {
-    // The anti-vanish pin. `SheetHandle::close` rides `GlyphSheetHandle`'s own
-    // staged exit (`crate::ui::sheet`'s "`close` plays the same staged exit"),
-    // not a bare `NavigatorController::pop` that would enqueue the page's pop
-    // immediately: one frame later — enough for the queued op to land (see
-    // `a_second_tap_on_a_picker_row_closes_the_sheet_once_and_keeps_the_route`'s
-    // own "a pop only *lands* at the next rebuild") — a bare pop would leave
-    // the sheet already gone, with no animation played at all, failing the
-    // `depth() == 2` assertion below.
     let _g = serial();
     let _ambient = setup();
     let cache = fresh_font_cache("anti-vanish");
@@ -2715,12 +2294,9 @@ fn selecting_a_font_row_plays_the_staged_exit_rather_than_vanishing_the_sheet() 
     let mut h = Harness::connected();
 
     let sheet = open_font_picker(&mut h);
-    // Two installed rows (bundled + cached); pick the second.
     let row = pick_row(&sheet, 0, 1);
     h.tap(row);
 
-    // One frame — the OLD immediate-pop code would already have applied its
-    // queued pop by here; the new staged close is still playing its exit.
     h.frame();
     assert_eq!(
         h.depth(),
@@ -2729,8 +2305,6 @@ fn selecting_a_font_row_plays_the_staged_exit_rather_than_vanishing_the_sheet() 
          exit, not gone"
     );
 
-    // Settling carries the exit to completion: the pop lands, exactly once,
-    // and the choice it carried still reaches the repository behind it.
     h.flush();
     assert_eq!(h.depth(), 1, "…and the pop lands once the exit finishes");
     h.pump_until_values(CACHED_DISPLAY, |values| {
@@ -2752,7 +2326,6 @@ fn the_catalog_lists_downloadable_fonts_and_a_download_installs_and_flips_the_ro
     let mut h = Harness::connected();
     app_toasts().clear();
 
-    // Opening the sheet is what fetches the catalog — never app startup.
     open_font_picker(&mut h);
     await_catalog(&mut h, CatalogStatus::Ready);
     assert!(
@@ -2764,8 +2337,6 @@ fn the_catalog_lists_downloadable_fonts_and_a_download_installs_and_flips_the_ro
     );
     close_sheet(&mut h);
 
-    // Re-opened against a catalog already in hand, the sheet renders both
-    // downloadable rows beside the installed one.
     let with_catalog = open_font_picker(&mut h).runs;
     assert_eq!(
         with_catalog,
@@ -2774,11 +2345,6 @@ fn the_catalog_lists_downloadable_fonts_and_a_download_installs_and_flips_the_ro
     );
     close_sheet(&mut h);
 
-    // Download the first entry. The rows carry no semantics of their own (a
-    // sheet is a navigator page — see the module docs) and the catalog
-    // section's offset is not derivable from painted evidence, so this drives
-    // the body of the very closure `widgets::font_picker::font_picker_sheet`'s `on_download`
-    // hands each available row.
     let catalog = muxr::fonts::catalog::font_catalog();
     let entry = catalog
         .entries()
@@ -2823,16 +2389,12 @@ fn the_catalog_lists_downloadable_fonts_and_a_download_installs_and_flips_the_ro
         app_toasts().pending_untracked()
     );
 
-    // …and the sheet, rebuilt, drops that row out of the catalog section: an
-    // installed entry is listed once, above, under the family it registered
-    // as.
     let after_install = open_font_picker(&mut h).runs;
     assert_eq!(
         after_install,
         font_sheet_runs(1, 1, false),
         "exactly one catalog row fewer than the sheet that offered it ({with_catalog})"
     );
-    // The remaining row is the entry nobody downloaded.
     assert_eq!(
         catalog
             .entries()
@@ -2846,10 +2408,6 @@ fn the_catalog_lists_downloadable_fonts_and_a_download_installs_and_flips_the_ro
 
 #[test]
 fn a_download_whose_bytes_do_not_verify_fails_the_row_and_caches_nothing() {
-    // The integrity contract end to end: a served font that no longer hashes
-    // to what the manifest vouched for installs nothing, leaves the row
-    // retryable, and surfaces one failure toast — whose text is the generic
-    // user message, never the hash detail.
     let _g = serial();
     let _ambient = setup();
     let cache = fresh_font_cache("corrupt");
@@ -2917,22 +2475,8 @@ fn a_download_whose_bytes_do_not_verify_fails_the_row_and_caches_nothing() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 4b — live download progress
-// ---------------------------------------------------------------------------
-
-/// How long [`StagedFontSource::fetch_font_with_progress`] sleeps between
-/// each of its four staged reports — long enough that a test's own poll loop
-/// (which re-checks every ~1ms, see `Harness::pump_once`) reliably observes
-/// an intermediate fraction before the download lands, short enough that
-/// four of them stay far under [`PUMP_DEADLINE`].
 const STAGED_STEP_DELAY: Duration = Duration::from_millis(15);
 
-/// A [`FontSource`] whose font fetch reports progress in four staged steps
-/// (25/50/75/100%), each separated by a real sleep on the background thread
-/// `download` actually runs on — so a test driving `Harness::pump_once` on
-/// the UI thread can observe the fraction mid-flight rather than only ever
-/// seeing it jump straight to done.
 struct StagedFontSource {
     manifest: Vec<u8>,
 }
@@ -2962,9 +2506,6 @@ impl FontSource for StagedFontSource {
     }
 }
 
-/// A one-entry manifest carrying `family`, whose file's size hint is
-/// [`FIXTURE_FONT`]'s real length when `sized`, or `0` (the indeterminate
-/// case) otherwise.
 fn staged_manifest(family: &str, sized: bool) -> String {
     let digest = sha256_hex(FIXTURE_FONT);
     let bytes = if sized { FIXTURE_FONT.len() } else { 0 };
@@ -3011,9 +2552,6 @@ fn downloading_a_font_drives_its_progress_fraction_from_zero_toward_one_with_thr
             .expect("the staged download verifies");
     });
 
-    // Sample the tracked fraction on every pump, deduplicating consecutive
-    // repeats, until the row lands — the throttled-write contract means
-    // most pumps see no *new* value, which is the point.
     let mut observed: Vec<f64> = Vec::new();
     let deadline = Instant::now() + PUMP_DEADLINE;
     while catalog.state_of(&entry) != FontState::Installed {
@@ -3125,11 +2663,6 @@ fn the_downloading_row_paints_a_progress_bar_and_flips_to_selectable_once_instal
             .expect("the staged download verifies");
     });
 
-    // The sheet's body closure re-runs on every navigator rebuild
-    // (`open_font_picker`'s own doc), so a rendered `ProgressIndicator` node
-    // is proof the row actually swapped its trailing affordance for
-    // `widgets::font_picker::font_row_progress`'s bar rather than the plain text every
-    // other state prints.
     let deadline = Instant::now() + PUMP_DEADLINE;
     loop {
         h.pump_once();
@@ -3161,9 +2694,6 @@ fn the_downloading_row_paints_a_progress_bar_and_flips_to_selectable_once_instal
     }
     close_sheet(&mut h);
 
-    // …and the reopened sheet lists it under installed, selectable like any
-    // other row — the same post-install contract the plain download test
-    // above already pins.
     let reopened = open_font_picker(&mut h);
     assert!(reopened.runs > 0);
     assert!(
@@ -3172,13 +2702,6 @@ fn the_downloading_row_paints_a_progress_bar_and_flips_to_selectable_once_instal
     );
 }
 
-/// What the font sheet paints, in glyph runs: its title and caption, one
-/// heading per section, two runs for an installed row (display name over meta
-/// line) and three for an available one (those two plus its download
-/// affordance), plus the catalog section's one-line note when it has one.
-///
-/// Spelled as a sum rather than a magic number so a failure says *which* part
-/// of the sheet drifted.
 fn font_sheet_runs(installed: usize, available: usize, note: bool) -> usize {
     const HEAD: usize = 2;
     const SECTION_HEADING: usize = 1;
@@ -3190,10 +2713,6 @@ fn font_sheet_runs(installed: usize, available: usize, note: bool) -> usize {
         + usize::from(note)
         + available * AVAILABLE_ROW
 }
-
-// ---------------------------------------------------------------------------
-// 5 — the bell switch
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_bell_row_toggles_its_preference() {
@@ -3214,7 +2733,6 @@ fn the_bell_row_toggles_its_preference() {
         h.pump_once();
     }
 
-    // …and back, so the row is a toggle rather than a one-way switch.
     h.tap_label("bell notifications");
     let deadline = Instant::now() + PUMP_DEADLINE;
     while h.bell_state() != Some(Toggled::True) {
@@ -3224,10 +2742,6 @@ fn the_bell_row_toggles_its_preference() {
     assert_eq!(h.depth(), 1, "the bell row pushes nothing");
 }
 
-/// The bell switch is the real themed switch widget, not hand-drawn art. The
-/// [`bell_state`] harness helper pins this by looking for a Switch role labelled
-/// "bell notifications"; this test pins that the switch's own tap flips the
-/// preference.
 #[test]
 fn the_bell_switch_is_a_real_switch_role_whose_own_tap_flips_it() {
     let _g = serial();
@@ -3240,9 +2754,6 @@ fn the_bell_switch_is_a_real_switch_role_whose_own_tap_flips_it() {
         "the mock seeds the bell on, and bell_state() finds a Switch role"
     );
 
-    // No outer row-wide `GestureDetector` wraps the switch (see
-    // `widgets::misc::bell_notifications_row`'s own doc), so the switch's own
-    // semantics bounds are what a tap must land inside to flip it.
     h.tap_label("bell notifications");
     let deadline = Instant::now() + PUMP_DEADLINE;
     while h.bell_state() != Some(Toggled::False) {
@@ -3251,10 +2762,6 @@ fn the_bell_switch_is_a_real_switch_role_whose_own_tap_flips_it() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 6 — Disconnect
-// ---------------------------------------------------------------------------
-
 #[test]
 fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
     let _g = serial();
@@ -3262,7 +2769,6 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
     let mut h = Harness::connected();
     assert!(expect_connection_controller().connected.get_untracked());
 
-    // A dismissed confirmation disconnects nothing.
     open_dialog_by_label(&mut h, LOCK_AND_DISCONNECT);
     assert_eq!(h.depth(), 2);
     h.tap(SCRIM_POINT);
@@ -3272,22 +2778,18 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
         "cancelling leaves the connection up"
     );
 
-    // Confirming clears the connection and resets the stack to `/`.
     let dialog = open_dialog_by_label(&mut h, LOCK_AND_DISCONNECT);
     confirm(&mut h, &dialog);
 
     let connection = expect_connection_controller();
     assert!(!connection.connected.get_untracked(), "deauthenticated");
     assert_eq!(connection.server_info.get_untracked(), None);
-    // The screen behind, still mounted by the fixture, agrees.
     h.frame();
     assert!(
         node_values(&h.root).iter().any(|v| v == "not connected"),
         "the connection group cleared: {:?}",
         node_values(&h.root)
     );
-    // …and the guard now bounces the routes that need a session, which is what
-    // "landed on Connect" means to the router.
     match app_nav().resolve("/sessions") {
         Resolution::Matched { location, .. } => assert_eq!(
             location.path, "/",
@@ -3297,22 +2799,13 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// 7 — responsive width-clamp pass
-// ---------------------------------------------------------------------------
-
 #[test]
 fn wide_metrics_clamp_and_center_the_groups_column() {
     let _g = serial();
     let _ambient = setup();
-    // A phone in landscape: wide enough to clamp, too short to be a Tablet.
     let mut h = mount_with_metrics(Some(support::metrics_at(SURFACE.width, 500.0)));
     h.frame();
 
-    // Disconnect is the screen's last, full-width row — the cheapest honest
-    // read on where the clamped column itself sits: centered,
-    // `SETTINGS_CLAMP_WIDTH` wide, minus the row's own `ROW_PAD_X` margin on
-    // each side.
     let disconnect = bounds_by_label(&h.root, LOCK_AND_DISCONNECT);
     let margin = (SURFACE.width - SETTINGS_CLAMP_WIDTH) / 2.0;
     assert!(
@@ -3332,9 +2825,6 @@ fn wide_metrics_clamp_and_center_the_groups_column() {
 fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
     let _g = serial();
     let _ambient = setup();
-    // Explicit narrow metrics, even though the harness still paints at the
-    // full-width `SURFACE` — proving the branch keys on the *published*
-    // width, not the paint surface.
     let mut h = mount_with_metrics(Some(support::metrics_at(400.0, SURFACE.height)));
     h.frame();
 
@@ -3348,11 +2838,6 @@ fn narrow_metrics_leave_the_groups_column_unclamped_like_no_metrics_at_all() {
     assert!((disconnect.x0 - ROW_PAD_X).abs() < 0.5, "{:?}", disconnect);
 }
 
-// ---------------------------------------------------------------------------
-// 7b — the Tablet card grid
-// ---------------------------------------------------------------------------
-
-/// The y-centre and x-centre of the first node printing `value`.
 fn value_center(h: &Harness, value: &str) -> Point {
     h.center_of(value)
 }
@@ -3377,8 +2862,6 @@ fn a_full_band_tablet_packs_the_cards_into_two_columns() {
     assert!(tokens.x > connection.x + 100.0, "side by side: {tokens:?}");
     let saved = value_center(&h, "SAVED SERVERS");
     assert!(saved.y > connection.y, "the left column stacks downward");
-    // Packed columns, not rows: the short Auth tokens card does not hold the
-    // row open, so Muxr Pro climbs above Saved servers (Ed's iPad gate).
     let pro = value_center(&h, "MUXR PRO");
     assert!(
         pro.y < saved.y - 100.0,
@@ -3407,10 +2890,6 @@ fn a_collapsed_band_tablet_stacks_the_cards() {
     );
     assert!(tokens.y > connection.y, "stacked: {tokens:?}");
 }
-
-// ---------------------------------------------------------------------------
-// 7c — the `muxr pro` restore row
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_restore_row_restores_once_and_toasts_when_nothing_is_found() {
@@ -3474,14 +2953,11 @@ fn a_failed_restore_from_the_row_toasts_the_failure_message_once() {
     );
 }
 
-/// A store whose restore stays open until its [`Gate`] is opened — the mock
-/// resolves without ever yielding, so an in-flight restore needs this.
 struct GatedStore {
     inner: MockEntitlementRepository,
     gate: Arc<Gate>,
 }
 
-/// One-shot latch: `UntilOpen` parks its waker here, `open` wakes it.
 #[derive(Default)]
 struct Gate {
     open: AtomicBool,
@@ -3585,7 +3061,6 @@ fn a_purchase_side_busy_never_switches_the_restore_row_to_restoring() {
     let mut h = Harness::connected();
     let restoring = |values: &[String]| values.iter().any(|v| v == "restoring\u{2026}");
 
-    // A purchase elsewhere holds the pro controller's busy flag.
     let pro = expect_pro_controller();
     pro.busy.set(true);
     h.pump_once();
@@ -3595,7 +3070,6 @@ fn a_purchase_side_busy_never_switches_the_restore_row_to_restoring() {
         "a purchase is not a restore"
     );
 
-    // Tapping restore meanwhile is refused with a toast, not a restoring row.
     app_toasts().clear();
     h.tap_label("restore");
     pump_until(&mut h, "the busy toast", || {
@@ -3605,7 +3079,6 @@ fn a_purchase_side_busy_never_switches_the_restore_row_to_restoring() {
     assert!(!restoring(&node_values(&h.root)), "a refused restore");
     pro.busy.set(false);
 
-    // A landed restore leaves the row as it found it.
     app_toasts().clear();
     h.tap_label("restore");
     pump_until(&mut h, "the restore to land", || {
@@ -3614,28 +3087,14 @@ fn a_purchase_side_busy_never_switches_the_restore_row_to_restoring() {
     assert!(!restoring(&node_values(&h.root)), "released once it lands");
 }
 
-// ---------------------------------------------------------------------------
-// 8 — saved-server card clip regression at the phone-narrow width
-// ---------------------------------------------------------------------------
-
-/// A frame width matching the device's own narrow branch — a Xiaomi's 1080
-/// physical px is ~395 logical px, comfortably under
-/// `crate::responsive::WIDE_BREAKPOINT_PX` (600). Tall enough that
-/// [`with_saved_credential`]'s freshly-stamped row stays on-screen.
 const NARROW_SURFACE: Size = Size::new(360.0, 3000.0);
 
 #[test]
 fn the_saved_server_cards_forget_button_never_clips_off_the_narrow_frame() {
     let _g = serial();
     let _ambient = setup();
-    // A credentialed row renders both `delete credential` and `forget` on the
-    // one action row — the widest case, and the one the old layout's
-    // inflexible meta-row tail actually clipped.
     let mut h = with_saved_credential(true);
 
-    // One more frame at `NARROW_SURFACE` — `Harness::frame` always paints at
-    // `SURFACE`'s 800px wide, which never exercised the phone-narrow width
-    // the bug only shows up under.
     frame_sized(
         &mut h.root,
         &mut h.logic,
@@ -3661,11 +3120,6 @@ fn the_saved_server_cards_forget_button_never_clips_off_the_narrow_frame() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The app-wide unlock single-flight: a lock wins, and no second prompt
-// ---------------------------------------------------------------------------
-
-/// A parked `unlock_all`: the credential service waits here until released.
 #[derive(Default)]
 struct HeldUnlockPrompt {
     entered: AtomicBool,
@@ -3698,7 +3152,6 @@ impl Future for HoldUnlock {
     }
 }
 
-/// [`MockCredentialService`] whose `unlock_all` parks on a [`HeldUnlockPrompt`].
 struct HeldUnlockVault {
     inner: Arc<MockCredentialService>,
     prompt: Arc<HeldUnlockPrompt>,
@@ -3744,8 +3197,6 @@ impl CredentialService for HeldUnlockVault {
     }
 }
 
-/// A headless Settings controller over a locked keyring and one saved row
-/// ([`CRED_ENDPOINT`]) whose vault entry sits behind a held `unlock_all`.
 fn held_switch_rig() -> (
     Arc<SettingsController>,
     KeyringHandle,
