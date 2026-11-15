@@ -1,28 +1,44 @@
 # Muxr
 
-Muxr is a mobile client for remote terminal-multiplexer sessions, zellij and
-herdr. It talks to `muxrd`, the companion daemon in
-[muxr-core](https://github.com/f0x-it-llc/muxr-core), over TLS and
-bearer-token gRPC. It runs on Android and iOS, on phones and tablets.
+Muxr puts your zellij and herdr terminal sessions on your iPhone, iPad or
+Android device, including the sessions your coding agents (Claude Code, Codex
+and others) run in, so you can watch and steer them from your phone. It needs
+`muxrd`, a daemon you run on your own machine, from
+[muxr-core](https://github.com/f0x-it-llc/muxr-core).
 
 ## Get the app
 
 <a href="https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967"><img src="docs/badges/app-store.svg" alt="Download on the App Store" height="44"></a>
 <a href="https://play.google.com/store/apps/details?id=com.it.f0x.muxr"><img src="docs/badges/google-play.png" alt="Get it on Google Play" height="44"></a>
 
-New here? Follow the [quick start](https://muxr.app/docs.html).
+[Website](https://muxr.app/) · [Quick start](https://muxr.app/docs.html) · [Usage guide](https://muxr.app/guide.html) · [FAQ](https://muxr.app/faq.html) · [How-to guides](https://muxr.app/how-to/) · [Comparisons](https://muxr.app/compare/)
 
-## Features
+## What it does
 
-- Connect to a `muxrd` server by scanning a QR pairing code, or from a list of saved servers.
-- Switch between servers without leaving the app.
-- Browse the sessions on a server and open, create or manage them.
-- A terminal with a key bar and a tree of spaces, tabs and panes.
-- An agents list across sessions.
-- Settings for tokens, fonts and appearance.
-- Muxr Pro unlocks more than one server.
+- Attaches to remote zellij and herdr sessions through `muxrd`, over TLS with token authentication.
+- Pairs with a server by scanning a QR code.
+- Saves servers and switches between them without leaving the app.
+- Browses the sessions on a server and opens, creates and manages them.
+- Shows a terminal with a key bar and a tree of spaces, tabs and panes, driven by touch gestures.
+- Uses a tablet layout with a pane rail beside the terminal.
+- Lists the coding agents running on herdr: blocked, done, working or idle.
+- Supports read-only tokens, for a device that should watch without typing.
+- Protects saved credentials with the device's biometrics. There is no account.
+- Has settings for tokens, fonts and appearance.
 
-## Requirements
+## Price
+
+The app is free for one server. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027. Pro unlocks more than one server. There is no subscription and no account.
+
+## Status
+
+Muxr works with zellij and herdr today. tmux support, push notifications, voice input and desktop apps are coming soon; see the [roadmap](https://muxr.app/roadmap.html).
+
+## Not the npm package
+
+Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.
+
+## Building from source: requirements
 
 - Rust (stable)
 - The [`frust`](https://frust.dev/) CLI
@@ -66,10 +82,10 @@ Pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CLA.md](C
 
 ## License
 
-[PolyForm Noncommercial License 1.0.0](LICENSE)
+[PolyForm Shield License 1.0.0](LICENSE)
 
 Required Notice: Copyright (c) 2026 F0X IT LLC
 
-The software is free to use, modify and share for noncommercial purposes, including building it and installing it on your own devices. Commercial use needs a license from F0X IT LLC.
+The software is free to use, modify and share for any purpose, including at work, except to provide a product that competes with Muxr. A competing use needs a license from F0X IT LLC. Source published before 15 November 2026 was under the PolyForm Noncommercial License 1.0.0 and remains available under it.
 
 Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC. The badge artwork under docs/badges/ is not covered by this repository's license.

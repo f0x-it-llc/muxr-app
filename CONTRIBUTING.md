@@ -16,7 +16,7 @@ All four commands must pass.
 
 ## License
 
-Muxr is licensed under the PolyForm Noncommercial License 1.0.0. See
+Muxr is licensed under the PolyForm Shield License 1.0.0. See
 [LICENSE](LICENSE). Your contributions are accepted under the same license.
 
 ## Contributor License Agreement
