@@ -21,10 +21,8 @@ use crate::features::pro::domain::entities::{Entitlement, ServerLimitVerdict};
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::settings::di::SharedAuthTokensRepository;
 use crate::features::settings::domain::entities::CreateTokenRequest;
-use crate::routes::{Nav, PageMark};
+use crate::routes::{Nav, PageMark, SESSIONS_ROUTE};
 use crate::ui::toasts::app_toasts;
-
-pub const SESSIONS_LOCATION: &str = "/sessions";
 
 pub struct CredentialOffer {
     pub label: String,
@@ -95,7 +93,8 @@ pub enum ConnectMode {
 }
 
 /// Pops only the page marked when the dial started, so a dial settling after the user
-/// backed out never pops the shell; a landed Add page refuses a second dial.
+/// backed out never pops the shell; a landed Add page refuses a second dial. Over any shell but
+/// a Sessions one, the landing places Sessions, so the new connection is never left behind Back.
 #[derive(Clone)]
 struct Landing {
     nav: Nav,
@@ -107,10 +106,10 @@ struct Landing {
 impl Landing {
     fn land(&self) {
         match &self.mark {
-            None => self.nav.push(SESSIONS_LOCATION),
+            None => self.nav.push(SESSIONS_ROUTE),
             Some(mark) => {
                 self.landed.store(true, Ordering::SeqCst);
-                self.nav.pop_marked(mark);
+                self.nav.land_added(mark);
             }
         }
     }

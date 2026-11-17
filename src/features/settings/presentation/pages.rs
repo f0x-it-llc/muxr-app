@@ -29,7 +29,7 @@ use crate::ui::toasts::app_toasts;
 
 use super::app_pages::ServerActions;
 use super::controller::{
-    ScopeFilter, SettingsController, TokenListView, token_list_view, token_shown,
+    EpochFence, ScopeFilter, SettingsController, TokenListView, token_list_view, token_shown,
 };
 use super::scramble::{RevokeAnimations, RevokeScramble, ScramblePose};
 use super::widgets::{self, DISCONNECT_COPY, DISCONNECT_LABEL, RowAction, RowHost, TokenMenu};
@@ -153,9 +153,7 @@ impl Component for SettingsScreen {
 
         let identity = widgets::identity_card(info.as_ref(), label.as_deref(), &colors);
         let credential = has_credential.then(|| widgets::saved_credential_row(&colors));
-        let forget = connected
-            .is_some()
-            .then(|| widgets::forget_server_row(&colors));
+        let forget = saved_row.map(|_| widgets::forget_server_row(&colors));
         let tokens_row = widgets::tokens_row(&tokens.view, tokens.loaded, tokens.failed, &colors);
 
         if responsive.is_tablet() {
@@ -360,6 +358,7 @@ impl Actions {
         let controller = Arc::clone(&self.controller);
         let overlays = self.overlays.clone();
         let filter = self.filter;
+        let fence = EpochFence::capture(self.connection.connection_epoch);
         widgets::open_create_token_dialog(
             &self.overlays,
             move |_app: &mut AppState, name: String, read_only: bool| {
@@ -372,7 +371,7 @@ impl Actions {
                     } else {
                         TokenScope::ReadWrite
                     };
-                    if handle.create_token(name.clone(), read_only).await {
+                    if handle.create_token(name.clone(), read_only, fence).await {
                         if !filter.admits(&name, scope) {
                             filter.clear();
                         }
@@ -409,18 +408,19 @@ impl Actions {
         }
         let actions = self.clone();
         let name = name.to_string();
+        let fence = EpochFence::capture(self.connection.connection_epoch);
         confirm_dialog(
             &self.overlays,
             "Revoke token?",
             "Any client still using this token is disconnected immediately.",
             "Revoke",
-            move |_app: &mut AppState| actions.revoke(&name),
+            move |_app: &mut AppState| actions.revoke(&name, fence),
         );
     }
 
     /// The scramble and the RPC start on the same tap, so a fast revoke still shows the row go;
     /// the snapshot, at its on-screen index, precedes the refresh that removes the token.
-    fn revoke(&self, name: &str) {
+    fn revoke(&self, name: &str, fence: EpochFence) {
         let controller = Arc::clone(&self.controller);
         let scrambles = self.scrambles;
         let tokens = controller.tokens.get_untracked();
@@ -441,7 +441,7 @@ impl Actions {
         let name = name.to_string();
         let confirmation = format!("Revoked {name}");
         spawn_local(async move {
-            if controller.revoke_token(name.clone()).await {
+            if controller.revoke_token(name.clone(), fence).await {
                 app_toasts().show(confirmation);
             }
             // A refusal leaves the token in `tokens`, so dropping the timeline restores the row.

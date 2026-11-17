@@ -290,3 +290,119 @@ fn the_named_future_spawned_by_the_terminal_pump_stays_lookup_free() {
         path.display()
     );
 }
+
+const CONNECT_PRESENTATION: &str = "connect::presentation";
+
+fn code_only(contents: &str) -> String {
+    contents
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn bound_name(item: &str) -> String {
+    let item = item.trim();
+    item.rsplit_once(" as ")
+        .map_or(item, |(_, alias)| alias)
+        .trim()
+        .to_string()
+}
+
+/// The names `mod.rs` re-exports with `pub use`, aliases resolved.
+fn reexported_names(mod_rs: &str) -> Vec<String> {
+    let code = code_only(mod_rs);
+    let mut names = Vec::new();
+    for statement in code.split(';') {
+        let Some(path) = statement.trim().strip_prefix("pub use ") else {
+            continue;
+        };
+        match path.split_once('{') {
+            Some((_, list)) => names.extend(
+                list.trim_end_matches('}')
+                    .split(',')
+                    .filter(|item| !item.trim().is_empty())
+                    .map(bound_name),
+            ),
+            None => names.push(bound_name(path.rsplit("::").next().unwrap_or(path))),
+        }
+    }
+    names
+}
+
+/// Each name a file reaches through `connect::presentation`; a module path or a bare module
+/// import reads as its first segment, which no re-export list carries.
+fn names_reached(contents: &str) -> Vec<String> {
+    let code = code_only(contents);
+    let mut reached = Vec::new();
+    for (at, _) in code.match_indices(CONNECT_PRESENTATION) {
+        let rest = &code[at + CONNECT_PRESENTATION.len()..];
+        let Some(rest) = rest.strip_prefix("::") else {
+            reached.push("<the module itself>".to_string());
+            continue;
+        };
+        if let Some(list) = rest.strip_prefix('{') {
+            let list = list.split('}').next().unwrap_or("");
+            reached.extend(
+                list.split(',')
+                    .filter(|item| !item.trim().is_empty())
+                    .map(|item| item.trim().split("::").next().unwrap_or("").to_string()),
+            );
+        } else {
+            let end = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            reached.push(rest[..end].to_string());
+        }
+    }
+    reached
+}
+
+#[test]
+fn settings_reaches_connects_presentation_only_through_its_re_exports() {
+    let mod_rs = src_dir().join("features/connect/presentation/mod.rs");
+    let exported = reexported_names(
+        &fs::read_to_string(&mod_rs)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", mod_rs.display())),
+    );
+    assert!(
+        !exported.is_empty(),
+        "connect re-exports nothing to check against"
+    );
+
+    let mut failures = Vec::new();
+    for path in rust_files(&src_dir().join("features/settings")) {
+        let contents =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        for name in names_reached(&contents) {
+            if !exported.contains(&name) {
+                failures.push(format!("{}: reaches `{name}`", rel(&path)));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "settings imports connect's presentation only through the page-agnostic names \
+         connect/presentation/mod.rs re-exports ({exported:?}):\n{}",
+        failures.join("\n"),
+    );
+}
+
+#[test]
+fn the_re_export_scanner_reads_lists_aliases_paths_and_module_imports() {
+    let mod_rs =
+        "//! docs\npub mod controller;\npub use controller::{A, B as C};\npub use widgets::x::d;\n";
+    assert_eq!(reexported_names(mod_rs), ["A", "C", "d"]);
+
+    let file = "use crate::features::connect::presentation::{\n    A,\n    C,\n};\n\
+                use crate::features::connect::presentation::d;\n\
+                use crate::features::connect::presentation::controller::E;\n\
+                use crate::features::connect::presentation;\n\
+                // connect::presentation::widgets in prose\n";
+    assert_eq!(
+        names_reached(file),
+        ["A", "C", "d", "controller", "<the module itself>"]
+    );
+    let nested = "use crate::features::connect::presentation::{widgets::w, A};\n";
+    assert_eq!(names_reached(nested), ["widgets", "A"]);
+}

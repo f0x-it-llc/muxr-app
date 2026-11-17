@@ -56,7 +56,7 @@ use muxr::features::settings::domain::entities::{
 };
 use muxr::features::settings::domain::repositories::AuthTokensRepository;
 use muxr::features::settings::presentation::app_pages::app_settings_page;
-use muxr::features::settings::presentation::controller::SavedServersController;
+use muxr::features::settings::presentation::controller::{EpochFence, SavedServersController};
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
     TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
@@ -114,6 +114,20 @@ fn mock_target(trust_mode: TrustMode) -> ConnectTarget {
         offer_credential: false,
         token: zeroize::Zeroizing::new(String::new()),
         remember: false,
+        fingerprint: None,
+    }
+}
+
+fn mock_rig_row() -> SavedServer {
+    SavedServer {
+        host: "mock.example".to_string(),
+        port: 7777,
+        trust_mode: TrustMode::NoVerification,
+        label: "Mock rig".to_string(),
+        last_used_ms: epoch_millis(),
+        read_only: false,
+        has_credential: false,
+        token_name: None,
         fingerprint: None,
     }
 }
@@ -237,6 +251,18 @@ impl Harness {
 
     fn connected() -> Self {
         Harness::connected_with(TrustMode::NoVerification)
+    }
+
+    /// Connected to the mock rig with a saved profile for it, so its forget row renders.
+    fn connected_saved() -> Self {
+        let mut harness = Harness::mount_seeded(|| {
+            expect_saved_servers()
+                .save(mock_rig_row())
+                .expect("the mock store never fails");
+        });
+        expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+        harness.await_tokens();
+        harness
     }
 
     fn frame(&mut self) -> RecScene {
@@ -535,7 +561,7 @@ fn group_labels_in_order(h: &Harness) -> Vec<String> {
 fn the_server_page_shows_only_its_own_groups_and_the_disconnect_action() {
     let _g = serial();
     let _ambient = setup();
-    let h = Harness::connected();
+    let h = Harness::connected_saved();
 
     assert_eq!(
         group_labels_in_order(&h),
@@ -1045,6 +1071,89 @@ fn forgetting_the_connected_server_confirms_then_removes_its_profile() {
     assert_eq!(recording.revoked(), vec![CRED_TOKEN_NAME.to_string()]);
 }
 
+fn shows_forget(h: &Harness) -> bool {
+    node_values(&h.root)
+        .iter()
+        .any(|v| v == FORGET_SERVER_LABEL)
+}
+
+#[test]
+fn the_forget_row_shows_only_while_the_connected_server_has_a_saved_profile() {
+    let _g = serial();
+    let _ambient = setup();
+    let unsaved = Harness::connected();
+    assert!(
+        !shows_forget(&unsaved),
+        "no profile, nothing to forget: {:?}",
+        node_values(&unsaved.root)
+    );
+    drop(unsaved);
+
+    let (mut h, _recording) = server_page_on_cred(false);
+    assert!(shows_forget(&h), "{:?}", node_values(&h.root));
+    let dialog = open_dialog_by_value(&mut h, FORGET_SERVER_LABEL);
+    confirm(&mut h, &dialog);
+    h.pump_until_shown("the forget row to go with the profile", |h| {
+        !shows_forget(h)
+    });
+    assert!(
+        expect_connection_controller().connected.get_untracked(),
+        "the connection outlives its forgotten profile"
+    );
+}
+
+#[test]
+fn the_tablet_this_server_card_carries_the_forget_row_only_for_a_saved_server() {
+    let _g = serial();
+    let _ambient = setup();
+    let full = || Some(support::metrics_at(1024.0, 720.0));
+    let mut unsaved = connected_with_metrics(full());
+    unsaved.frame();
+    let values = node_values(&unsaved.root);
+    assert!(values.iter().any(|v| v == "THIS SERVER"), "{values:?}");
+    assert!(!shows_forget(&unsaved), "{values:?}");
+    drop(unsaved);
+
+    let mut saved = support::mount_with_metrics(full(), Harness::connected_saved);
+    saved.frame();
+    assert!(shows_forget(&saved), "{:?}", node_values(&saved.root));
+}
+
+#[test]
+fn a_reconnect_while_the_delete_confirm_is_open_sends_no_revoke() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, recording) = server_page_on_cred(true);
+    let credentials = mock_credentials().expect("the mock service is published");
+    let connection = expect_connection_controller();
+    let dialog = open_dialog_by_label(&mut h, DELETE_LABEL);
+    assert!(dialog_says(&h, "its token revoked on the server"));
+
+    let epoch = connection.connection_epoch.get_untracked();
+    connection.switch_to(connected_to_cred(), |_| {});
+    pump_until(&mut h, "the reconnect to land", || {
+        connection.connected.get_untracked() && connection.connection_epoch.get_untracked() > epoch
+    });
+    assert_eq!(connected_endpoint().as_deref(), Some(CRED_ENDPOINT));
+    confirm(&mut h, &dialog);
+    h.pump_until_shown("the credential row to go", |h| {
+        !node_values(&h.root)
+            .iter()
+            .any(|v| v == SAVED_CREDENTIAL_LABEL)
+    });
+
+    assert_eq!(
+        credentials.stored(CRED_ENDPOINT),
+        None,
+        "the delete still ran"
+    );
+    assert!(
+        recording.revoked().is_empty(),
+        "the revoke belonged to the connection the dialog was opened under: {:?}",
+        recording.revoked()
+    );
+}
+
 #[test]
 fn the_phone_server_page_fits_one_viewport_and_ends_at_the_app_row() {
     let _g = serial();
@@ -1498,6 +1607,34 @@ fn the_bars_plus_mints_a_token_then_reveals_and_reloads() {
     assert!(
         pending.iter().any(|m| m == "Created laptop"),
         "…and the mint is confirmed: {pending:?}"
+    );
+}
+
+#[test]
+fn a_mint_that_lands_after_a_server_switch_reveals_no_secret() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::tokens();
+    app_toasts().clear();
+
+    mint_token(&mut h, "laptop", false);
+    expect_connection_controller().switch_to(connected_to_cred(), |_| {});
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while Instant::now() < deadline {
+        h.pump_once();
+    }
+    h.settle();
+
+    assert_eq!(h.depth(), 1, "no secret reveal opened");
+    let values = node_values(&h.root);
+    assert!(
+        !values.iter().any(|v| v.contains(MOCK_MINTED_SECRET_PREFIX)),
+        "{values:?}"
+    );
+    let pending = app_toasts().pending_untracked();
+    assert!(
+        !pending.iter().any(|m| m == "Created laptop"),
+        "{pending:?}"
     );
 }
 
@@ -2517,8 +2654,11 @@ fn deleting_or_forgetting_on_the_connected_endpoint_revokes_its_token() {
     assert!(servers.is_connected_endpoint(CRED_ENDPOINT));
 
     let deleting = Arc::clone(&servers);
+    let fence = EpochFence::capture(connection.connection_epoch);
     assert!(run_to_end(&mut h, async move {
-        deleting.delete_credential(CRED_ENDPOINT.to_string()).await
+        deleting
+            .delete_credential(CRED_ENDPOINT.to_string(), fence)
+            .await
     }));
     assert_eq!(recording.revoked(), vec![CRED_TOKEN_NAME.to_string()]);
 
@@ -2530,7 +2670,9 @@ fn deleting_or_forgetting_on_the_connected_endpoint_revokes_its_token() {
         .seed(CRED_ENDPOINT, CRED_TOKEN);
     let forgetting = Arc::clone(&servers);
     assert!(run_to_end(&mut h, async move {
-        forgetting.forget_server(CRED_ENDPOINT.to_string()).await
+        forgetting
+            .forget_server(CRED_ENDPOINT.to_string(), fence)
+            .await
     }));
     assert_eq!(recording.revoked().len(), 2, "{:?}", recording.revoked());
 }
@@ -4114,7 +4256,10 @@ fn connected_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
 fn a_full_band_tablet_packs_the_cards_into_two_columns() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = connected_with_metrics(Some(support::metrics_at(1024.0, 720.0)));
+    let mut h = support::mount_with_metrics(
+        Some(support::metrics_at(1024.0, 720.0)),
+        Harness::connected_saved,
+    );
     h.frame();
 
     let values = node_values(&h.root);

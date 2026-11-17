@@ -33,9 +33,9 @@ use zeroize::Zeroizing;
 
 mod support;
 use support::{
-    EPSILON, RecScene, added, center, frame, frame_at, largest, ms, named_key,
-    node_centers_by_label, node_centers_by_value, node_labels, node_roles, node_values, pointer,
-    pump_frames, pump_until, serial, settle, setup, smallest, tap,
+    EPSILON, RecScene, added, center, char_key, frame, frame_at, largest, ms, named_key,
+    node_center_by_role, node_centers_by_label, node_centers_by_value, node_labels, node_roles,
+    node_values, pointer, pump_frames, pump_until, serial, settle, setup, smallest, tap,
 };
 
 /// The mock connection every bar-titled test runs behind (the session guard
@@ -1224,7 +1224,11 @@ fn on_app_settings_from_connect() -> Harness {
 }
 
 fn open_saved_sheet(h: &mut Harness) {
-    let row = saved_row_point(h);
+    open_sheet_of(h, SAVED_LABEL);
+}
+
+fn open_sheet_of(h: &mut Harness, label: &str) {
+    let row = value_point(h, label);
     tap(&mut h.root, &mut h.state, row);
     h.settle();
     assert_eq!(h.overlay_depth(), REST_DEPTH + 1, "the server sheet is up");
@@ -1245,9 +1249,13 @@ fn switch_point(h: &Harness) -> Point {
 /// Sessions of the switched-to server, as its root: one Back asks to disconnect, as after a
 /// connect, rather than popping back into settings.
 fn assert_on_switched_sessions(h: &mut Harness) {
+    assert_on_sessions_of(h, SAVED_HOST);
+}
+
+fn assert_on_sessions_of(h: &mut Harness, host: &str) {
     assert_eq!(h.depth(), 2, "the shell is still placed");
     assert_eq!(h.overlay_depth(), REST_DEPTH, "the sheet closed");
-    assert_titled(h, SAVED_HOST);
+    assert_titled(h, host);
     assert!(
         h.labels().iter().any(|l| l == GEAR),
         "…on Sessions, which wears the gear: {:?}",
@@ -1267,12 +1275,13 @@ fn assert_on_switched_sessions(h: &mut Harness) {
     assert!(connected(), "nothing is disconnected until it is confirmed");
 }
 
-fn saved_row_point(h: &mut Harness) -> Point {
+/// Scrolls the page until `value` sits clear of the bottom edge.
+fn value_point(h: &mut Harness, value: &str) -> Point {
     let label_at = |h: &Harness| {
-        node_centers_by_value(&h.root, SAVED_LABEL)
+        node_centers_by_value(&h.root, value)
             .first()
             .copied()
-            .unwrap_or_else(|| panic!("no saved row on screen: {:?}", h.values()))
+            .unwrap_or_else(|| panic!("no {value:?} on screen: {:?}", h.values()))
     };
     for _ in 0..40 {
         let point = label_at(h);
@@ -1288,7 +1297,7 @@ fn saved_row_point(h: &mut Harness) -> Point {
         );
         h.settle();
     }
-    panic!("the saved row never scrolled into view");
+    panic!("{value:?} never scrolled into view");
 }
 
 #[test]
@@ -1426,6 +1435,152 @@ fn a_sheet_switch_from_connects_app_settings_lands_on_sessions_of_the_new_server
         "app settings is gone: {:?}",
         h.labels()
     );
+    assert_on_switched_sessions(&mut h);
+}
+
+const ADDED_HOST: &str = "added.example";
+const ADDED_ENDPOINT: &str = "added.example:50051";
+const ADD_SERVER_ROW: &str = "add server";
+const BARE_HOST: &str = "bare.example";
+const BARE_ENDPOINT: &str = "bare.example:50051";
+const BARE_LABEL: &str = "Bare rig";
+const LIVE_LABEL: &str = "Live rig";
+
+fn seed_row(host: &str, port: u16, label: &str) {
+    expect_saved_servers()
+        .save(SavedServer {
+            host: host.to_string(),
+            port,
+            trust_mode: TrustMode::System,
+            label: label.to_string(),
+            last_used_ms: epoch_millis(),
+            read_only: false,
+            has_credential: false,
+            token_name: None,
+            fingerprint: None,
+        })
+        .expect("the mock store never fails");
+}
+
+fn open_add_page_from_row(h: &mut Harness) {
+    let row = value_point(h, ADD_SERVER_ROW);
+    tap(&mut h.root, &mut h.state, row);
+    h.settle();
+    h.park();
+    assert!(
+        h.values().iter().any(|v| v == ADD_SERVER_HEADING),
+        "the add page is up: {:?}",
+        h.values()
+    );
+}
+
+/// Types `url` when the page opened empty, turns remember off so no offer holds the landing,
+/// then connects and waits for the dial to settle on `endpoint`.
+fn connect_from_add_page(h: &mut Harness, url: Option<&str>, endpoint: &str) {
+    if let Some(url) = url {
+        let field = node_center_by_role(&h.root, Role::TextInput).expect("the server URL field");
+        tap(&mut h.root, &mut h.state, field);
+        for c in url.chars() {
+            h.root.event(&mut h.state, &char_key(&c.to_string()));
+        }
+        h.settle();
+    }
+    h.tap_label(REMEMBER_LABEL);
+    h.park();
+    h.tap_label(CONNECT_LABEL);
+    pump_until_true(h, || connected_endpoint().as_deref() == Some(endpoint));
+    h.settle();
+    h.park();
+}
+
+#[test]
+fn a_connect_from_connects_app_settings_add_row_lands_on_sessions_of_the_new_server() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_app_settings_from_connect();
+    open_add_page_from_row(&mut h);
+
+    connect_from_add_page(&mut h, Some(ADDED_ENDPOINT), ADDED_ENDPOINT);
+
+    assert!(
+        !h.labels().iter().any(|l| l == APP_SETTINGS_TITLE),
+        "app settings is gone: {:?}",
+        h.labels()
+    );
+    assert_on_sessions_of(&mut h, ADDED_HOST);
+}
+
+#[test]
+fn a_credential_less_switch_from_connects_app_settings_lands_on_sessions_of_that_server() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    unlock_pro(&mut h);
+    seed_row(BARE_HOST, 50051, BARE_LABEL);
+    h.park();
+    h.tap_label(APP_SETTINGS_LABEL);
+    h.settle();
+    h.park();
+    open_sheet_of(&mut h, BARE_LABEL);
+
+    h.tap_label(SWITCH_LABEL);
+    h.settle();
+    h.park();
+    assert!(
+        h.values().iter().any(|v| v == ADD_SERVER_HEADING),
+        "the sheet gave way to the prefilled add page: {:?}",
+        h.values()
+    );
+    connect_from_add_page(&mut h, None, BARE_ENDPOINT);
+
+    assert_on_sessions_of(&mut h, BARE_HOST);
+}
+
+#[test]
+fn a_connect_from_app_settings_inside_a_sessions_shell_returns_to_app_settings() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_app_settings_over_server_settings(true);
+    open_add_page_from_row(&mut h);
+
+    connect_from_add_page(&mut h, Some(ADDED_ENDPOINT), ADDED_ENDPOINT);
+
+    assert_eq!(h.depth(), 2, "only the add page came off");
+    assert_titled(&h, APP_SETTINGS_TITLE);
+    assert!(connected(), "…on the added server");
+    press_back(&mut h);
+    assert_titled(&h, "server settings");
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "Back popped, asking nothing");
+}
+
+#[test]
+fn a_sheet_switch_from_a_deep_settings_stack_lands_on_the_sessions_root() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::on_sessions();
+    unlock_pro(&mut h);
+    seed_saved_server(true);
+    seed_row(HOST, PORT, LIVE_LABEL);
+    h.push("/settings");
+    h.push("/settings/app");
+    await_saved_row(&mut h);
+    let live = value_point(&mut h, LIVE_LABEL);
+    tap(&mut h.root, &mut h.state, live);
+    h.settle();
+    h.park();
+    assert_titled(&h, "server settings");
+    h.push("/settings/app");
+    await_saved_row(&mut h);
+    assert_titled(&h, APP_SETTINGS_TITLE);
+    open_saved_sheet(&mut h);
+
+    h.tap_label(SWITCH_LABEL);
+    pump_until_true(&mut h, || {
+        connected_endpoint().as_deref() == Some(SAVED_ENDPOINT)
+    });
+    h.settle();
+    h.park();
+
     assert_on_switched_sessions(&mut h);
 }
 

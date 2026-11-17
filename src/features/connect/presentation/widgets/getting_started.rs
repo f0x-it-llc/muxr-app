@@ -126,7 +126,7 @@ pub(crate) fn getting_started_card<S: 'static>(theme: &Theme, colors: &Palette) 
         ))
 }
 
-pub(crate) fn open_getting_started(overlays: &frust::NavigatorController<AppState>) {
+pub fn open_getting_started(overlays: &frust::NavigatorController<AppState>) {
     let page_nav = overlays.clone();
     show_glyph_dialog(
         overlays,

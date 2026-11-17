@@ -5,4 +5,5 @@ pub mod controller;
 pub mod pages;
 pub mod widgets;
 
-pub use controller::{KeyringUnlock, KeyringUnlockOutcome};
+pub use controller::{KeyringUnlock, KeyringUnlockOutcome, SAVED_LIST_UNAVAILABLE_MESSAGE};
+pub use widgets::getting_started::open_getting_started;

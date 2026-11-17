@@ -25,7 +25,7 @@ use crate::features::settings::presentation::token_pages::tokens_page;
 use crate::features::terminal::presentation::pages::terminal_page;
 
 pub(crate) const CONNECT_LOCATION: &str = "/";
-const SESSIONS_ROUTE: &str = "/sessions";
+pub const SESSIONS_ROUTE: &str = "/sessions";
 const TERMINAL_ROUTE: &str = "/terminal";
 pub const SETTINGS_ROUTE: &str = "/settings";
 pub const APP_SETTINGS_ROUTE: &str = "/settings/app";
@@ -382,6 +382,40 @@ impl Nav {
         controller.pop();
     }
 
+    fn in_sessions_shell(&self) -> bool {
+        self.shell_is_placed()
+            && self
+                .landing_route()
+                .is_some_and(|route| route.path == SESSIONS_ROUTE)
+    }
+
+    /// A settled connect or switch: a Sessions shell returns to its root, whatever lies above it;
+    /// any other shell is replaced by a Sessions shell placed as a connect places it, so Back
+    /// there asks to disconnect. With no shell placed there is no Sessions to return to.
+    pub fn land_on_sessions(&self, mark: &PageMark) {
+        if !self.mark_is_live(mark) || !self.shell_is_placed() {
+            return;
+        }
+        if self.in_sessions_shell() && !self.shell_is_covered() {
+            for _ in 1..self.inner.depth() {
+                self.pop_on(false);
+            }
+        } else {
+            self.go(CONNECT_LOCATION);
+            self.push(SESSIONS_ROUTE);
+        }
+    }
+
+    /// An add page's settled connect takes only itself off over a Sessions shell (or none) and
+    /// lands on Sessions over any other shell.
+    pub fn land_added(&self, mark: &PageMark) {
+        if self.shell_is_placed() && !self.in_sessions_shell() {
+            self.land_on_sessions(mark);
+        } else {
+            self.pop_marked(mark);
+        }
+    }
+
     pub fn mark_top(&self) -> PageMark {
         let outer = self.shell_is_covered() || !self.shell_is_placed();
         let generation = if outer {
@@ -395,16 +429,18 @@ impl Nav {
     /// Skipped once that stack has published a change or a pop of it is queued this frame: a late
     /// settle must not pop the page now on top.
     pub fn pop_marked(&self, mark: &PageMark) {
+        if self.mark_is_live(mark) {
+            self.pop_on(mark.outer);
+        }
+    }
+
+    fn mark_is_live(&self, mark: &PageMark) -> bool {
         let generation = if mark.outer {
             self.router.controller().route_generation()
         } else {
             self.inner.route_generation()
         };
-        if generation != mark.generation || self.queued_pop.get() == Some((mark.outer, generation))
-        {
-            return;
-        }
-        self.pop_on(mark.outer);
+        generation == mark.generation && self.queued_pop.get() != Some((mark.outer, generation))
     }
 
     /// Read tracked, so a navigation or fullscreen request wakes the rebuild that retitles the bar.

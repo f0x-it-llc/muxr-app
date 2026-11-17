@@ -17,8 +17,7 @@ use crate::features::connect::di::{
     expect_credential_service, expect_keyring, expect_saved_servers,
 };
 use crate::features::connect::domain::entities::SavedServer;
-use crate::features::connect::presentation::controller::SESSIONS_LOCATION;
-use crate::features::connect::presentation::widgets::getting_started::open_getting_started;
+use crate::features::connect::presentation::open_getting_started;
 use crate::features::pro::di::expect_pro_controller;
 use crate::features::pro::domain::entities::ServerLimitVerdict;
 use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
@@ -30,15 +29,15 @@ use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
 };
 use crate::responsive::Responsive;
-use crate::routes::{
-    CONNECT_LOCATION, Nav, PageMark, SETTINGS_ROUTE, add_server_location, app_nav,
-};
+use crate::routes::{Nav, PageMark, SETTINGS_ROUTE, add_server_location, app_nav};
 use crate::ui::dialogs::confirm_dialog;
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::toasts::app_toasts;
 
-use super::controller::{AppSettingsController, SavedServersController, saved_server_rows};
+use super::controller::{
+    AppSettingsController, EpochFence, SavedServersController, saved_server_rows,
+};
 use super::widgets::{
     self, CardColumn, FontPicker, FontRow, Picker, PickerKind, RowAction, RowHost,
     ServerSheetActions,
@@ -510,47 +509,6 @@ pub(super) fn open_add_server(state: &mut AppSettingsState) {
     state.actions.servers.open_add_server(None);
 }
 
-/// Where a settled switch lands, read when it starts: the Sessions screen of the new server. The
-/// mark keeps a settle that arrives after the user left this page from navigating at all.
-#[derive(Clone)]
-struct SwitchLanding {
-    nav: Nav,
-    mark: PageMark,
-    /// The shell's landing route; `None` with no shell placed, where there is no Sessions to show.
-    shell_root: Option<String>,
-}
-
-impl SwitchLanding {
-    fn take(nav: &Nav) -> Self {
-        SwitchLanding {
-            nav: nav.clone(),
-            mark: nav.mark_top(),
-            shell_root: nav.landing_route().map(|location| location.path),
-        }
-    }
-
-    /// Over Sessions the stack is Sessions, server settings, app settings (only server settings
-    /// links here inside a Sessions shell), so both pages come off. Opened from Connect, the
-    /// shell holds app settings alone: it is replaced by a Sessions shell placed as a connect
-    /// places it, so Back there asks to disconnect.
-    fn land(&self) {
-        if self.nav.mark_top() != self.mark {
-            return;
-        }
-        match self.shell_root.as_deref() {
-            Some(SESSIONS_LOCATION) => {
-                self.nav.pop_marked(&self.mark);
-                self.nav.pop();
-            }
-            Some(_) => {
-                self.nav.go(CONNECT_LOCATION);
-                self.nav.push(SESSIONS_LOCATION);
-            }
-            None => {}
-        }
-    }
-}
-
 impl ServerActions {
     /// Mounts the device's saved-server controller under the calling screen, so it must run in
     /// that screen's `Component::init`; the list is read once here and re-read by the screen.
@@ -672,15 +630,16 @@ impl ServerActions {
         }
         let controller = Arc::clone(&self.controller);
         let sheet = sheet.clone();
-        let landing = SwitchLanding::take(&self.app_nav);
+        let nav = self.app_nav.clone();
+        let mark = nav.mark_top();
         self.controller.switch_server(
             endpoint.to_string(),
             Box::new(move || {
                 controller.refresh_saved_servers();
                 // After the exit: the sheet's body reads this page's signals, which a pop disposes.
-                let later = landing.clone();
-                if !sheet.close_then(move || later.land()) {
-                    landing.land();
+                let later = nav.clone();
+                if !sheet.close_then(move || later.land_on_sessions(&mark)) {
+                    nav.land_on_sessions(&mark);
                 }
             }),
         );
@@ -694,6 +653,7 @@ impl ServerActions {
 
     /// `on_deleted` runs once the credential is gone, where the host closes what it opened.
     pub fn confirm_delete_credential(&self, endpoint: &str, on_deleted: Rc<dyn Fn()>) {
+        let fence = EpochFence::capture(self.connection.connection_epoch);
         let revokes = self.controller.is_connected_endpoint(endpoint);
         let token_clause = if revokes {
             " and its token revoked on the server"
@@ -717,7 +677,7 @@ impl ServerActions {
                 let on_deleted = Rc::clone(&on_deleted);
                 let confirmation = format!("Deleted the credential for {endpoint}");
                 spawn_local(async move {
-                    if handle.delete_credential(endpoint).await {
+                    if handle.delete_credential(endpoint, fence).await {
                         on_deleted();
                         app_toasts().show(confirmation);
                     }
@@ -733,6 +693,7 @@ impl ServerActions {
 
     /// `on_forgotten` runs once the profile is gone, where the host closes what it opened.
     pub fn confirm_forget_server(&self, endpoint: &str, on_forgotten: Rc<dyn Fn()>) {
+        let fence = EpochFence::capture(self.connection.connection_epoch);
         let has_credential = self
             .controller
             .saved
@@ -767,7 +728,7 @@ impl ServerActions {
                 let on_forgotten = Rc::clone(&on_forgotten);
                 let confirmation = format!("Forgot {endpoint}");
                 spawn_local(async move {
-                    if handle.forget_server(endpoint).await {
+                    if handle.forget_server(endpoint, fence).await {
                         on_forgotten();
                         app_toasts().show(confirmation);
                     }

@@ -13,8 +13,9 @@ use crate::connection::ConnectionController;
 use crate::failure::AppFailure;
 use crate::features::connect::di::{Credentials, KeyringHandle, SavedServers};
 use crate::features::connect::domain::entities::{CredentialStatus, SavedServer};
-use crate::features::connect::presentation::controller::SAVED_LIST_UNAVAILABLE_MESSAGE;
-use crate::features::connect::presentation::{KeyringUnlock, KeyringUnlockOutcome};
+use crate::features::connect::presentation::{
+    KeyringUnlock, KeyringUnlockOutcome, SAVED_LIST_UNAVAILABLE_MESSAGE,
+};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken, PollPrefs, Preferences, TokenScope,
 };
@@ -146,6 +147,27 @@ pub fn token_list_view(
     }
 }
 
+/// The connection an action began under: a revoke is not sent, and a result is dropped, once
+/// another connection has replaced it.
+#[derive(Clone, Copy)]
+pub struct EpochFence {
+    epoch: RwSignal<u64>,
+    began: u64,
+}
+
+impl EpochFence {
+    pub fn capture(epoch: RwSignal<u64>) -> Self {
+        Self {
+            epoch,
+            began: epoch.get_untracked(),
+        }
+    }
+
+    pub fn holds(self) -> bool {
+        self.epoch.try_get_untracked() == Some(self.began)
+    }
+}
+
 /// What a screen shows of the token list: only a list read under the live connection.
 pub struct TokenSnapshot {
     pub tokens: Vec<AuthToken>,
@@ -260,7 +282,7 @@ impl SettingsController {
         true
     }
 
-    pub async fn create_token(&self, name: String, read_only: bool) -> bool {
+    pub async fn create_token(&self, name: String, read_only: bool, fence: EpochFence) -> bool {
         let request = CreateTokenRequest { name, read_only };
         let Ok(minted) = self
             .core
@@ -269,6 +291,9 @@ impl SettingsController {
         else {
             return false;
         };
+        if !fence.holds() {
+            return false;
+        }
         self.pending_token_secret.set(Some(minted));
         self.refresh_tokens().await;
         true
@@ -278,16 +303,20 @@ impl SettingsController {
         self.pending_token_secret.set(None);
     }
 
-    pub async fn revoke_token(&self, name: String) -> bool {
+    pub async fn revoke_token(&self, name: String, fence: EpochFence) -> bool {
+        if !fence.holds() {
+            return false;
+        }
         let revoked = self
             .core
             .run(&self.revoke_token, name, RunOptions::default())
             .await
             .is_ok();
-        if revoked {
+        let landed = revoked && fence.holds();
+        if landed {
             self.refresh_tokens().await;
         }
-        revoked
+        landed
     }
 }
 
@@ -362,7 +391,7 @@ impl SavedServersController {
 
     /// A locked keyring unlocks first, and a refusal deletes nothing. The token revoke and the
     /// row clear run only once the eviction landed, so a refused vault rewrite changes nothing.
-    pub async fn delete_credential(&self, endpoint: String) -> bool {
+    pub async fn delete_credential(&self, endpoint: String, fence: EpochFence) -> bool {
         let Some(mut server) = self.saved_row(&endpoint) else {
             return false;
         };
@@ -390,19 +419,19 @@ impl SavedServersController {
             self.core.failures().emit(&failure);
             return false;
         }
-        self.revoke_if_connected(&server).await;
+        self.revoke_if_connected(&server, fence).await;
         self.clear_credential_fields(server);
         true
     }
 
     /// Never prompts: locked, the ungated legacy delete runs and the next unlock prunes the vault.
     /// Unlocked, the handle drops its token regardless; a refused rewrite falls back to legacy.
-    pub async fn forget_server(&self, endpoint: String) -> bool {
+    pub async fn forget_server(&self, endpoint: String, fence: EpochFence) -> bool {
         let Some(server) = self.saved_row(&endpoint) else {
             return false;
         };
         if server.has_credential || self.keyring().token_for(&endpoint).is_some() {
-            self.revoke_if_connected(&server).await;
+            self.revoke_if_connected(&server, fence).await;
             let evicted = if self.keyring().is_unlocked() {
                 let evicted = self.evict_unlocked(&endpoint).await;
                 self.keyring().remove(&endpoint);
@@ -526,12 +555,13 @@ impl SavedServersController {
         self.refresh_saved_servers();
     }
 
-    /// A revoke needs a live read-write session; the delete it accompanies must not depend on one.
-    async fn revoke_if_connected(&self, server: &SavedServer) {
+    /// A revoke needs a live read-write session, the one the action began under; the delete it
+    /// accompanies must not depend on one.
+    async fn revoke_if_connected(&self, server: &SavedServer, fence: EpochFence) {
         let Some(name) = server.token_name.clone() else {
             return;
         };
-        if !self.is_connected_endpoint(&server.endpoint()) {
+        if !fence.holds() || !self.is_connected_endpoint(&server.endpoint()) {
             return;
         }
         let _ = self
@@ -657,9 +687,20 @@ mod tests {
         SettingsController::new(Arc::new(MockAuthTokensRepository::seeded()))
     }
 
+    fn fence() -> EpochFence {
+        EpochFence::capture(RwSignal::new(0))
+    }
+
     struct ServersRig {
         servers: SavedServersController,
         tokens: Arc<MockAuthTokensRepository>,
+        connection: Arc<ConnectionController>,
+    }
+
+    impl ServersRig {
+        fn fence(&self) -> EpochFence {
+            EpochFence::capture(self.connection.connection_epoch)
+        }
     }
 
     fn servers_over(
@@ -667,6 +708,19 @@ mod tests {
         credentials: Option<Arc<MockCredentialService>>,
     ) -> ServersRig {
         servers_with(rows, credentials, KeyringHandle::new(), None)
+    }
+
+    fn rig_target() -> ConnectTarget {
+        ConnectTarget {
+            host: "rig.example".to_string(),
+            port: 50051,
+            trust_mode: TrustMode::System,
+            label: "rig.example".to_string(),
+            offer_credential: false,
+            token: Zeroizing::new(String::new()),
+            remember: false,
+            fingerprint: None,
+        }
     }
 
     /// `connected_to` dials the mock connection first, so its endpoint is the live one.
@@ -696,9 +750,10 @@ mod tests {
                 Arc::new(MockSavedServersRepository::with_servers(rows)),
                 credentials.unwrap_or_else(|| Arc::new(MockCredentialService::new())),
                 keyring,
-                connection,
+                Arc::clone(&connection),
             ),
             tokens,
+            connection,
         }
     }
 
@@ -782,7 +837,7 @@ mod tests {
         let c = controller();
         block_on(c.refresh());
 
-        block_on(c.create_token("laptop".to_string(), false));
+        block_on(c.create_token("laptop".to_string(), false, fence()));
 
         let tokens = c.tokens.get_untracked();
         assert_eq!(tokens.len(), SEEDED_COUNT + 1);
@@ -797,7 +852,7 @@ mod tests {
         let c = controller();
         block_on(c.refresh());
 
-        block_on(c.create_token("phone".to_string(), true));
+        block_on(c.create_token("phone".to_string(), true, fence()));
 
         let tokens = c.tokens.get_untracked();
         let minted = tokens.last().expect("the minted token");
@@ -811,7 +866,11 @@ mod tests {
         block_on(c.refresh());
         assert_eq!(c.pending_token_secret.get_untracked(), None);
 
-        assert!(block_on(c.create_token("laptop".to_string(), false)));
+        assert!(block_on(c.create_token(
+            "laptop".to_string(),
+            false,
+            fence()
+        )));
         let pending = c
             .pending_token_secret
             .get_untracked()
@@ -828,7 +887,11 @@ mod tests {
         block_on(c.refresh());
 
         // The mock rejects a duplicate name.
-        assert!(!block_on(c.create_token("token_2".to_string(), false)));
+        assert!(!block_on(c.create_token(
+            "token_2".to_string(),
+            false,
+            fence()
+        )));
         assert_eq!(c.pending_token_secret.get_untracked(), None);
     }
 
@@ -837,7 +900,7 @@ mod tests {
         let c = controller();
         block_on(c.refresh());
 
-        block_on(c.revoke_token("token_2".to_string()));
+        block_on(c.revoke_token("token_2".to_string(), fence()));
 
         let names: Vec<String> = c
             .tokens
@@ -856,7 +919,7 @@ mod tests {
         let before = c.tokens.get_untracked();
 
         // The mock maps an unknown name to `Internal`.
-        let revoked = block_on(c.revoke_token("nope".to_string()));
+        let revoked = block_on(c.revoke_token("nope".to_string(), fence()));
 
         assert!(!revoked, "…and says so, rather than silently succeeding");
         assert_eq!(c.tokens.get_untracked(), before);
@@ -867,14 +930,18 @@ mod tests {
         let c = controller();
         block_on(c.refresh());
 
-        assert!(block_on(c.create_token("laptop".to_string(), false)));
+        assert!(block_on(c.create_token(
+            "laptop".to_string(),
+            false,
+            fence()
+        )));
         assert!(
-            !block_on(c.create_token("laptop".to_string(), false)),
+            !block_on(c.create_token("laptop".to_string(), false, fence())),
             "a duplicate mint is rejected by the repository"
         );
-        assert!(block_on(c.revoke_token("laptop".to_string())));
+        assert!(block_on(c.revoke_token("laptop".to_string(), fence())));
         assert!(
-            !block_on(c.revoke_token("laptop".to_string())),
+            !block_on(c.revoke_token("laptop".to_string(), fence())),
             "…and revoking it twice is too"
         );
         assert_eq!(
@@ -993,7 +1060,9 @@ mod tests {
         let c = &rig.servers;
         c.refresh_saved_servers();
 
-        assert!(block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
+        assert!(block_on(
+            c.delete_credential(SAVED_ENDPOINT.to_string(), rig.fence())
+        ));
 
         assert_eq!(
             credentials.stored(SAVED_ENDPOINT),
@@ -1029,7 +1098,8 @@ mod tests {
         assert!(!rig.servers.is_connected_endpoint(SAVED_ENDPOINT));
 
         assert!(block_on(
-            rig.servers.delete_credential(SAVED_ENDPOINT.to_string())
+            rig.servers
+                .delete_credential(SAVED_ENDPOINT.to_string(), rig.fence())
         ));
         assert!(
             token_kept(&rig),
@@ -1043,7 +1113,8 @@ mod tests {
             None,
         );
         assert!(block_on(
-            rig.servers.forget_server(SAVED_ENDPOINT.to_string())
+            rig.servers
+                .forget_server(SAVED_ENDPOINT.to_string(), rig.fence())
         ));
         assert!(
             token_kept(&rig),
@@ -1064,7 +1135,8 @@ mod tests {
         assert!(rig.servers.is_connected_endpoint(SAVED_ENDPOINT));
 
         assert!(block_on(
-            rig.servers.delete_credential(SAVED_ENDPOINT.to_string())
+            rig.servers
+                .delete_credential(SAVED_ENDPOINT.to_string(), rig.fence())
         ));
         assert!(
             !token_kept(&rig),
@@ -1079,9 +1151,79 @@ mod tests {
             Some(("rig.example", 50051)),
         );
         assert!(block_on(
-            rig.servers.forget_server(SAVED_ENDPOINT.to_string())
+            rig.servers
+                .forget_server(SAVED_ENDPOINT.to_string(), rig.fence())
         ));
         assert!(!token_kept(&rig));
+    }
+
+    #[test]
+    fn a_switch_between_the_check_and_the_revoke_sends_no_revoke() {
+        for forget in [false, true] {
+            let credentials = Arc::new(MockCredentialService::new());
+            credentials.seed(SAVED_ENDPOINT, "s3cr3t");
+            let rig = servers_with(
+                vec![saved_row(true)],
+                Some(credentials),
+                KeyringHandle::new(),
+                Some(("rig.example", 50051)),
+            );
+            let fence = rig.fence();
+            rig.connection.switch_to(rig_target(), |_| {});
+            assert!(rig.servers.is_connected_endpoint(SAVED_ENDPOINT));
+
+            let endpoint = SAVED_ENDPOINT.to_string();
+            let done = if forget {
+                block_on(rig.servers.forget_server(endpoint, fence))
+            } else {
+                block_on(rig.servers.delete_credential(endpoint, fence))
+            };
+            assert!(done);
+            assert!(token_kept(&rig), "forget: {forget}");
+        }
+    }
+
+    #[test]
+    fn a_mint_or_revoke_answered_after_a_switch_is_dropped() {
+        let c = controller();
+        block_on(c.refresh());
+        let epoch = RwSignal::new(0);
+        let switch_midway = || async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            epoch.set(1);
+        };
+
+        let (minted, ()) = block_on(async {
+            tokio::join!(
+                c.create_token("laptop".to_string(), false, EpochFence::capture(epoch)),
+                switch_midway()
+            )
+        });
+        assert!(!minted);
+        assert_eq!(c.pending_token_secret.get_untracked(), None);
+        assert_eq!(c.tokens.get_untracked().len(), SEEDED_COUNT, "no reload");
+
+        epoch.set(0);
+        let (revoked, ()) = block_on(async {
+            tokio::join!(
+                c.revoke_token("token_2".to_string(), EpochFence::capture(epoch)),
+                switch_midway()
+            )
+        });
+        assert!(!revoked);
+        assert!(
+            c.tokens.get_untracked().iter().any(|t| t.name == "token_2"),
+            "the list is left as it was"
+        );
+
+        let moved = EpochFence::capture(epoch);
+        epoch.set(2);
+        assert!(!block_on(c.revoke_token("laptop".to_string(), moved)));
+        block_on(c.refresh());
+        assert!(
+            c.tokens.get_untracked().iter().any(|t| t.name == "laptop"),
+            "a revoke begun under another connection is never sent"
+        );
     }
 
     #[test]
@@ -1093,7 +1235,9 @@ mod tests {
         let c = &rig.servers;
         c.refresh_saved_servers();
 
-        assert!(!block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
+        assert!(!block_on(
+            c.delete_credential(SAVED_ENDPOINT.to_string(), rig.fence())
+        ));
 
         assert!(c.saved.get_untracked()[0].has_credential);
     }
@@ -1112,7 +1256,9 @@ mod tests {
         let c = &rig.servers;
         c.refresh_saved_servers();
 
-        assert!(block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
+        assert!(block_on(
+            c.delete_credential(SAVED_ENDPOINT.to_string(), rig.fence())
+        ));
 
         assert_eq!(credentials.writes(), 1, "one gated vault rewrite");
         assert!(credentials.prompts().is_empty(), "…and no unlock prompt");
@@ -1140,7 +1286,9 @@ mod tests {
         let c = &rig.servers;
         c.refresh_saved_servers();
 
-        assert!(!block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
+        assert!(!block_on(
+            c.delete_credential(SAVED_ENDPOINT.to_string(), rig.fence())
+        ));
 
         assert_eq!(
             credentials.stored(SAVED_ENDPOINT).as_deref(),
@@ -1157,7 +1305,8 @@ mod tests {
         let rig = servers_over(vec![saved_row(true)], Some(Arc::clone(&credentials)));
 
         assert!(block_on(
-            rig.servers.forget_server(SAVED_ENDPOINT.to_string())
+            rig.servers
+                .forget_server(SAVED_ENDPOINT.to_string(), rig.fence())
         ));
 
         assert!(credentials.prompts().is_empty());
@@ -1200,7 +1349,9 @@ mod tests {
         let c = &rig.servers;
         c.refresh_saved_servers();
 
-        assert!(block_on(c.forget_server(SAVED_ENDPOINT.to_string())));
+        assert!(block_on(
+            c.forget_server(SAVED_ENDPOINT.to_string(), rig.fence())
+        ));
 
         assert!(c.saved.get_untracked().is_empty());
         assert_eq!(
@@ -1218,7 +1369,9 @@ mod tests {
         let c = &rig.servers;
         c.refresh_saved_servers();
 
-        assert!(block_on(c.forget_server(SAVED_ENDPOINT.to_string())));
+        assert!(block_on(
+            c.forget_server(SAVED_ENDPOINT.to_string(), rig.fence())
+        ));
 
         assert!(c.saved.get_untracked().is_empty());
         assert_eq!(
@@ -1233,8 +1386,12 @@ mod tests {
         let c = &rig.servers;
         c.refresh_saved_servers();
 
-        assert!(!block_on(c.delete_credential("nope:1".to_string())));
-        assert!(!block_on(c.forget_server("nope:1".to_string())));
+        assert!(!block_on(
+            c.delete_credential("nope:1".to_string(), rig.fence())
+        ));
+        assert!(!block_on(
+            c.forget_server("nope:1".to_string(), rig.fence())
+        ));
         assert_eq!(c.saved.get_untracked().len(), 1);
         assert!(c.saved.get_untracked()[0].has_credential);
     }
