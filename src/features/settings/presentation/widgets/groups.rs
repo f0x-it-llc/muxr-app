@@ -2,6 +2,7 @@ use frust::AnyView;
 
 use crate::connection::{ServerBackend, ServerInfo, TrustMode};
 use crate::features::settings::domain::entities::{AppearancePrefs, AuthToken, PollPrefs};
+use crate::features::settings::presentation::app_pages::AppSettingsState;
 use crate::features::settings::presentation::pages::SettingsState;
 use crate::features::settings::presentation::scramble::{RevokeScramble, ScramblePose};
 use crate::ui::palette::Palette;
@@ -9,6 +10,9 @@ use crate::ui::palette::Palette;
 use super::misc::bell_notifications_row;
 use super::pickers::PickerKind;
 use super::rows::{self, RowAction, RowMark, ValueTone, settings_row};
+
+const APP_SETTINGS_VALUE: &str = "fonts, bell, Muxr Pro, servers";
+const GETTING_STARTED_VALUE: &str = "pair a server in three steps";
 use super::tokens::{scrambling_token_item, token_item};
 
 /// `/settings` is not route-guarded, so a deep link or a disconnect racing a rebuild shows this.
@@ -158,10 +162,42 @@ pub(super) fn version_number(version: &str) -> &str {
     version.rsplit_once(' ').map_or(version, |(_, tail)| tail)
 }
 
+pub(in super::super) fn app_settings_rows(colors: &Palette) -> Vec<AnyView<SettingsState>> {
+    vec![settings_row(
+        rows::MARK_APP_SETTINGS,
+        "app settings",
+        APP_SETTINGS_VALUE,
+        ValueTone::Plain,
+        RowAction::AppSettings,
+        colors,
+    )]
+}
+
+pub(in super::super) fn about_rows(colors: &Palette) -> Vec<AnyView<AppSettingsState>> {
+    vec![
+        settings_row(
+            rows::MARK_VERSION,
+            "version",
+            env!("CARGO_PKG_VERSION"),
+            ValueTone::Plain,
+            RowAction::Static,
+            colors,
+        ),
+        settings_row(
+            rows::MARK_GETTING_STARTED,
+            "getting started",
+            GETTING_STARTED_VALUE,
+            ValueTone::Plain,
+            RowAction::GettingStarted,
+            colors,
+        ),
+    ]
+}
+
 pub(in super::super) fn appearance_rows(
     prefs: &AppearancePrefs,
     colors: &Palette,
-) -> Vec<AnyView<SettingsState>> {
+) -> Vec<AnyView<AppSettingsState>> {
     vec![
         settings_row(
             rows::MARK_FONT_FAMILY,
@@ -194,7 +230,7 @@ pub(in super::super) fn appearance_rows(
 pub(in super::super) fn poll_rows(
     prefs: &PollPrefs,
     colors: &Palette,
-) -> Vec<AnyView<SettingsState>> {
+) -> Vec<AnyView<AppSettingsState>> {
     vec![
         settings_row(
             rows::MARK_REFRESH,
@@ -207,7 +243,7 @@ pub(in super::super) fn poll_rows(
         bell_notifications_row(
             prefs.bell_notifications,
             colors,
-            |state: &mut SettingsState| state.actions.toggle_bell(),
+            |state: &mut AppSettingsState| state.actions.toggle_bell(),
         ),
     ]
 }

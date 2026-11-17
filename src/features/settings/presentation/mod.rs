@@ -1,3 +1,4 @@
+pub mod app_pages;
 pub mod controller;
 pub mod pages;
 pub mod scramble;

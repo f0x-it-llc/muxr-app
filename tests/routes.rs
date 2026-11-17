@@ -6,11 +6,11 @@ use frust_core::RenderRoot;
 use frust_text::TextContext;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
-use muxr::routes::{Nav, app_nav};
+use muxr::routes::{APP_SETTINGS_ROUTE, Nav, app_nav};
 use muxr::{AppState, MuxrApp};
 
 mod support;
-use support::{frame, serial, setup};
+use support::{frame, node_labels, node_values, serial, settle, setup};
 
 type Root = RenderRoot<AppState, AnyView<AppState>>;
 
@@ -65,6 +65,15 @@ fn settings_route_renders_its_placeholder() {
         scene.glyph_runs > 0,
         "the Settings placeholder (centered page text — its bar is the shell's \
          now) renders text"
+    );
+}
+
+#[test]
+fn app_settings_route_renders_with_no_server_connected() {
+    let scene = render(APP_SETTINGS_ROUTE, false);
+    assert!(
+        scene.glyph_runs > 0,
+        "the app settings page renders text with nothing connected"
     );
 }
 
@@ -244,5 +253,137 @@ fn a_push_through_the_app_nav_handle_lands_on_the_apps_own_navigator() {
         state.nav.controller().depth(),
         2,
         "the push the handle made landed on the app's own page stack"
+    );
+}
+
+#[test]
+fn app_settings_resolves_connected_and_disconnected_while_settings_still_bounces() {
+    let _g = serial();
+    let _ambient = setup();
+    let state = MuxrApp.init();
+
+    assert_eq!(
+        resolved_path(&state, APP_SETTINGS_ROUTE),
+        APP_SETTINGS_ROUTE,
+        "app settings is never redirected"
+    );
+    assert_eq!(
+        resolved_path(&state, "/settings"),
+        "/",
+        "…while server settings still bounces"
+    );
+
+    expect_connection_controller().connect(mock_target());
+
+    assert_eq!(
+        resolved_path(&state, APP_SETTINGS_ROUTE),
+        APP_SETTINGS_ROUTE
+    );
+    assert_eq!(resolved_path(&state, "/settings"), "/settings");
+}
+
+fn shown(root: &Root) -> Vec<String> {
+    [node_values(root), node_labels(root)].concat()
+}
+
+fn current_path(state: &AppState) -> Option<String> {
+    state
+        .nav
+        .controller()
+        .route_stack()
+        .current_route()
+        .map(|location| location.path.clone())
+}
+
+#[test]
+fn app_settings_opens_from_connect_with_no_server_and_back_returns_there() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut root: Root = RenderRoot::new();
+    let mut state = MuxrApp.init();
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
+    let mut tcx = TextContext::new();
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    app_nav().push(APP_SETTINGS_ROUTE);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    assert_eq!(state.nav.controller().depth(), 2, "the shell is placed");
+    assert_eq!(current_path(&state).as_deref(), Some(APP_SETTINGS_ROUTE));
+    let values = shown(&root);
+    assert!(
+        values.iter().any(|v| v == "app settings") && values.iter().any(|v| v == "font family"),
+        "the bar's title and the page's rows: {values:?}"
+    );
+
+    app_nav().pop();
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    assert_eq!(state.nav.controller().depth(), 1, "back left the shell");
+    assert_eq!(current_path(&state).as_deref(), Some("/"), "…to Connect");
+}
+
+#[test]
+fn a_back_press_on_app_settings_reached_from_connect_pops_rather_than_asking() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut root: Root = RenderRoot::new();
+    let mut state = MuxrApp.init();
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
+    let mut tcx = TextContext::new();
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    app_nav().push(APP_SETTINGS_ROUTE);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    assert_eq!(state.nav.controller().depth(), 2);
+
+    frust::push_back_press();
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    assert_eq!(
+        current_path(&state).as_deref(),
+        Some("/"),
+        "back reached Connect"
+    );
+}
+
+#[test]
+fn app_settings_pushed_from_server_settings_pops_back_to_it() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut root: Root = RenderRoot::new();
+    let mut state = MuxrApp.init();
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
+    let mut tcx = TextContext::new();
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    expect_connection_controller().connect(mock_target());
+    app_nav().push("/settings");
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    app_nav().push(APP_SETTINGS_ROUTE);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    assert!(
+        node_values(&root).iter().any(|v| v == "font family"),
+        "{:?}",
+        node_values(&root)
+    );
+
+    app_nav().pop();
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    assert_eq!(state.nav.controller().depth(), 2, "the shell stays placed");
+    let values = shown(&root);
+    assert!(
+        values.iter().any(|v| v == "server settings") && !values.iter().any(|v| v == "font family"),
+        "back landed on server settings: {values:?}"
     );
 }

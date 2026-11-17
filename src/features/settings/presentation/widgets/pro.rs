@@ -2,7 +2,7 @@ use frust::AnyView;
 use frust::icons::{REFRESH, STAR_FILLED};
 
 use crate::features::pro::domain::entities::Entitlement;
-use crate::features::settings::presentation::pages::{self, SettingsState};
+use crate::features::settings::presentation::app_pages::{self, AppSettingsState};
 use crate::ui::palette::Palette;
 
 use super::rows::{RowAction, RowMark, ValueTone, button_row, settings_row};
@@ -22,7 +22,7 @@ pub(in super::super) fn pro_rows(
     entitlement: Entitlement,
     restoring: bool,
     colors: &Palette,
-) -> Vec<AnyView<SettingsState>> {
+) -> Vec<AnyView<AppSettingsState>> {
     let tone = match entitlement {
         Entitlement::Pro => ValueTone::Ok,
         Entitlement::Pending => ValueTone::Warn,
@@ -51,7 +51,7 @@ pub(in super::super) fn pro_rows(
                 RESTORE_SUBTITLE
             },
             RESTORE_BUTTON_LABEL,
-            pages::restore_purchases,
+            app_pages::restore_purchases,
             colors,
         ));
     }

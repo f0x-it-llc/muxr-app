@@ -19,6 +19,7 @@ use crate::connection::ConnectionController;
 use crate::features::connect::presentation::pages::{add_server_page, connect_page};
 use crate::features::sessions::presentation::pages::sessions_page;
 use crate::features::sessions::presentation::widgets::host_of;
+use crate::features::settings::presentation::app_pages::app_settings_page;
 use crate::features::settings::presentation::pages::settings_page;
 use crate::features::terminal::presentation::pages::terminal_page;
 
@@ -26,6 +27,7 @@ pub(crate) const CONNECT_LOCATION: &str = "/";
 const SESSIONS_ROUTE: &str = "/sessions";
 const TERMINAL_ROUTE: &str = "/terminal";
 pub const SETTINGS_ROUTE: &str = "/settings";
+pub const APP_SETTINGS_ROUTE: &str = "/settings/app";
 
 /// The `/terminal` query keys, shared by the screens that push it and the one that reads it.
 pub const TERMINAL_SESSION_QUERY_KEY: &str = "session";
@@ -84,6 +86,8 @@ pub struct RouteMeta {
     pub title: BarTitle,
     pub leading: BarLeading,
     pub action: Option<BarAction>,
+    /// Whether the session guard bounces this route while no server is connected.
+    pub guarded: bool,
 }
 
 impl RouteMeta {
@@ -108,19 +112,32 @@ pub fn route_meta(path: &str) -> Option<RouteMeta> {
             title: BarTitle::ConnectedHost,
             leading: BarLeading::Brand,
             action: Some(BarAction::Settings),
+            guarded: true,
         }),
         TERMINAL_ROUTE => Some(RouteMeta {
             title: BarTitle::Fixed("terminal"),
             leading: BarLeading::Back,
             action: Some(BarAction::TerminalMenu),
+            guarded: true,
         }),
         SETTINGS_ROUTE => Some(RouteMeta {
             title: BarTitle::Fixed("server settings"),
             leading: BarLeading::Back,
             action: None,
+            guarded: true,
+        }),
+        APP_SETTINGS_ROUTE => Some(RouteMeta {
+            title: BarTitle::Fixed("app settings"),
+            leading: BarLeading::Back,
+            action: None,
+            guarded: false,
         }),
         _ => None,
     }
+}
+
+fn is_guarded(path: &str) -> bool {
+    route_meta(path).is_some_and(|meta| meta.guarded)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -245,7 +262,8 @@ impl Nav {
     }
 
     /// The leaf becomes the inner navigator's root, so a back press at the landing route falls
-    /// through to the outer navigator; the page below stays for the shell's closing pop.
+    /// through to the outer navigator; the page below stays for the shell's closing pop. An
+    /// unguarded landing has no connection to confirm leaving, so its back press just pops.
     fn place_shell(&self, pages: Vec<ResolvedPage<AppState>>, verb: Verb) {
         let controller = self.router.controller();
         let mut pages = pages.into_iter();
@@ -258,14 +276,13 @@ impl Nav {
             Verb::Push => route_transition(),
             Verb::Go => TransitionSpec::NONE,
         };
-        controller.push_with_options(
-            move || shell.build(),
-            PushOptions::opaque()
-                .transition(transition)
+        let mut options = PushOptions::opaque().transition(transition);
+        if is_guarded(&route.path) {
+            options = options
                 .back(BackPolicy::DismissAnimated)
-                .dismiss_signal(publish_sessions_back_signal())
-                .route(route),
-        );
+                .dismiss_signal(publish_sessions_back_signal());
+        }
+        controller.push_with_options(move || shell.build(), options.route(route));
         self.pending_shell.set(Some(controller.route_generation()));
         self.pending_unwind.set(None);
     }
@@ -483,15 +500,15 @@ pub fn app_nav() -> Nav {
     )
 }
 
-/// Bounces an unauthenticated navigation into the shell's subtree back to `/`; the subtree comes
-/// from [`route_meta`], so a new shell route is guarded on arrival. Reads the captured controller,
-/// never context, so it is safe from an owner-less press handler. Runs at navigation time only.
+/// Bounces an unauthenticated navigation into a guarded shell route back to `/`; the flag comes
+/// from [`route_meta`], so a new shell route states its guarding on arrival. Reads the captured
+/// controller, never context, so it is safe from an owner-less press handler. Runs at navigation
+/// time only.
 pub(crate) fn session_guard_with(
     connection: Arc<ConnectionController>,
 ) -> impl Fn(&Location) -> Option<String> + 'static {
     move |loc: &Location| {
-        let guarded = route_meta(&loc.path).is_some();
-        if guarded && !connection.connected.get_untracked() {
+        if is_guarded(&loc.path) && !connection.connected.get_untracked() {
             Some(CONNECT_LOCATION.to_string())
         } else {
             None
@@ -543,6 +560,10 @@ pub(crate) fn build_routes(
                 Route::new(SETTINGS_ROUTE, {
                     let overlays = overlays.clone();
                     move |_params: &RouteParams| settings_page(overlays.clone())
+                }),
+                Route::new(APP_SETTINGS_ROUTE, {
+                    let overlays = overlays.clone();
+                    move |_params: &RouteParams| app_settings_page(overlays.clone())
                 }),
             ],
         ),
@@ -609,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn the_guarded_set_is_exactly_the_shells_subtree() {
+    fn the_guarded_set_is_the_shells_subtree_less_app_settings() {
         let connection = Arc::new(ConnectionController::detached());
         let guard = session_guard_with(Arc::clone(&connection));
 
@@ -621,6 +642,12 @@ mod tests {
                 "{path} bounces while unauthenticated"
             );
         }
+        assert!(route_meta(APP_SETTINGS_ROUTE).is_some(), "in the shell");
+        assert_eq!(
+            guard(&Location::parse(APP_SETTINGS_ROUTE)),
+            None,
+            "app settings opens with no server"
+        );
         assert_eq!(route_meta(CONNECT_LOCATION), None);
         assert_eq!(guard(&Location::parse(CONNECT_LOCATION)), None);
 
@@ -644,7 +671,12 @@ mod tests {
             1,
             "/ is outside the shell"
         );
-        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE] {
+        for path in [
+            SESSIONS_ROUTE,
+            TERMINAL_ROUTE,
+            SETTINGS_ROUTE,
+            APP_SETTINGS_ROUTE,
+        ] {
             assert_eq!(
                 router.resolve(path).page_count(),
                 2,
@@ -702,7 +734,12 @@ mod tests {
     #[test]
     fn connect_is_the_only_route_without_a_bar() {
         assert_eq!(route_meta("/"), None, "Connect is full-bleed, no bar");
-        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE] {
+        for path in [
+            SESSIONS_ROUTE,
+            TERMINAL_ROUTE,
+            SETTINGS_ROUTE,
+            APP_SETTINGS_ROUTE,
+        ] {
             assert!(route_meta(path).is_some(), "{path} carries a bar");
         }
     }
@@ -721,6 +758,18 @@ mod tests {
             route_meta(SETTINGS_ROUTE).map(|m| m.leading),
             Some(BarLeading::Back)
         );
+        assert_eq!(
+            route_meta(APP_SETTINGS_ROUTE).map(|m| m.leading),
+            Some(BarLeading::Back)
+        );
+    }
+
+    #[test]
+    fn app_settings_is_titled_and_carries_no_bar_action() {
+        let meta = route_meta(APP_SETTINGS_ROUTE).expect("a shell route");
+        assert_eq!(meta.title, BarTitle::Fixed("app settings"));
+        assert_eq!(meta.action, None);
+        assert!(!meta.guarded);
     }
 
     #[test]

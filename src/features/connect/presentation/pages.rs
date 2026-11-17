@@ -19,7 +19,7 @@ use super::widgets::credential_dialogs::{
 };
 use super::widgets::cta::{Prominence, connect_button};
 use super::widgets::fields::{server_url_field, token_field};
-use super::widgets::getting_started::info_affordance;
+use super::widgets::getting_started::{app_settings_affordance, info_affordance};
 use super::widgets::layout::clamped_layout;
 pub use super::widgets::layout::connect_layout;
 use super::widgets::pro_gate::{gated_keyring_unlock, gated_saved_row_tap, server_limit_prompt};
@@ -316,14 +316,19 @@ impl Component for ConnectScreen {
                 &state.qr_permission_pending,
                 &state.pro,
             );
-            return EitherOf3::B(tablet_screen(
-                &theme,
-                &live,
-                &saved,
-                rule.is_full(),
-                qr,
-                &state.overlays,
-            ));
+            // Collapsed, the tablet screen mounts the info mark itself, so the gear steps beside it.
+            return EitherOf3::B(
+                stack()
+                    .child(tablet_screen(
+                        &theme,
+                        &live,
+                        &saved,
+                        rule.is_full(),
+                        qr,
+                        &state.overlays,
+                    ))
+                    .child(app_settings_affordance(&state.app_nav, !rule.is_full())),
+            );
         }
         let content = clamped_layout(
             connect_pieces_with(&theme, Some(&live), &saved),
@@ -334,7 +339,8 @@ impl Component for ConnectScreen {
             stack()
                 .child(page_backdrop::<ConnectState>())
                 .child(scroll_view(content))
-                .child(info_affordance(&state.overlays)),
+                .child(info_affordance(&state.overlays))
+                .child(app_settings_affordance(&state.app_nav, true)),
         )
     }
 }

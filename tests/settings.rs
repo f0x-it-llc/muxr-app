@@ -1,4 +1,4 @@
-//! Headless coverage for the `/settings` screen: a `RenderRoot` over the real page builder, driven through `tests/support`.
+//! Headless coverage for the `/settings` and `/settings/app` screens: a `RenderRoot` over the real page builders, driven through `tests/support`.
 //! The screen is the bottom layer of a `Stack` under an empty navigator; dialogs and picker sheets are located by painted geometry.
 //! Every frame lays out at [`SURFACE`] (the screen runs past 1000px), hence the local `pump_once`.
 
@@ -35,6 +35,7 @@ use muxr::features::connect::domain::entities::{
 use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::connect::domain::repositories::CredentialService;
 use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
+use muxr::features::connect::presentation::widgets::getting_started::GETTING_STARTED_TITLE;
 use muxr::features::pro::data::repositories::MockEntitlementRepository;
 use muxr::features::pro::di::{
     SharedEntitlementRepository, expect_pro_controller, mock_entitlement,
@@ -45,15 +46,14 @@ use muxr::features::pro::domain::entities::{
 use muxr::features::pro::domain::repositories::EntitlementRepository;
 use muxr::features::pro::presentation::controller::ProController;
 use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, RESTORE_LABEL};
+use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
-use muxr::features::settings::data::repositories::{
-    MockAuthTokensRepository, MockPreferencesRepository,
-};
 use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
 use muxr::features::settings::domain::entities::{
     AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken,
 };
 use muxr::features::settings::domain::repositories::AuthTokensRepository;
+use muxr::features::settings::presentation::app_pages::app_settings_page;
 use muxr::features::settings::presentation::controller::SettingsController;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
@@ -62,7 +62,7 @@ use muxr::features::settings::presentation::scramble::{
 use muxr::features::settings::presentation::widgets::{PLAN_LABEL, PRO_GROUP_LABEL};
 use muxr::fonts::catalog::{CatalogStatus, FontState};
 use muxr::fonts::source::FontSource;
-use muxr::routes::{app_nav, install_app_router};
+use muxr::routes::{APP_SETTINGS_ROUTE, app_nav, install_app_router};
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
@@ -86,14 +86,9 @@ const CONNECTED_CHIP: &str = "connected";
 const ADD_SERVER_ROW: &str = "add server";
 
 const SEEDED_TOKENS: [&str; 2] = ["zelli-mobile-100-71-31-57-mr3g6w5g", "token_2"];
-const GROUPS: [&str; 6] = [
-    "CONNECTION",
-    "AUTH TOKENS",
-    "SAVED SERVERS",
-    "MUXR PRO",
-    "TERMINAL APPEARANCE",
-    "SESSION POLL",
-];
+const SERVER_GROUPS: [&str; 4] = ["CONNECTION", "AUTH TOKENS", "SAVED SERVERS", "APP"];
+const APP_GROUPS: [&str; 4] = ["TERMINAL", "BEHAVIOUR", "MUXR PRO", "ABOUT"];
+const APP_SETTINGS_ROW: &str = "app settings";
 
 const CRED_ENDPOINT: &str = "cred.example:50051";
 const CRED_LABEL: &str = "Cred rig";
@@ -117,6 +112,10 @@ fn mount_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
     support::mount_with_metrics(metrics, Harness::mount)
 }
 
+fn app_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
+    support::mount_with_metrics(metrics, Harness::app)
+}
+
 fn bounds_by_label(root: &RenderRoot<AppState, AnyView<AppState>>, label: &str) -> Rect {
     root.semantics()
         .nodes
@@ -137,6 +136,12 @@ fn all_bounds_by_label(root: &RenderRoot<AppState, AnyView<AppState>>, label: &s
 
 type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 
+#[derive(Clone, Copy)]
+enum Page {
+    Server,
+    App,
+}
+
 struct Harness {
     nav: NavigatorController<AppState>,
     root: RenderRoot<AppState, AnyView<AppState>>,
@@ -151,6 +156,21 @@ impl Harness {
     }
 
     fn mount_seeded(seed: impl FnOnce()) -> Self {
+        Self::mount_page(Page::Server, seed)
+    }
+
+    /// The device-wide page, left disconnected: it needs no server.
+    fn app() -> Self {
+        Self::app_seeded(|| {})
+    }
+
+    fn app_seeded(seed: impl FnOnce()) -> Self {
+        let mut harness = Self::mount_page(Page::App, seed);
+        harness.await_preferences();
+        harness
+    }
+
+    fn mount_page(page: Page, seed: impl FnOnce()) -> Self {
         let state = MuxrApp.init();
         seed();
         let nav: NavigatorController<AppState> = NavigatorController::new();
@@ -159,8 +179,12 @@ impl Harness {
         let logic: Logic = Box::new(move |_state: &mut AppState| {
             let screen_nav = logic_nav.clone();
             let overlay_nav = logic_nav.clone();
+            let screen = match page {
+                Page::Server => any(settings_page(screen_nav)),
+                Page::App => any(app_settings_page(screen_nav)),
+            };
             any(Stack(vec![
-                any(settings_page(screen_nav)),
+                screen,
                 any(navigator(&overlay_nav, || {
                     any(SizedBox::<AppState>(
                         Some(f64::INFINITY),
@@ -235,6 +259,13 @@ impl Harness {
                 "timed out waiting for {what}; on screen: {:?}",
                 node_values(&self.root)
             );
+            self.pump_once();
+        }
+    }
+
+    /// The mock store answers in one poll; a few rounds land the load and the Pro refresh.
+    fn await_preferences(&mut self) {
+        for _ in 0..3 {
             self.pump_once();
         }
     }
@@ -449,25 +480,44 @@ fn confirm(h: &mut Harness, dialog: &Chrome) {
     h.flush();
 }
 
+fn group_labels_in_order(h: &Harness) -> Vec<String> {
+    let known = [
+        SERVER_GROUPS.as_slice(),
+        APP_GROUPS.as_slice(),
+        &["SERVERS", "TERMINAL APPEARANCE", "SESSION POLL"],
+    ]
+    .concat();
+    node_values(&h.root)
+        .into_iter()
+        .filter(|value| known.contains(&value.as_str()))
+        .collect()
+}
+
 #[test]
-fn all_six_groups_and_the_disconnect_action_render() {
+fn the_server_page_shows_only_its_own_groups_and_the_disconnect_action() {
     let _g = serial();
     let _ambient = setup();
     let h = Harness::connected();
 
-    assert_eq!(PRO_GROUP_LABEL.to_uppercase(), "MUXR PRO");
-
+    assert_eq!(
+        group_labels_in_order(&h),
+        SERVER_GROUPS,
+        "{:?}",
+        node_values(&h.root)
+    );
     let values = node_values(&h.root);
-    for group in GROUPS {
-        assert!(
-            values.iter().any(|v| v == group),
-            "the {group:?} group label renders: {values:?}"
-        );
-    }
     for label in [
         "server url",
         "tls certificate",
         "zellij version",
+        APP_SETTINGS_ROW,
+    ] {
+        assert!(
+            values.iter().any(|v| v == label),
+            "the {label:?} row renders: {values:?}"
+        );
+    }
+    for moved in [
         PLAN_LABEL,
         "font family",
         "font size",
@@ -476,16 +526,167 @@ fn all_six_groups_and_the_disconnect_action_render() {
         "bell notifications",
     ] {
         assert!(
-            values.iter().any(|v| v == label),
-            "the {label:?} row renders: {values:?}"
+            !values.iter().any(|v| v == moved),
+            "the device-wide {moved:?} row lives on the app page: {values:?}"
         );
     }
     assert!(values.iter().any(|v| v == "create new token"), "{values:?}");
-    assert!(values.iter().any(|v| v == "Free"), "{values:?}");
+    assert!(
+        values.iter().any(|v| v == "fonts, bell, Muxr Pro, servers"),
+        "{values:?}"
+    );
     let labels = node_labels(&h.root);
     assert!(
         labels.iter().any(|l| l == LOCK_AND_DISCONNECT),
         "{labels:?}"
+    );
+}
+
+#[test]
+fn the_server_pages_app_settings_row_pushes_the_app_page() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    h.tap_value(APP_SETTINGS_ROW);
+    h.settle();
+
+    assert_eq!(
+        h.nav
+            .route_stack()
+            .current_route()
+            .map(|location| location.path.clone())
+            .as_deref(),
+        Some(APP_SETTINGS_ROUTE),
+        "the row navigates to the app page"
+    );
+}
+
+#[test]
+fn the_app_page_renders_its_four_groups_in_order_on_a_phone() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = Harness::app();
+
+    assert_eq!(PRO_GROUP_LABEL.to_uppercase(), "MUXR PRO");
+    assert_eq!(
+        group_labels_in_order(&h),
+        APP_GROUPS,
+        "{:?}",
+        node_values(&h.root)
+    );
+    let values = node_values(&h.root);
+    let at = |needle: &str| {
+        values
+            .iter()
+            .position(|v| v == needle)
+            .unwrap_or_else(|| panic!("{needle:?} renders: {values:?}"))
+    };
+    let order = [
+        "font family",
+        "font size",
+        "cursor style",
+        "layout refresh",
+        "bell notifications",
+        PLAN_LABEL,
+        "version",
+        "getting started",
+    ];
+    for pair in order.windows(2) {
+        assert!(at(pair[0]) < at(pair[1]), "{pair:?}: {values:?}");
+    }
+    assert!(values.iter().any(|v| v == "Free"), "{values:?}");
+    for absent in ["licences", "server url", APP_SETTINGS_ROW] {
+        assert!(
+            !values.iter().any(|v| v == absent),
+            "{absent:?}: {values:?}"
+        );
+    }
+    assert!(
+        !node_labels(&h.root)
+            .iter()
+            .any(|l| l == LOCK_AND_DISCONNECT),
+        "nothing on this page is about a server"
+    );
+}
+
+#[test]
+fn the_app_page_mounts_and_works_with_no_server_connected() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::app();
+    assert!(!expect_connection_controller().connected.get_untracked());
+
+    let sheet = open_picker(&mut h, "cursor style");
+    pick(&mut h, &sheet, 0, 2);
+    h.pump_until_values("bar", |values| values.iter().any(|v| v == "bar"));
+
+    h.tap_label("bell notifications");
+    let deadline = Instant::now() + PUMP_DEADLINE;
+    while h.bell_state() != Some(Toggled::False) {
+        assert!(Instant::now() < deadline, "the bell never turned off");
+        h.pump_once();
+    }
+    assert!(
+        !expect_connection_controller().connected.get_untracked(),
+        "…and nothing dialed a server"
+    );
+}
+
+#[test]
+fn the_version_row_shows_the_package_version() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = Harness::app();
+
+    let values = node_values(&h.root);
+    let at = values
+        .iter()
+        .position(|v| v == "version")
+        .unwrap_or_else(|| panic!("the version row renders: {values:?}"));
+    assert_eq!(values[at + 1], env!("CARGO_PKG_VERSION"), "{values:?}");
+}
+
+#[test]
+fn the_getting_started_row_opens_the_connect_dialog() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::app();
+
+    h.tap_value("getting started");
+    h.settle();
+
+    assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
+    let shown = [node_values(&h.root), node_labels(&h.root)].concat();
+    assert!(
+        shown.iter().any(|v| v == GETTING_STARTED_TITLE),
+        "{shown:?}"
+    );
+}
+
+#[test]
+fn a_full_band_tablet_lays_the_app_page_out_in_two_columns() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = app_with_metrics(Some(support::metrics_at(1024.0, 720.0)));
+    h.frame();
+
+    let terminal = value_center(&h, "TERMINAL");
+    let pro = value_center(&h, "MUXR PRO");
+    let behaviour = value_center(&h, "BEHAVIOUR");
+    let about = value_center(&h, "ABOUT");
+    assert!(
+        (terminal.y - pro.y).abs() < 0.5,
+        "terminal and muxr pro open each column: {terminal:?} vs {pro:?}"
+    );
+    assert!(pro.x > terminal.x + 100.0, "side by side: {pro:?}");
+    assert!(
+        (behaviour.x - terminal.x).abs() < 20.0 && (about.x - terminal.x).abs() < 20.0,
+        "behaviour and about stay in the left column: {behaviour:?} {about:?}"
+    );
+    assert!(
+        terminal.y < behaviour.y && behaviour.y < about.y,
+        "{terminal:?} {behaviour:?} {about:?}"
     );
 }
 
@@ -1359,9 +1560,11 @@ fn with_vault_credential(unlocked: bool, pro: bool) -> Harness {
         values.iter().any(|v| v == CRED_LABEL)
     });
     if pro {
-        harness.pump_until_values("the plan row to read Pro", |values| {
-            values.iter().any(|v| v == "Pro")
-        });
+        pump_until(
+            &mut harness,
+            "the mount's entitlement refresh to read Pro",
+            || expect_pro_controller().entitlement.get_untracked() == Entitlement::Pro,
+        );
     }
     harness
 }
@@ -1773,7 +1976,7 @@ fn the_add_server_row_closes_the_group_and_pushes_the_add_page() {
 fn the_pro_group_prints_free_and_its_plan_row_opens_the_paywall() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     let values = node_values(&h.root);
     assert!(values.iter().any(|v| v == "Free"), "{values:?}");
@@ -1811,7 +2014,7 @@ fn the_pro_group_prints_free_and_its_plan_row_opens_the_paywall() {
 fn a_pro_entitlement_prints_pro_and_the_plan_row_leads_nowhere() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     let mock = mock_entitlement().expect("tests/support opted this process into the mock");
     mock.set_entitlement(Entitlement::Pro);
 
@@ -1840,7 +2043,7 @@ fn a_pro_entitlement_prints_pro_and_the_plan_row_leads_nowhere() {
 fn restoring_from_the_paywall_flips_the_plan_row_and_closes_the_sheet() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     let mock = mock_entitlement().expect("tests/support opted this process into the mock");
     mock.set_entitlement(Entitlement::Pro);
 
@@ -1862,10 +2065,10 @@ fn restoring_from_the_paywall_flips_the_plan_row_and_closes_the_sheet() {
 }
 
 #[test]
-fn mounting_settings_refreshes_the_pro_entitlement_beside_the_apps_own_launch_refresh() {
+fn mounting_app_settings_refreshes_the_pro_entitlement_beside_the_apps_own_launch_refresh() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     let mock = mock_entitlement().expect("tests/support opted this process into the mock");
 
     pump_until(
@@ -1893,7 +2096,7 @@ fn every_picker_opens_with_its_own_options_and_the_stored_one_checked() {
     let _ambient = setup();
 
     for (row, options, selected, _) in PICKERS {
-        let mut h = Harness::connected();
+        let mut h = Harness::app();
         let sheet = open_picker(&mut h, row);
 
         assert_eq!(
@@ -1943,7 +2146,7 @@ fn picking_an_option_persists_it_and_updates_the_row() {
     let _ambient = setup();
 
     for (row, options, selected, expected) in PICKERS {
-        let mut h = Harness::connected();
+        let mut h = Harness::app();
         let sheet = open_picker(&mut h, row);
 
         pick(&mut h, &sheet, selected, options - 1);
@@ -1958,7 +2161,7 @@ fn a_second_tap_on_a_picker_row_closes_the_sheet_once_and_keeps_the_route() {
     // The picker's close is immediate, but a pop only lands at the next rebuild.
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     let floor = h.push_route_floor();
 
     let before = h.frame();
@@ -1981,7 +2184,7 @@ fn a_second_tap_on_a_picker_row_closes_the_sheet_once_and_keeps_the_route() {
 fn a_picked_value_is_still_checked_when_the_sheet_is_reopened() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     let first = open_picker(&mut h, "cursor style");
     let (before_origin, row_height) = first.selected_pick_row();
@@ -2002,7 +2205,7 @@ fn a_picked_value_is_still_checked_when_the_sheet_is_reopened() {
 fn picking_font_size_20px_through_the_picker_persists_and_reads_back() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     let sheet = open_picker(&mut h, "font size");
     pick(&mut h, &sheet, 2, 10);
@@ -2014,7 +2217,7 @@ fn picking_font_size_20px_through_the_picker_persists_and_reads_back() {
 fn picks_the_largest_font_size_at(width: f64, height: f64) {
     let _g = serial();
     let _ambient = setup();
-    let mut h = mount_with_metrics(Some(support::metrics_at(width, height)));
+    let mut h = app_with_metrics(Some(support::metrics_at(width, height)));
     h.frame();
     let last = format!(
         "{}px",
@@ -2221,7 +2424,7 @@ fn the_font_sheet_lists_the_bundled_face_and_says_so_quietly_when_the_catalog_is
     let _g = serial();
     let _ambient = setup();
     let _cache = fresh_font_cache("offline");
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     app_toasts().clear();
 
     let sheet = open_font_picker(&mut h);
@@ -2258,7 +2461,7 @@ fn a_cached_download_is_offered_beside_the_bundled_face_and_persists_its_family(
     let _ambient = setup();
     let cache = fresh_font_cache("cached");
     seed_cached_family(&cache);
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     assert!(
         muxr::fonts::installed_families().contains(&CACHED_FAMILY.to_string()),
@@ -2291,7 +2494,7 @@ fn selecting_a_font_row_plays_the_staged_exit_rather_than_vanishing_the_sheet() 
     let _ambient = setup();
     let cache = fresh_font_cache("anti-vanish");
     seed_cached_family(&cache);
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     let sheet = open_font_picker(&mut h);
     let row = pick_row(&sheet, 0, 1);
@@ -2323,7 +2526,7 @@ fn the_catalog_lists_downloadable_fonts_and_a_download_installs_and_flips_the_ro
     let _ambient = setup();
     let _cache = fresh_font_cache("catalog");
     let fetched = use_fixture_catalog();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     app_toasts().clear();
 
     open_font_picker(&mut h);
@@ -2412,7 +2615,7 @@ fn a_download_whose_bytes_do_not_verify_fails_the_row_and_caches_nothing() {
     let _ambient = setup();
     let cache = fresh_font_cache("corrupt");
     use_fixture_catalog_serving(true);
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     app_toasts().clear();
 
     open_font_picker(&mut h);
@@ -2529,7 +2732,7 @@ fn downloading_a_font_drives_its_progress_fraction_from_zero_toward_one_with_thr
     muxr::fonts::use_font_source_for_tests(Arc::new(StagedFontSource {
         manifest: staged_manifest(FAMILY, true).into_bytes(),
     }));
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     open_font_picker(&mut h);
     await_catalog(&mut h, CatalogStatus::Ready);
@@ -2595,7 +2798,7 @@ fn an_entry_with_no_size_hint_stays_indeterminate_while_downloading() {
     muxr::fonts::use_font_source_for_tests(Arc::new(StagedFontSource {
         manifest: staged_manifest(FAMILY, false).into_bytes(),
     }));
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     open_font_picker(&mut h);
     await_catalog(&mut h, CatalogStatus::Ready);
@@ -2642,7 +2845,7 @@ fn the_downloading_row_paints_a_progress_bar_and_flips_to_selectable_once_instal
     muxr::fonts::use_font_source_for_tests(Arc::new(StagedFontSource {
         manifest: staged_manifest(FAMILY, true).into_bytes(),
     }));
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     open_font_picker(&mut h);
     await_catalog(&mut h, CatalogStatus::Ready);
@@ -2718,7 +2921,7 @@ fn font_sheet_runs(installed: usize, available: usize, note: bool) -> usize {
 fn the_bell_row_toggles_its_preference() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     assert_eq!(
         h.bell_state(),
@@ -2746,7 +2949,7 @@ fn the_bell_row_toggles_its_preference() {
 fn the_bell_switch_is_a_real_switch_role_whose_own_tap_flips_it() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
 
     assert_eq!(
         h.bell_state(),
@@ -2850,7 +3053,7 @@ fn a_full_band_tablet_packs_the_cards_into_two_columns() {
     h.frame();
 
     let values = node_values(&h.root);
-    for group in GROUPS {
+    for group in SERVER_GROUPS {
         assert!(values.iter().any(|v| v == group), "{group:?}: {values:?}");
     }
     let connection = value_center(&h, "CONNECTION");
@@ -2862,10 +3065,10 @@ fn a_full_band_tablet_packs_the_cards_into_two_columns() {
     assert!(tokens.x > connection.x + 100.0, "side by side: {tokens:?}");
     let saved = value_center(&h, "SAVED SERVERS");
     assert!(saved.y > connection.y, "the left column stacks downward");
-    let pro = value_center(&h, "MUXR PRO");
+    let app = value_center(&h, "APP");
     assert!(
-        pro.y < saved.y - 100.0,
-        "the right column packs upward: pro {pro:?} vs saved {saved:?}"
+        app.x > connection.x + 100.0 && app.y > tokens.y,
+        "the app group packs under the tokens: app {app:?} vs tokens {tokens:?}"
     );
     assert!(
         node_labels(&h.root)
@@ -2895,7 +3098,7 @@ fn a_collapsed_band_tablet_stacks_the_cards() {
 fn the_restore_row_restores_once_and_toasts_when_nothing_is_found() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     let mock = mock_entitlement().expect("tests/support opted this process into the mock");
     app_toasts().clear();
 
@@ -2918,7 +3121,7 @@ fn the_restore_row_restores_once_and_toasts_when_nothing_is_found() {
 fn the_restore_row_is_absent_on_pro() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     let mock = mock_entitlement().expect("tests/support opted this process into the mock");
     mock.set_entitlement(Entitlement::Pro);
     let controller = expect_pro_controller();
@@ -2936,7 +3139,7 @@ fn the_restore_row_is_absent_on_pro() {
 fn a_failed_restore_from_the_row_toasts_the_failure_message_once() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     let mock = mock_entitlement().expect("tests/support opted this process into the mock");
     let failure = AppFailure::Network("store unreachable".to_string());
     mock.fail_next_restore(failure.clone());
@@ -3018,15 +3221,13 @@ fn a_second_restore_tap_while_the_first_is_in_flight_leaves_restoring_standing()
     let _ambient = setup();
     let gate = Arc::new(Gate::default());
     let gated = Arc::clone(&gate);
-    let mut h = Harness::mount_seeded(move || {
+    let mut h = Harness::app_seeded(move || {
         let store: SharedEntitlementRepository = Arc::new(GatedStore {
             inner: MockEntitlementRepository::free(),
             gate: gated,
         });
         provide_context(Arc::new(ProController::new(store)));
     });
-    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
-    h.await_tokens();
     let restoring = |values: &[String]| values.iter().any(|v| v == "restoring\u{2026}");
     app_toasts().clear();
 
@@ -3058,7 +3259,7 @@ fn a_second_restore_tap_while_the_first_is_in_flight_leaves_restoring_standing()
 fn a_purchase_side_busy_never_switches_the_restore_row_to_restoring() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::app();
     let restoring = |values: &[String]| values.iter().any(|v| v == "restoring\u{2026}");
 
     let pro = expect_pro_controller();
@@ -3214,7 +3415,6 @@ fn held_switch_rig() -> (
     let keyring = KeyringHandle::new();
     let controller = Arc::new(SettingsController::new(
         Arc::new(MockAuthTokensRepository::seeded()),
-        Arc::new(MockPreferencesRepository::default()),
         Arc::new(MockSavedServersRepository::with_servers(vec![
             credential_row(true),
         ])),

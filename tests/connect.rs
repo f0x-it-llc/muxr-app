@@ -100,6 +100,8 @@ const INSECURE_CHIP: &str = "insecure";
 
 const QR_LABEL: &str = "Pair by QR code";
 const INFO_LABEL: &str = "Getting started";
+const APP_SETTINGS_LABEL: &str = "App settings";
+const APP_SETTINGS_ROUTE: &str = "/settings/app";
 const GETTING_STARTED_TITLE: &str = "Getting started with Muxr";
 const OPEN_GUIDE_LABEL: &str = "Open guide";
 const CLOSE_LABEL: &str = "Close";
@@ -818,8 +820,8 @@ fn the_qr_affordance_paints_a_vector_rather_than_a_font_glyph() {
         .len();
     assert_eq!(
         scene.paths.len(),
-        2 * rows + 3,
-        "every vector on the screen is the square's, the getting-started, the dock's or a row's lock/delete mark: {:?}",
+        2 * rows + 4,
+        "every vector on the screen is the square's, the getting-started, the gear's, the dock's or a row's lock/delete mark: {:?}",
         scene.paths
     );
     let (origin, size) = *scene
@@ -956,6 +958,80 @@ fn the_guide_action_hands_the_docs_url_to_the_link_opener_and_closes() {
         before,
         "…and the dialog closed behind it"
     );
+}
+
+fn gear_button(node: &Node) -> bool {
+    node.role() == Role::Button && node.label() == Some(APP_SETTINGS_LABEL)
+}
+
+fn top_path(harness: &Harness) -> Option<String> {
+    harness
+        .nav
+        .route_stack()
+        .current_route()
+        .map(|location| location.path.clone())
+}
+
+#[test]
+fn the_app_settings_gear_sits_beside_the_info_mark_with_no_server_connected() {
+    let _g = serial();
+    let _ambient = setup();
+    let harness = Harness::mount();
+    assert!(!expect_connection_controller().connected.get_untracked());
+
+    let gear = harness.bounds("the app-settings gear", gear_button);
+    let info = harness.bounds("the getting-started affordance", info_button);
+    assert!(
+        gear.x1 <= info.x0 && (gear.y0 - info.y0).abs() < 0.5,
+        "the gear sits just left of the info mark, on its line: {gear:?} vs {info:?}"
+    );
+    assert!(
+        (gear.width() - info.width()).abs() < 0.5 && (gear.height() - info.height()).abs() < 0.5,
+        "…at the same size: {gear:?} vs {info:?}"
+    );
+}
+
+#[test]
+fn the_app_settings_gear_pushes_the_app_settings_route() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut harness = Harness::mount();
+
+    harness.tap_node("the app-settings gear", gear_button);
+    harness.settle();
+
+    assert_eq!(
+        top_path(&harness).as_deref(),
+        Some(APP_SETTINGS_ROUTE),
+        "the gear opens app settings with nothing connected"
+    );
+}
+
+#[test]
+fn both_tablet_bands_carry_the_app_settings_gear() {
+    let _g = serial();
+    let _ambient = setup();
+    for size in [FULL_TABLET, COLLAPSED_TABLET] {
+        let mut harness = sized(size, Harness::mount);
+        assert_eq!(count(&harness, gear_button), 1, "{size:?}: one gear");
+        let gear = harness.bounds("the app-settings gear", gear_button);
+        assert!(
+            gear.x0 > size.width / 2.0 && gear.y1 < size.height / 4.0,
+            "{size:?}: top trailing corner: {gear:?}"
+        );
+        if count(&harness, info_button) == 1 {
+            let info = harness.bounds("the info mark", info_button);
+            assert!(gear.x1 <= info.x0, "{size:?}: clear of the info mark");
+        }
+
+        harness.tap_node("the app-settings gear", gear_button);
+        harness.settle();
+        assert_eq!(
+            top_path(&harness).as_deref(),
+            Some(APP_SETTINGS_ROUTE),
+            "{size:?}"
+        );
+    }
 }
 
 #[test]

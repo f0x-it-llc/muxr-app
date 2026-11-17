@@ -23,21 +23,18 @@ pub(in super::super) const DISCONNECT_COPY: &str = "Locks the keyring on this de
 pub(in super::super) const DISCONNECT_LABEL: &str = "Lock & disconnect";
 
 /// The toggle owns its own tap target, so the row has no outer `GestureDetector`.
-pub(super) fn bell_notifications_row(
+pub(super) fn bell_notifications_row<S: 'static>(
     on: bool,
     colors: &Palette,
-    on_toggle: impl Fn(&mut SettingsState) + 'static,
-) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+    on_toggle: impl Fn(&mut S) + 'static,
+) -> AnyView<S> // erasure: keep accumulator into Vec<AnyView>
 {
     let theme = active_theme();
-    let toggle_view =
-        toggle::<SettingsState, _>(on, move |state: &mut SettingsState, _requested: bool| {
-            on_toggle(state)
-        })
+    let toggle_view = toggle::<S, _>(on, move |state: &mut S, _requested: bool| on_toggle(state))
         .label("bell notifications");
     let label_column = stretch_column((
         text("bell notifications").style(inked(&theme.type_scale.label_large, colors.fg)),
-        SizedBox::<SettingsState>(None, Some(ROW_LINE_GAP)),
+        SizedBox::<S>(None, Some(ROW_LINE_GAP)),
         text(BELL_VALUE).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
     ));
     let children = vec![

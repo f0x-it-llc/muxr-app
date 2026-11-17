@@ -1,6 +1,6 @@
-//! The `/settings` view model. A token mutation re-reads the list rather than patching it; a
-//! preference save publishes the record the repository returns. A minted secret stays on
-//! `pending_token_secret` until the next mint or an explicit dismissal clears it.
+//! The settings view models: [`SettingsController`] for the connected server, and
+//! [`AppSettingsController`] for device-wide preferences, which needs no server. A token mutation
+//! re-reads the list; a preference save publishes the record the repository returns.
 
 use std::sync::Arc;
 
@@ -53,34 +53,26 @@ pub struct SettingsController {
     list_tokens: ListTokens,
     create_token: CreateToken,
     revoke_token: RevokeToken,
-    load_preferences: LoadPreferences,
-    update_appearance: UpdateAppearance,
-    update_poll_prefs: UpdatePollPrefs,
     saved_servers: SavedServers,
     credentials: Credentials,
     keyring_unlock: KeyringUnlock,
     /// The single-flight claim of a switch's keyring unlock; the dial has the connection's own.
     pub switching: RwSignal<bool>,
     pub tokens: RwSignal<Vec<AuthToken>>,
-    pub appearance: RwSignal<AppearancePrefs>,
-    pub poll: RwSignal<PollPrefs>,
     pub loaded: RwSignal<bool>,
+    /// A minted secret stays here until the next mint or an explicit dismissal clears it.
     pub pending_token_secret: RwSignal<Option<MintedToken>>,
     pub saved: RwSignal<Vec<SavedServer>>,
-    /// Set only by a restore started from the `muxr pro` row.
-    pub restoring: RwSignal<bool>,
 }
 
 impl SettingsController {
     pub fn new(
         tokens: Arc<dyn AuthTokensRepository + Send + Sync>,
-        preferences: Arc<dyn PreferencesRepository + Send + Sync>,
         saved_servers: SavedServers,
         credentials: Credentials,
         keyring: KeyringHandle,
         connection: Arc<ConnectionController>,
     ) -> Self {
-        let defaults = Preferences::defaults();
         let keyring_unlock = KeyringUnlock::new(
             Arc::clone(&saved_servers),
             Arc::clone(&credentials),
@@ -94,17 +86,11 @@ impl SettingsController {
             list_tokens: ListTokens::new(Arc::clone(&tokens)),
             create_token: CreateToken::new(Arc::clone(&tokens)),
             revoke_token: RevokeToken::new(tokens),
-            load_preferences: LoadPreferences::new(Arc::clone(&preferences)),
-            update_appearance: UpdateAppearance::new(Arc::clone(&preferences)),
-            update_poll_prefs: UpdatePollPrefs::new(preferences),
             saved_servers,
             credentials,
             tokens: RwSignal::new(Vec::new()),
-            appearance: RwSignal::new(defaults.appearance),
-            poll: RwSignal::new(defaults.poll),
             loaded: RwSignal::new(false),
             pending_token_secret: RwSignal::new(None),
-            restoring: RwSignal::new(false),
             saved: RwSignal::new(Vec::new()),
         }
     }
@@ -116,14 +102,6 @@ impl SettingsController {
 
     pub async fn refresh(&self) {
         self.refresh_tokens().await;
-        if let Ok(prefs) = self
-            .core
-            .run(&self.load_preferences, NoParams, RunOptions::default())
-            .await
-        {
-            self.appearance.set(prefs.appearance);
-            self.poll.set(prefs.poll);
-        }
         self.refresh_saved_servers();
         self.loaded.set(true);
     }
@@ -360,6 +338,58 @@ impl SettingsController {
         }
         revoked
     }
+}
+
+impl AsRef<ControllerCore<AppFailure>> for SettingsController {
+    fn as_ref(&self) -> &ControllerCore<AppFailure> {
+        &self.core
+    }
+}
+
+/// Reads and writes only the device's preference store, so it serves with no server connected.
+pub struct AppSettingsController {
+    core: ControllerCore<AppFailure>,
+    load_preferences: LoadPreferences,
+    update_appearance: UpdateAppearance,
+    update_poll_prefs: UpdatePollPrefs,
+    pub appearance: RwSignal<AppearancePrefs>,
+    pub poll: RwSignal<PollPrefs>,
+    pub loaded: RwSignal<bool>,
+    /// Set only by a restore started from the `muxr pro` row.
+    pub restoring: RwSignal<bool>,
+}
+
+impl AppSettingsController {
+    pub fn new(preferences: Arc<dyn PreferencesRepository + Send + Sync>) -> Self {
+        let defaults = Preferences::defaults();
+        Self {
+            core: ControllerCore::new(),
+            load_preferences: LoadPreferences::new(Arc::clone(&preferences)),
+            update_appearance: UpdateAppearance::new(Arc::clone(&preferences)),
+            update_poll_prefs: UpdatePollPrefs::new(preferences),
+            appearance: RwSignal::new(defaults.appearance),
+            poll: RwSignal::new(defaults.poll),
+            loaded: RwSignal::new(false),
+            restoring: RwSignal::new(false),
+        }
+    }
+
+    /// Named rather than [`AsRef`], which `Arc<Self>`'s inherent `as_ref` makes ambiguous.
+    pub fn core(&self) -> &ControllerCore<AppFailure> {
+        &self.core
+    }
+
+    pub async fn refresh(&self) {
+        if let Ok(prefs) = self
+            .core
+            .run(&self.load_preferences, NoParams, RunOptions::default())
+            .await
+        {
+            self.appearance.set(prefs.appearance);
+            self.poll.set(prefs.poll);
+        }
+        self.loaded.set(true);
+    }
 
     pub async fn set_appearance(&self, prefs: AppearancePrefs) {
         if let Ok(stored) = self
@@ -391,7 +421,7 @@ impl SettingsController {
     }
 }
 
-impl AsRef<ControllerCore<AppFailure>> for SettingsController {
+impl AsRef<ControllerCore<AppFailure>> for AppSettingsController {
     fn as_ref(&self) -> &ControllerCore<AppFailure> {
         &self.core
     }
@@ -432,7 +462,6 @@ mod tests {
     ) -> SettingsController {
         SettingsController::new(
             Arc::new(MockAuthTokensRepository::seeded()),
-            Arc::new(MockPreferencesRepository::seeded()),
             Arc::new(servers),
             credentials.unwrap_or_else(|| Arc::new(MockCredentialService::new())),
             keyring,
@@ -473,21 +502,37 @@ mod tests {
             .block_on(fut)
     }
 
-    #[test]
-    fn the_preference_signals_are_populated_before_any_load() {
-        let c = controller();
-        assert!(!c.loaded.get_untracked(), "nothing is loaded up front");
-        assert_eq!(c.appearance_untracked(), Preferences::defaults().appearance);
-        assert_eq!(c.poll_untracked(), Preferences::defaults().poll);
-        assert!(c.tokens.get_untracked().is_empty(), "…but the list is");
+    fn app_controller() -> AppSettingsController {
+        AppSettingsController::new(Arc::new(MockPreferencesRepository::seeded()))
     }
 
     #[test]
-    fn refresh_loads_the_seeded_tokens_and_prefs_and_flips_loaded() {
+    fn the_preference_signals_are_populated_before_any_load() {
+        let c = app_controller();
+        assert!(!c.loaded.get_untracked(), "nothing is loaded up front");
+        assert_eq!(c.appearance_untracked(), Preferences::defaults().appearance);
+        assert_eq!(c.poll_untracked(), Preferences::defaults().poll);
+        assert!(!controller().loaded.get_untracked());
+        assert!(
+            controller().tokens.get_untracked().is_empty(),
+            "…nor the list"
+        );
+    }
+
+    #[test]
+    fn refresh_loads_the_seeded_tokens_and_flips_loaded() {
         let c = controller();
         block_on(c.refresh());
 
         assert_eq!(c.tokens.get_untracked().len(), SEEDED_COUNT);
+        assert!(c.loaded.get_untracked());
+    }
+
+    #[test]
+    fn the_app_refresh_loads_the_seeded_prefs_and_flips_loaded() {
+        let c = app_controller();
+        block_on(c.refresh());
+
         assert_eq!(c.appearance_untracked(), Preferences::defaults().appearance);
         assert!(c.loaded.get_untracked());
     }
@@ -813,7 +858,7 @@ mod tests {
 
     #[test]
     fn setting_a_preference_publishes_what_the_repository_stored() {
-        let c = controller();
+        let c = app_controller();
         block_on(c.refresh());
 
         let next = AppearancePrefs {
@@ -833,7 +878,7 @@ mod tests {
 
     #[test]
     fn a_rejected_preference_write_leaves_the_signal_alone() {
-        let c = controller();
+        let c = app_controller();
         block_on(c.refresh());
         let before = c.appearance_untracked();
 
@@ -851,7 +896,7 @@ mod tests {
 
     #[test]
     fn a_preference_survives_a_reload_rather_than_snapping_back() {
-        let c = controller();
+        let c = app_controller();
         block_on(c.refresh());
         block_on(c.set_poll_prefs(PollPrefs {
             layout_refresh_secs: 5,
