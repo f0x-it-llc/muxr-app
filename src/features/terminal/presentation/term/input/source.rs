@@ -8,7 +8,9 @@ use std::hash::BuildHasher;
 use frust::authoring::{EditingState, Key, Modifiers, NamedKey};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::bytes::{BACKSPACE_BYTE, BarKey, modified_sequence, named_key_bytes, text_bytes};
+use super::bytes::{
+    BACKSPACE_BYTE, BarKey, modified_sequence, named_key_bytes, paste_bytes, text_bytes,
+};
 use super::latch::{ModifierLatch, apply_latch, single_unit};
 use super::utf16::{clamp_front, clamp_index, diff, len_utf16, utf16_prefix, utf16_suffix};
 
@@ -476,6 +478,23 @@ impl KeystrokeSource {
             bytes,
             reconciled,
             class,
+        }
+    }
+
+    /// Literal text, so an armed latch neither transforms it nor is spent by it.
+    pub fn on_paste(&mut self, text: &str, bracketed: bool) -> Emission {
+        self.composing = None;
+        let bytes = paste_bytes(text, bracketed);
+        if bytes.is_empty() {
+            return Emission::inert(InputClass::None);
+        }
+        self.emitted += bytes.len();
+        self.revision += 1;
+        let reconciled = carries_return(text) && self.submit_line();
+        Emission {
+            bytes,
+            reconciled,
+            class: InputClass::Text,
         }
     }
 

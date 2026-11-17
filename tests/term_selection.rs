@@ -1,6 +1,6 @@
-//! Headless end-to-end coverage for the terminal's selection, loupe and copy: a stationary hold
-//! selects at the threshold, the haptic fires once per gesture, a clearing tap precedes the focus
-//! claim, and `Copy` reaches an injected clipboard sink.
+//! Headless end-to-end coverage for the terminal's selection, loupe, copy and paste: a stationary
+//! hold selects at the threshold, the haptic fires once per gesture, a clearing tap precedes the
+//! focus claim, and `Copy` and `Paste` share one injected test clipboard.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,7 +16,7 @@ use peniko::{Brush, Color};
 use muxr::features::terminal::data::feeds::demo_feed::DemoFeed;
 use muxr::features::terminal::domain::feed::TerminalFeed;
 use muxr::features::terminal::presentation::term::chip::{
-    CHIP_H, CHIP_W, COPIED_TOAST, CopySink, chip_rect, copy_chip,
+    CHIP_H, CHIP_W, COPIED_TOAST, CopySink, PasteSource, chip_rect, chip_width, copy_chip,
 };
 use muxr::features::terminal::presentation::term::geometry::CellGeometry;
 use muxr::features::terminal::presentation::term::selection::{GridPoint, GridRange, segments};
@@ -133,7 +133,9 @@ struct Mounted {
     input: InputSeam,
     feed: Rc<RefCell<DemoFeed>>,
     generation: RwSignal<u64>,
+    /// The test clipboard: Copy appends, Paste reads the last entry.
     copied: Rc<RefCell<Vec<String>>>,
+    clipboard_reads: Rc<std::cell::Cell<u32>>,
 }
 
 impl Mounted {
@@ -155,6 +157,13 @@ impl Mounted {
             recorder.borrow_mut().push(text.to_string());
             true
         });
+        let clipboard_reads = Rc::new(std::cell::Cell::new(0u32));
+        let reads = Rc::clone(&clipboard_reads);
+        let clipboard = Rc::clone(&copied);
+        let source: PasteSource = Rc::new(move || {
+            reads.set(reads.get() + 1);
+            clipboard.borrow().last().cloned()
+        });
 
         let view_emulator = Rc::clone(&emulator);
         let view_selection = selection.clone();
@@ -172,7 +181,9 @@ impl Mounted {
             any(terminal_surface(
                 view_selection.clone(),
                 grid,
-                copy_chip(view_selection.clone()).copy_sink(Rc::clone(&sink)),
+                copy_chip(view_selection.clone())
+                    .copy_sink(Rc::clone(&sink))
+                    .paste_source(Rc::clone(&source)),
             ))
         });
 
@@ -189,6 +200,7 @@ impl Mounted {
             feed,
             generation,
             copied,
+            clipboard_reads,
         };
         // `DemoFeed`'s chunk 0 is due at t=0; drain it so later drains hold only typed bytes.
         mounted.drain();
@@ -284,6 +296,30 @@ impl Mounted {
     fn drain_hex(&mut self) -> String {
         self.drain().iter().map(|b| format!("{b:02x}")).collect()
     }
+
+    fn controls(&self) -> Vec<String> {
+        node_labels(&self.root)
+            .into_iter()
+            .filter(|label| label != LABEL)
+            .collect()
+    }
+
+    fn press_label(&mut self, label: &str) {
+        let at = node_center_by_label(&self.root, label)
+            .unwrap_or_else(|| panic!("the chip announces {label}: {:?}", self.controls()));
+        self.event(PointerPhase::Down, at);
+        self.event(PointerPhase::Up, at);
+    }
+
+    /// Column 5 of row 0 is the space between `cargo` and `build`.
+    fn hold_blank_and_release(&mut self) -> Point {
+        self.frame(0.0);
+        let blank = self.cell(0, 5);
+        self.hold(blank);
+        self.event(PointerPhase::Up, blank);
+        self.frame(700.0);
+        blank
+    }
 }
 
 fn word(mounted: &Mounted, row: u16, col: u16) -> GridRange {
@@ -373,8 +409,14 @@ fn a_hold_on_a_separator_still_ticks_but_selects_nothing() {
          fires it before it resolves a word, and so do we"
     );
 
-    mounted.event(PointerPhase::Up, mounted.cell(0, 5));
-    assert!(mounted.selection.chip_anchor().is_none());
+    let release = mounted.cell(0, 5);
+    mounted.event(PointerPhase::Up, release);
+    assert_eq!(
+        mounted.selection.chip_anchor(),
+        Some(release),
+        "with nothing to copy the chip still rises, offering Paste"
+    );
+    assert_eq!(mounted.selection.range(), None);
 }
 
 #[test]
@@ -651,7 +693,7 @@ fn a_clearing_tap_is_a_hand_off_not_a_departure_and_the_typed_line_survives_it()
     // The grid consumes this Down, yet the framework still blurs the focus path on it.
     let elsewhere = Point::new(PHONE.width - 20.0, PHONE.height - 20.0);
     assert!(
-        !chip_rect(mounted.cell(0, 8), PHONE).contains(elsewhere),
+        !chip_rect(mounted.cell(0, 8), PHONE, CHIP_W).contains(elsewhere),
         "sanity: the clearing tap must miss the chip's own pill"
     );
     mounted.event(PointerPhase::Down, elsewhere);
@@ -719,21 +761,22 @@ fn the_chip_paints_exactly_where_the_incumbent_puts_it() {
     let release = select_and_release(&mut mounted);
     let scene = mounted.frame(720.0);
 
-    let (origin, size, _) = scene.pill().expect("the Copy pill painted");
-    let expected = chip_rect(release, PHONE);
+    let (origin, size, _) = scene.pill().expect("the Copy and Paste pill painted");
+    let expected = chip_rect(release, PHONE, CHIP_W);
     assert!(
         near(origin.x, expected.x0) && near(origin.y, expected.y0),
         "{origin:?} vs {expected:?}"
     );
     assert!(near(size.width, CHIP_W) && near(size.height, CHIP_H));
-    // Two vector marks, never font glyphs.
+    // Three vector marks, never font glyphs.
     assert!(
-        scene.paths.len() >= 2,
-        "a copy mark and a dismiss mark: {:?}",
+        scene.paths.len() >= 3,
+        "a copy, a paste and a dismiss mark: {:?}",
         scene.paths
     );
     let labels = node_labels(&mounted.root);
     assert!(labels.contains(&"Copy".to_string()), "{labels:?}");
+    assert!(labels.contains(&"Paste".to_string()), "{labels:?}");
     assert!(
         labels.contains(&"Dismiss selection".to_string()),
         "{labels:?}"
@@ -837,6 +880,151 @@ fn a_read_only_grid_still_selects_and_still_copies() {
     assert!(
         !mounted.root.is_focus_active(),
         "…while still refusing focus, which is what read-only means for input"
+    );
+}
+
+#[test]
+fn a_read_only_grid_offers_no_paste_on_a_word_or_a_blank() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::with_read_only(true);
+    let release = select_and_release(&mut mounted);
+    assert_eq!(mounted.controls(), ["Copy", "Dismiss selection"]);
+    let scene = mounted.frame(720.0);
+    let narrow = chip_width(true, false);
+    let pill = scene
+        .rounded
+        .iter()
+        .find(|(_, size, _)| near(size.width, narrow) && near(size.height, CHIP_H))
+        .expect("the Copy-only pill painted");
+    assert!(near(pill.0.x, chip_rect(release, PHONE, narrow).x0));
+
+    mounted.press_label("Dismiss selection");
+    mounted.copied.borrow_mut().push("echo pwned\n".to_string());
+    mounted.drain();
+    mounted.hold_blank_and_release();
+    assert!(
+        mounted.selection.chip_anchor().is_none(),
+        "a blank press on a read-only grid raises no chip at all"
+    );
+    assert!(mounted.controls().is_empty(), "{:?}", mounted.controls());
+    assert_eq!(
+        mounted.clipboard_reads.get(),
+        0,
+        "and never reads the clipboard"
+    );
+    assert!(mounted.drain().is_empty());
+}
+
+#[test]
+fn a_blank_long_press_shows_paste_and_no_copy() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    let release = mounted.hold_blank_and_release();
+
+    assert_eq!(mounted.controls(), ["Paste", "Dismiss selection"]);
+    let scene = mounted.frame(720.0);
+    let narrow = chip_width(false, true);
+    let pill = scene
+        .rounded
+        .iter()
+        .find(|(_, size, _)| near(size.width, narrow) && near(size.height, CHIP_H))
+        .expect("the Paste-only pill painted");
+    let expected = chip_rect(release, PHONE, narrow);
+    assert!(near(pill.0.x, expected.x0) && near(pill.0.y, expected.y0));
+    assert_eq!(
+        mounted.clipboard_reads.get(),
+        0,
+        "showing the chip never reads the clipboard"
+    );
+
+    mounted.press_label("Dismiss selection");
+    assert!(mounted.selection.chip_anchor().is_none());
+    assert_eq!(mounted.clipboard_reads.get(), 0);
+}
+
+#[test]
+fn a_word_long_press_shows_copy_and_paste() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    select_and_release(&mut mounted);
+    assert_eq!(mounted.controls(), ["Copy", "Paste", "Dismiss selection"]);
+}
+
+#[test]
+fn tapping_paste_sends_the_clipboard_sanitised_with_crs_when_brackets_are_off() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted
+        .copied
+        .borrow_mut()
+        .push("echo hi\r\nls\x1b[2J\n".to_string());
+    mounted.drain();
+    mounted.hold_blank_and_release();
+    mounted.press_label("Paste");
+
+    assert_eq!(mounted.clipboard_reads.get(), 1, "read once, on the tap");
+    assert_eq!(mounted.drain(), b"echo hi\rls[2J\r");
+    assert!(
+        mounted.selection.chip_anchor().is_none(),
+        "the chip dismisses"
+    );
+    assert!(
+        mounted.copied.borrow().len() == 1,
+        "paste writes nothing back"
+    );
+}
+
+#[test]
+fn tapping_paste_sends_one_bracketed_block_when_the_session_asked_for_it() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.emulator.borrow_mut().feed(b"\x1b[?2004h");
+    assert!(mounted.emulator.borrow().screen().bracketed_paste());
+    mounted
+        .copied
+        .borrow_mut()
+        .push("one\ntwo\x1b[201~three".to_string());
+    mounted.drain();
+    select_and_release(&mut mounted);
+    mounted.press_label("Paste");
+
+    assert_eq!(
+        mounted.drain(),
+        b"\x1b[200~one\rtwo[201~three\x1b[201~",
+        "a multi-line paste is one block the text cannot close early"
+    );
+    assert_eq!(
+        mounted.selection.range(),
+        None,
+        "the selection is dismissed"
+    );
+    assert!(mounted.copied.borrow().len() == 1, "paste copies nothing");
+}
+
+#[test]
+fn an_empty_clipboard_dismisses_the_chip_and_sends_nothing() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.drain();
+    mounted.hold_blank_and_release();
+    mounted.press_label("Paste");
+
+    assert_eq!(mounted.clipboard_reads.get(), 1);
+    assert!(mounted.drain().is_empty(), "nothing reaches the session");
+    assert!(mounted.selection.chip_anchor().is_none());
+    let scene = mounted.frame(800.0);
+    assert!(
+        !scene
+            .rounded
+            .iter()
+            .any(|(_, size, _)| near(size.height, CHIP_H)),
+        "no pill of any width"
     );
 }
 
@@ -956,14 +1144,10 @@ fn there_are_no_handles_no_double_tap_select_and_no_select_all() {
 
     select_and_release(&mut mounted);
     let labels = node_labels(&mounted.root);
-    let controls: Vec<_> = labels
-        .iter()
-        .filter(|label| label.as_str() != LABEL)
-        .collect();
     assert_eq!(
-        controls.len(),
-        2,
-        "only Copy and Dismiss selection: {labels:?}"
+        mounted.controls(),
+        ["Copy", "Paste", "Dismiss selection"],
+        "only Copy, Paste and Dismiss selection: {labels:?}"
     );
     assert!(
         !labels.iter().any(|label| label.contains("Select all")),

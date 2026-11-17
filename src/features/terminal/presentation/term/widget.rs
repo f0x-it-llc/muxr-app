@@ -184,6 +184,19 @@ impl TerminalGridView {
     }
 }
 
+impl TerminalGridView {
+    /// The selection's paste target is this grid's input, withheld while read-only.
+    fn install_seams(&self) {
+        if let Some(seam) = self.input.as_ref() {
+            seam.set_read_only(self.read_only);
+            seam.watch_screen(&self.emulator);
+        }
+        if let Some(selection) = self.selection.as_ref() {
+            selection.set_paste_target(self.input.clone().filter(|_| !self.read_only));
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Grab {
     Idle,
@@ -232,9 +245,7 @@ impl<State: 'static> View<State> for TerminalGridView {
         if let Some(seam) = self.selection.as_ref() {
             seam.observe_generation(self.generation);
         }
-        if let Some(seam) = self.input.as_ref() {
-            seam.set_read_only(self.read_only);
-        }
+        self.install_seams();
         TerminalGridWidget {
             generation: self.generation,
             emulator: Rc::clone(&self.emulator),
@@ -315,10 +326,8 @@ impl<State: 'static> View<State> for TerminalGridView {
             element.read_only = self.read_only;
             flags |= ChangeFlags::PAINT;
         }
-        // Every rebuild: the seam outlives this element and `set_read_only` is idempotent.
-        if let Some(seam) = self.input.as_ref() {
-            seam.set_read_only(self.read_only);
-        }
+        // Every rebuild: the seams outlive this element and installing them is idempotent.
+        self.install_seams();
 
         if let Some(seam) = self.selection.as_ref() {
             seam.observe_generation(self.generation);

@@ -7,7 +7,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust::authoring::{
-    EditingState, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
+    EditCommand, EditingState, ImeContentType, ImeEvent, InputEvent, Key, KeyEvent, Modifiers,
+    NamedKey,
 };
 use frust::{
     AnyView, Axis, Component, Either, FlexView, Get, RwSignal, Set, View, any, component, flexible,
@@ -259,6 +260,13 @@ impl Mounted {
                 modifiers: Modifiers::default(),
                 repeat: false,
             }),
+        );
+    }
+
+    fn paste(&mut self, text: &str) {
+        self.root.event(
+            &mut self.state,
+            &InputEvent::EditCommand(EditCommand::Paste(text.to_string())),
         );
     }
 
@@ -1173,6 +1181,57 @@ fn a_read_only_grid_is_never_an_ime_client_and_emits_nothing() {
             .any(|label| label == "Escape"),
         "a read-only terminal has no key bar"
     );
+}
+
+#[test]
+fn a_keyboard_paste_is_sanitised_and_bracketed_like_the_chip_paste() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.drain();
+
+    mounted.paste("ls\r\n\x1b[201~x\x07\n");
+    assert_eq!(
+        mounted.drain(),
+        b"ls\r[201~x\r",
+        "controls stripped, each line ending one CR"
+    );
+
+    mounted.emulator.borrow_mut().feed(b"\x1b[?2004h");
+    mounted.paste("a\nb");
+    assert_eq!(mounted.drain(), b"\x1b[200~a\rb\x1b[201~");
+
+    mounted.emulator.borrow_mut().feed(b"\x1b[?2004l");
+    mounted.paste("c\nd");
+    assert_eq!(mounted.drain(), b"c\rd");
+
+    mounted.paste("\x1b\x00");
+    assert!(mounted.drain().is_empty(), "nothing left, nothing sent");
+}
+
+#[test]
+fn a_keyboard_paste_leaves_an_armed_latch_untouched() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::new();
+    mounted.tap(IN_GRID);
+    mounted.drain();
+
+    mounted.seam.press_bar_key(BarKey::Ctrl);
+    mounted.paste("c");
+    assert_eq!(mounted.drain(), b"c", "a paste is literal text");
+    assert!(mounted.seam.latch().ctrl, "and does not spend the latch");
+}
+
+#[test]
+fn a_read_only_seam_refuses_a_paste() {
+    let _serial = serial();
+    let _owner = setup();
+    let mut mounted = Mounted::with_read_only(true);
+    mounted.paste("ls\n");
+    assert!(mounted.seam.paste("ls\n").is_none());
+    assert!(mounted.drain().is_empty());
 }
 
 #[test]

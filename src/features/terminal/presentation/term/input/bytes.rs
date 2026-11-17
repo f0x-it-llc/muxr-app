@@ -1,4 +1,5 @@
-//! What each key sends, and the key bar's keys. `text_bytes`' `\n` to CR is the only rewrite.
+//! What each key and paste sends, and the key bar's keys. Typed text is rewritten only `\n` to
+//! CR; a paste goes through `paste_bytes`' sanitising instead.
 
 use frust::authoring::NamedKey;
 
@@ -128,6 +129,48 @@ pub fn text_bytes(text: &str) -> Vec<u8> {
     text.bytes()
         .map(|b| if b == b'\n' { ENTER_BYTE } else { b })
         .collect()
+}
+
+/// The pasted text's own cap, brackets excluded.
+pub const PASTE_LIMIT: usize = 1 << 20;
+
+pub const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+pub const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Every paste's bytes. ESC is stripped with the other C0 controls, so pasted text can never
+/// close the bracket early; CRLF and LF become one CR.
+pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len().min(PASTE_LIMIT) + 2 * BRACKETED_PASTE_END.len());
+    if bracketed {
+        out.extend_from_slice(BRACKETED_PASTE_START);
+    }
+    let start = out.len();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let kept = match c {
+            '\r' => {
+                chars.next_if_eq(&'\n');
+                '\r'
+            }
+            '\n' => '\r',
+            '\t' => '\t',
+            c if c.is_ascii_control() => continue,
+            c => c,
+        };
+        let mut unit = [0u8; 4];
+        let encoded = kept.encode_utf8(&mut unit).as_bytes();
+        if out.len() - start + encoded.len() > PASTE_LIMIT {
+            break;
+        }
+        out.extend_from_slice(encoded);
+    }
+    if out.len() == start {
+        return Vec::new();
+    }
+    if bracketed {
+        out.extend_from_slice(BRACKETED_PASTE_END);
+    }
+    out
 }
 
 /// `Ctrl`/`Alt`/`Shift` and `Fn` send nothing: they toggle the latch or the Tablet F-key row.
@@ -323,6 +366,53 @@ mod tests {
     use super::super::harness::hex;
     use super::super::source::KeystrokeSource;
     use super::*;
+
+    #[test]
+    fn a_paste_strips_esc_and_every_other_c0_control_but_tab_and_returns() {
+        let text = "a\x1b[31mb\x00c\x07d\x08e\x7ff\tg\u{e9}";
+        assert_eq!(paste_bytes(text, false), "a[31mbcdef\tg\u{e9}".as_bytes());
+    }
+
+    #[test]
+    fn an_embedded_bracket_close_cannot_end_the_paste_early() {
+        let bytes = paste_bytes("x\x1b[201~rm -rf ~\n", true);
+        assert_eq!(bytes, b"\x1b[200~x[201~rm -rf ~\r\x1b[201~");
+        let closes = bytes
+            .windows(BRACKETED_PASTE_END.len())
+            .filter(|w| *w == BRACKETED_PASTE_END)
+            .count();
+        assert_eq!(closes, 1);
+    }
+
+    #[test]
+    fn a_paste_normalises_crlf_and_lf_to_one_cr_each() {
+        assert_eq!(paste_bytes("a\r\nb\nc\rd\n\n", false), b"a\rb\rc\rd\r\r");
+    }
+
+    #[test]
+    fn a_paste_wraps_in_brackets_only_when_the_mode_is_on() {
+        assert_eq!(paste_bytes("ls\nwc", true), b"\x1b[200~ls\rwc\x1b[201~");
+        assert_eq!(paste_bytes("ls\nwc", false), b"ls\rwc");
+    }
+
+    #[test]
+    fn a_paste_with_nothing_left_after_stripping_sends_nothing_even_bracketed() {
+        assert!(paste_bytes("", true).is_empty());
+        assert!(paste_bytes("\x1b\x00\x7f", true).is_empty());
+    }
+
+    #[test]
+    fn a_paste_is_capped_at_one_mib_on_a_char_boundary() {
+        let ascii = "a".repeat(PASTE_LIMIT + 10);
+        assert_eq!(paste_bytes(&ascii, false).len(), PASTE_LIMIT);
+
+        let wide = "\u{20ac}".repeat(PASTE_LIMIT / 3 + 10);
+        let bytes = paste_bytes(&wide, true);
+        let body = &bytes[BRACKETED_PASTE_START.len()..bytes.len() - BRACKETED_PASTE_END.len()];
+        assert_eq!(body.len(), PASTE_LIMIT - PASTE_LIMIT % 3);
+        assert!(std::str::from_utf8(body).is_ok());
+        assert!(bytes.ends_with(BRACKETED_PASTE_END));
+    }
 
     #[test]
     fn every_bar_key_sends_the_documented_sequence() {
