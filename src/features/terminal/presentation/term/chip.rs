@@ -492,8 +492,8 @@ impl CopyChipWidget {
         if !allowed {
             return;
         }
-        self.pastes += 1;
         if let Some(text) = (self.source)().map(Zeroizing::new) {
+            self.pastes += 1;
             let _ = self.seam.paste(&text);
         }
     }
@@ -511,7 +511,9 @@ impl CopyChipWidget {
 mod tests {
     use frust::authoring::Shape;
 
+    use super::super::{InputSeam, SharedFeed, TerminalEmulator};
     use super::*;
+    use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 
     const BOX: Size = Size::new(400.0, 800.0);
 
@@ -608,6 +610,42 @@ mod tests {
             );
             assert_eq!(single.segments().count(), 2);
         }
+    }
+
+    fn chip(source: PasteSource) -> CopyChipWidget {
+        let feed: SharedFeed = Rc::new(std::cell::RefCell::new(DemoFeed::new()));
+        let emulator = Rc::new(std::cell::RefCell::new(TerminalEmulator::with_defaults()));
+        let seam = SelectionSeam::new(emulator);
+        seam.set_paste_target(Some(InputSeam::new(feed)));
+        let ink = Color::from_rgb8(0, 0, 0);
+        CopyChipWidget {
+            seam,
+            sink: Rc::new(|_: &str| true),
+            source,
+            fill: ink,
+            border: ink,
+            ink,
+            muted: ink,
+            label_style: TextStyle::default(),
+            labels: None,
+            copy_mark: mark(icons::CONTENT_COPY, ACTION_ICON),
+            paste_mark: mark(CONTENT_PASTE, ACTION_ICON),
+            close_mark: mark(icons::CLOSE, CLOSE_ICON),
+            pressed: None,
+            copies: 0,
+            pastes: 0,
+        }
+    }
+
+    #[test]
+    fn only_a_paste_that_hands_text_to_the_seam_is_counted() {
+        let mut empty = chip(Rc::new(|| None));
+        empty.paste();
+        assert_eq!(empty.pastes(), 0, "an empty clipboard read is no paste");
+
+        let mut full = chip(Rc::new(|| Some("ls".to_string())));
+        full.paste();
+        assert_eq!(full.pastes(), 1);
     }
 
     #[test]

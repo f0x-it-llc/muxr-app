@@ -137,8 +137,8 @@ pub const PASTE_LIMIT: usize = 1 << 20;
 pub const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
 pub const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
-/// Every paste's bytes. ESC is stripped with the other C0 controls, so pasted text can never
-/// close the bracket early; CRLF and LF become one CR.
+/// Every paste's bytes. ESC and the 8-bit CSI are stripped with every other C0, DEL and C1
+/// control, so pasted text can never close the bracket early; CRLF and LF become one CR.
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len().min(PASTE_LIMIT) + 2 * BRACKETED_PASTE_END.len());
     if bracketed {
@@ -154,7 +154,7 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
             }
             '\n' => '\r',
             '\t' => '\t',
-            c if c.is_ascii_control() => continue,
+            c if c.is_control() => continue,
             c => c,
         };
         let mut unit = [0u8; 4];
@@ -371,6 +371,13 @@ mod tests {
     fn a_paste_strips_esc_and_every_other_c0_control_but_tab_and_returns() {
         let text = "a\x1b[31mb\x00c\x07d\x08e\x7ff\tg\u{e9}";
         assert_eq!(paste_bytes(text, false), "a[31mbcdef\tg\u{e9}".as_bytes());
+    }
+
+    #[test]
+    fn a_paste_strips_c1_controls_so_an_8_bit_csi_cannot_close_the_bracket() {
+        let text = "a\u{9b}201~b\u{85}c";
+        assert_eq!(paste_bytes(text, false), b"a201~bc");
+        assert_eq!(paste_bytes(text, true), b"\x1b[200~a201~bc\x1b[201~");
     }
 
     #[test]

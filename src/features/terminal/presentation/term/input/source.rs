@@ -9,7 +9,7 @@ use frust::authoring::{EditingState, Key, Modifiers, NamedKey};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::bytes::{
-    BACKSPACE_BYTE, BarKey, modified_sequence, named_key_bytes, paste_bytes, text_bytes,
+    BACKSPACE_BYTE, BarKey, ENTER_BYTE, modified_sequence, named_key_bytes, paste_bytes, text_bytes,
 };
 use super::latch::{ModifierLatch, apply_latch, single_unit};
 use super::utf16::{clamp_front, clamp_index, diff, len_utf16, utf16_prefix, utf16_suffix};
@@ -490,7 +490,7 @@ impl KeystrokeSource {
         }
         self.emitted += bytes.len();
         self.revision += 1;
-        let reconciled = carries_return(text) && self.submit_line();
+        let reconciled = bytes.contains(&ENTER_BYTE) && self.submit_line();
         Emission {
             bytes,
             reconciled,
@@ -669,6 +669,24 @@ mod tests {
         assert_eq!(hex(&emission.bytes), "610d62", "'a', CR, 'b'");
         assert!(emission.reconciled);
         assert_eq!(source.buffered_units(), 0, "the whole paste is dropped");
+    }
+
+    #[test]
+    fn a_paste_whose_only_newline_is_past_the_cap_does_not_submit_the_line() {
+        use super::super::bytes::PASTE_LIMIT;
+        let mut source = KeystrokeSource::new();
+        type_text(&mut source, "hunter2");
+        let text = format!("{}\nls", "a".repeat(PASTE_LIMIT));
+        let emission = source.on_paste(&text, false);
+        assert_eq!(emission.bytes.len(), PASTE_LIMIT);
+        assert!(!emission.bytes.contains(&ENTER_BYTE));
+        assert!(
+            !emission.reconciled,
+            "no CR was sent, so no line was submitted"
+        );
+        assert!(source.buffered_units() > 0, "the mirror is not scrubbed");
+
+        assert!(source.on_paste("ls\n", false).reconciled);
     }
 
     #[test]
