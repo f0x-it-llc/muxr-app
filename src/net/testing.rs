@@ -1046,6 +1046,7 @@ mod tests {
         let new_tab = NewTabReq {
             session: "zellij:dev".to_string(),
             tab_name: "build".to_string(),
+            connection_id: "conn-1".to_string(),
         };
         assert!(
             client
@@ -1078,6 +1079,7 @@ mod tests {
             session: "zellij:dev".to_string(),
             floating: true,
             pane_name: String::new(),
+            connection_id: "conn-1".to_string(),
         };
         assert!(
             client

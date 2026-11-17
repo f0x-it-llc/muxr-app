@@ -880,15 +880,23 @@ impl TerminalController {
         self.select_space_unclaimed(space_id).await
     }
 
-    /// The ack carries no id, so this re-lists spaces and selects a name match locally.
+    /// Herdr acks the new space's id after moving this connection onto it, so the screen follows;
+    /// without one this re-lists spaces and selects a name match locally.
     pub async fn create_space(&self, label: String) {
         let Some(_claim) = self.claim_create() else {
             return;
         };
-        if !self.tell(self.terminal.create_space(label.clone())).await {
+        let Some(info) = self
+            .tell_created(false, self.terminal.create_space(label.clone()))
+            .await
+        else {
+            return;
+        };
+        self.settle_create().await;
+        if self.is_herdr_session() && !info.is_empty() {
+            self.follow_created_space(info).await;
             return;
         }
-        self.settle_create().await;
         match self.terminal.list_spaces().await {
             Ok(spaces) => {
                 if self.signals_alive() {
@@ -899,14 +907,20 @@ impl TerminalController {
         }
     }
 
-    /// A full load: the server focuses what it opened, so the re-seed puts the browse on it.
+    /// A full load, then on herdr the screen follows the tab the ack names: this connection's relay
+    /// already sits on it, so no focus verb is sent after the create.
     pub async fn new_tab(&self, name: String) {
         let Some(_claim) = self.claim_create() else {
             return;
         };
-        if self.tell_move(self.terminal.new_tab(name)).await {
+        if let Some(info) = self.tell_created(true, self.terminal.new_tab(name)).await {
             self.settle_create().await;
             self.load().await;
+            if self.is_herdr_session()
+                && let Ok(tab_id) = info.trim().parse::<u64>()
+            {
+                self.follow_created_tab(tab_id);
+            }
         }
     }
 
@@ -935,9 +949,68 @@ impl TerminalController {
         let Some(_claim) = self.claim_create() else {
             return;
         };
-        if self.tell_move(self.terminal.new_pane(floating)).await {
+        if let Some(info) = self
+            .tell_created(true, self.terminal.new_pane(floating))
+            .await
+        {
             self.settle_create().await;
             self.load().await;
+            let pane_id = info
+                .strip_prefix("terminal_")
+                .and_then(|id| id.parse::<u32>().ok());
+            if self.is_herdr_session()
+                && let Some(pane_id) = pane_id
+            {
+                self.follow_created_pane(pane_id);
+            }
+        }
+    }
+
+    /// The relay already moved server-side, so only the local selection and the resume slot follow.
+    fn follow_created_pane(&self, pane_id: u32) {
+        let Some(tabs) = self.tabs.try_get_untracked() else {
+            return;
+        };
+        let Some(tab) = tabs
+            .iter()
+            .find(|tab| tab.panes.iter().any(|p| p.id == pane_id && !p.is_plugin))
+        else {
+            return;
+        };
+        self.land_on_created(&tab.key, Some(pane_id));
+    }
+
+    fn follow_created_tab(&self, tab_id: u64) {
+        let Some(tabs) = self.tabs.try_get_untracked() else {
+            return;
+        };
+        if let Some(tab) = tabs.iter().find(|tab| tab.tab_id == tab_id) {
+            self.land_on_created(&tab.key, created_pane_of(tab));
+        }
+    }
+
+    async fn follow_created_space(&self, space_id: String) {
+        self.resume.remember_space(space_id.clone());
+        self.select_space_locally(&space_id);
+        self.load().await;
+        self.select_space_locally(&space_id);
+        let Some(tabs) = self.tabs.try_get_untracked() else {
+            return;
+        };
+        if let Some(tab) = tabs.iter().find(|tab| tab.active).or(tabs.first()) {
+            self.land_on_created(&tab.key, created_pane_of(tab));
+        }
+    }
+
+    fn land_on_created(&self, tab_key: &str, pane_id: Option<u32>) {
+        self.active_tab.set(tab_key.to_string());
+        self.tabs.update_active(tab_key);
+        if let Some(pane_id) = pane_id {
+            self.focus_pane_locally(tab_key, pane_id, false);
+            self.remember_resume_pane(tab_key, pane_id);
+        }
+        if self.is_docked() {
+            self.settle_rest();
         }
     }
 
@@ -1460,6 +1533,32 @@ impl TerminalController {
         }
     }
 
+    /// [`tell_move`](Self::tell_move) for a create verb: a herdr create re-points this connection's
+    /// relay, so it supersedes a pending attach target; answers the ack's `info`. A space create with
+    /// the legacy empty ack moves no focus, hence `moves_without_info`.
+    async fn tell_created(
+        &self,
+        moves_without_info: bool,
+        work: impl Future<Output = Result<String, AppFailure>>,
+    ) -> Option<String> {
+        self.focus_verbs_in_flight.fetch_add(1, Ordering::SeqCst);
+        let _in_flight = VerbGuard(&self.focus_verbs_in_flight);
+        let created = match work.await {
+            Ok(info) => Some(info),
+            Err(failure) => {
+                self.core.failures().emit(&failure);
+                None
+            }
+        };
+        if created
+            .as_ref()
+            .is_some_and(|info| moves_without_info || !info.is_empty())
+        {
+            self.supersede_attach_target();
+        }
+        created
+    }
+
     /// The one place the supersede rule acts; holds `focus_verbs_in_flight` across `work`.
     async fn tell_move(&self, work: impl Future<Output = Result<(), AppFailure>>) -> bool {
         self.focus_verbs_in_flight.fetch_add(1, Ordering::SeqCst);
@@ -1680,6 +1779,15 @@ fn merge_relist(
     }
     rows.sort_by_key(|agent| agent_sort_key(agent.status, agent.change_seq));
     rows
+}
+
+/// The pane a create left this connection on: the tab's focused one, else its first terminal.
+fn created_pane_of(tab: &TabEntry) -> Option<u32> {
+    tab.panes
+        .iter()
+        .find(|pane| pane.focused && !pane.is_plugin)
+        .or_else(|| tab.panes.iter().find(|pane| !pane.is_plugin))
+        .map(|pane| pane.id)
 }
 
 fn rest_tab_key(tabs: &[TabEntry]) -> Option<String> {
@@ -2331,6 +2439,8 @@ mod tests {
         active: Mutex<Option<String>>,
         agents: Mutex<Vec<AgentEntry>>,
         agents_delay: Mutex<Option<Duration>>,
+        /// The ack `info` every create verb answers; empty by default (the legacy ack).
+        create_info: Mutex<String>,
     }
 
     const SEEDED_SPACE: &str = "ws-1";
@@ -2363,6 +2473,20 @@ mod tests {
 
         fn last_binding(&self) -> Option<String> {
             self.last
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        fn answer_creates_with(&self, info: &str) {
+            *self
+                .create_info
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = info.to_string();
+        }
+
+        fn create_info(&self) -> String {
+            self.create_info
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
@@ -2579,29 +2703,30 @@ mod tests {
             self.record(format!("scroll_pane({pane_id},{is_plugin},{direction:?})"))
         }
 
-        async fn create_space(&self, label: String) -> Result<(), AppFailure> {
+        async fn create_space(&self, label: String) -> Result<String, AppFailure> {
             self.record(format!("create_space({label})"))?;
             self.park().await;
-            Ok(())
+            Ok(self.create_info())
         }
 
         async fn rename_space(&self, space_id: String, label: String) -> Result<(), AppFailure> {
             self.record(format!("rename_space({space_id},{label})"))
         }
 
-        async fn new_tab(&self, name: String) -> Result<(), AppFailure> {
+        async fn new_tab(&self, name: String) -> Result<String, AppFailure> {
             self.record(format!("new_tab({name})"))?;
             self.park().await;
             self.created.store(true, Ordering::SeqCst);
-            Ok(())
+            Ok(self.create_info())
         }
 
         async fn rename_tab(&self, tab_id: u64, name: String) -> Result<(), AppFailure> {
             self.record(format!("rename_tab({tab_id},{name})"))
         }
 
-        async fn new_pane(&self, floating: bool) -> Result<(), AppFailure> {
-            self.record(format!("new_pane({floating})"))
+        async fn new_pane(&self, floating: bool) -> Result<String, AppFailure> {
+            self.record(format!("new_pane({floating})"))?;
+            Ok(self.create_info())
         }
 
         async fn rename_pane(
@@ -3706,6 +3831,104 @@ mod tests {
 
         assert_eq!(repository.actions(), ["new_pane(false)"]);
         assert_eq!(c.tabs.get_untracked(), tabs, "no reload behind the refusal");
+    }
+
+    #[test]
+    fn a_herdr_new_pane_follows_the_pane_the_ack_names_with_no_further_verb() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        repository.answer_creates_with("terminal_21");
+
+        block_on(c.new_pane(false));
+
+        assert_eq!(
+            repository.actions(),
+            ["new_pane(false)"],
+            "the relay already moved server-side: no SwitchSpace, GoToTab or FocusPane after"
+        );
+        assert_eq!(c.active_tab.get_untracked(), "beta");
+        assert_eq!(focused_pane(&c, "beta"), Some(21));
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget {
+                space_id: None,
+                tab_id: Some(2),
+                pane_id: Some(21),
+            }
+        );
+    }
+
+    #[test]
+    fn a_herdr_new_tab_follows_the_tab_the_ack_names() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        repository.answer_creates_with("3");
+
+        block_on(c.new_tab("logs".to_string()));
+
+        assert_eq!(repository.actions(), ["new_tab(logs)"]);
+        assert_eq!(c.active_tab.get_untracked(), "gamma");
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget {
+                space_id: None,
+                tab_id: Some(3),
+                pane_id: Some(30),
+            }
+        );
+    }
+
+    #[test]
+    fn a_herdr_new_space_follows_the_space_the_ack_names() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        repository.answer_creates_with("ws-2");
+
+        block_on(c.create_space("fresh".to_string()));
+
+        assert_eq!(repository.actions(), ["create_space(fresh)"]);
+        assert_eq!(c.selected_space_id().as_deref(), Some("ws-2"));
+        assert_eq!(
+            c.resume_slot().target().space_id.as_deref(),
+            Some("ws-2"),
+            "a reconnect resumes in the created space"
+        );
+        assert_eq!(c.active_tab.get_untracked(), "alpha");
+    }
+
+    #[test]
+    fn a_refused_herdr_create_changes_no_local_state() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        repository.answer_creates_with("terminal_21");
+        repository.refuse("new_pane");
+        let before = (
+            c.tabs.get_untracked(),
+            c.active_tab.get_untracked(),
+            c.resume_slot().target(),
+        );
+
+        block_on(c.new_pane(false));
+
+        assert_eq!(
+            (
+                c.tabs.get_untracked(),
+                c.active_tab.get_untracked(),
+                c.resume_slot().target()
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn a_zellij_new_pane_ignores_the_ack_info() {
+        let (c, repository) = recorded(SEEDED_DEV_ID);
+        repository.answer_creates_with("terminal_21");
+
+        block_on(c.new_pane(false));
+
+        assert_eq!(c.active_tab.get_untracked(), "alpha");
+        assert_eq!(c.resume_slot().target(), ResumeTarget::default());
     }
 
     #[test]

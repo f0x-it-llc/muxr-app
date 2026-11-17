@@ -131,8 +131,9 @@ pub trait TerminalRepository {
 
     async fn detach_session(&self, id: String) -> Result<(), AppFailure>;
 
-    /// An empty `label` lets the backend choose a name. Mutating.
-    async fn create_space(&self, _label: String) -> Result<(), AppFailure> {
+    /// An empty `label` lets the backend choose a name. Mutating. Answers the ack's `info`: the new
+    /// space id on a backend that moves this connection onto it, empty otherwise.
+    async fn create_space(&self, _label: String) -> Result<String, AppFailure> {
         Err(unsupported("create_space"))
     }
 
@@ -140,8 +141,9 @@ pub trait TerminalRepository {
         Err(unsupported("rename_space"))
     }
 
-    /// An empty `name` lets the backend choose one. Mutating.
-    async fn new_tab(&self, _name: String) -> Result<(), AppFailure> {
+    /// An empty `name` lets the backend choose one. Mutating. Answers the ack's `info`: the new tab
+    /// id on herdr, empty otherwise.
+    async fn new_tab(&self, _name: String) -> Result<String, AppFailure> {
         Err(unsupported("new_tab"))
     }
 
@@ -149,7 +151,8 @@ pub trait TerminalRepository {
         Err(unsupported("rename_tab"))
     }
 
-    async fn new_pane(&self, _floating: bool) -> Result<(), AppFailure> {
+    /// Answers the ack's `info`: `terminal_<id>` of the new pane on herdr, empty otherwise.
+    async fn new_pane(&self, _floating: bool) -> Result<String, AppFailure> {
         Err(unsupported("new_pane"))
     }
 

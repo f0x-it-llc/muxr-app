@@ -579,7 +579,7 @@ impl TerminalRepository for GrpcTerminalRepository {
         Ok(())
     }
 
-    async fn create_space(&self, label: String) -> Result<(), AppFailure> {
+    async fn create_space(&self, label: String) -> Result<String, AppFailure> {
         let (session, connection_id) = self.addressed()?;
         let client = self.client()?;
         let request = create_space_request(session, connection_id, label);
@@ -589,7 +589,8 @@ impl TerminalRepository for GrpcTerminalRepository {
             .await
             .map_err(|status| self.map_status(&client, status))?
             .into_inner();
-        error::ack_result(&ack)
+        error::ack_result(&ack)?;
+        Ok(ack.info)
     }
 
     async fn rename_space(&self, space_id: String, label: String) -> Result<(), AppFailure> {
@@ -605,18 +606,18 @@ impl TerminalRepository for GrpcTerminalRepository {
         error::ack_result(&ack)
     }
 
-    async fn new_tab(&self, name: String) -> Result<(), AppFailure> {
-        // `NewTabReq` carries no `connection_id`.
-        let (session, _connection_id) = self.addressed()?;
+    async fn new_tab(&self, name: String) -> Result<String, AppFailure> {
+        let (session, connection_id) = self.addressed()?;
         let client = self.client()?;
-        let request = new_tab_request(session, name);
+        let request = new_tab_request(session, connection_id, name);
         let ack = client
             .authed()
             .new_tab(request)
             .await
             .map_err(|status| self.map_status(&client, status))?
             .into_inner();
-        error::ack_result(&ack)
+        error::ack_result(&ack)?;
+        Ok(ack.info)
     }
 
     async fn rename_tab(&self, tab_id: u64, name: String) -> Result<(), AppFailure> {
@@ -632,17 +633,18 @@ impl TerminalRepository for GrpcTerminalRepository {
         error::ack_result(&ack)
     }
 
-    async fn new_pane(&self, floating: bool) -> Result<(), AppFailure> {
-        let (session, _connection_id) = self.addressed()?;
+    async fn new_pane(&self, floating: bool) -> Result<String, AppFailure> {
+        let (session, connection_id) = self.addressed()?;
         let client = self.client()?;
-        let request = new_pane_request(session, floating);
+        let request = new_pane_request(session, connection_id, floating);
         let ack = client
             .authed()
             .new_pane(request)
             .await
             .map_err(|status| self.map_status(&client, status))?
             .into_inner();
-        error::ack_result(&ack)
+        error::ack_result(&ack)?;
+        Ok(ack.info)
     }
 
     async fn rename_pane(
@@ -888,9 +890,13 @@ fn rename_space_request(
     }
 }
 
-/// `NewTabReq`, `RenameTabReq` and `NewPaneReq` carry no `connection_id`.
-fn new_tab_request(session: String, tab_name: String) -> NewTabReq {
-    NewTabReq { session, tab_name }
+/// `RenameTabReq` carries no `connection_id`.
+fn new_tab_request(session: String, connection_id: String, tab_name: String) -> NewTabReq {
+    NewTabReq {
+        session,
+        tab_name,
+        connection_id,
+    }
 }
 
 fn rename_tab_request(session: String, tab_id: u64, name: String) -> RenameTabReq {
@@ -902,11 +908,12 @@ fn rename_tab_request(session: String, tab_id: u64, name: String) -> RenameTabRe
 }
 
 /// Always unnamed: the new-pane row has no naming dialog.
-fn new_pane_request(session: String, floating: bool) -> NewPaneReq {
+fn new_pane_request(session: String, connection_id: String, floating: bool) -> NewPaneReq {
     NewPaneReq {
         session,
         floating,
         pane_name: String::new(),
+        connection_id,
     }
 }
 
@@ -2007,19 +2014,24 @@ mod tests {
 
     #[test]
     fn new_tab_request_carries_the_session_and_name() {
-        let request = new_tab_request("zellij:dev".to_string(), "build".to_string());
+        let request = new_tab_request(
+            "zellij:dev".to_string(),
+            "conn-1".to_string(),
+            "build".to_string(),
+        );
         assert_eq!(request.session, "zellij:dev");
         assert_eq!(request.tab_name, "build");
+        assert_eq!(request.connection_id, "conn-1");
     }
 
     #[test]
     fn new_tab_request_carries_an_empty_name_when_the_dialog_confirms_blank() {
-        let request = new_tab_request("zellij:dev".to_string(), String::new());
+        let request = new_tab_request("zellij:dev".to_string(), String::new(), String::new());
         assert_eq!(request.session, "zellij:dev");
         assert_eq!(
             request.tab_name, "",
             "a blank confirm is this create's own valid default, not a \
-             disabled state — NewTabReq has no connection_id field either way"
+             disabled state"
         );
     }
 
@@ -2033,13 +2045,15 @@ mod tests {
 
     #[test]
     fn new_pane_request_carries_the_floating_flag_unnamed() {
-        let floating = new_pane_request("zellij:dev".to_string(), true);
+        let floating = new_pane_request("zellij:dev".to_string(), "conn-1".to_string(), true);
         assert_eq!(floating.session, "zellij:dev");
+        assert_eq!(floating.connection_id, "conn-1");
         assert!(floating.floating);
         assert_eq!(floating.pane_name, "");
 
-        let tiled = new_pane_request("zellij:dev".to_string(), false);
+        let tiled = new_pane_request("zellij:dev".to_string(), String::new(), false);
         assert!(!tiled.floating);
+        assert_eq!(tiled.connection_id, "", "no bound connection sends empty");
     }
 
     #[test]

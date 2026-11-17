@@ -2057,9 +2057,9 @@ impl TerminalRepository for SlowCreate {
     async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
         self.0.focus_pane(pane_id, is_plugin).await
     }
-    async fn new_tab(&self, _name: String) -> Result<(), AppFailure> {
+    async fn new_tab(&self, _name: String) -> Result<String, AppFailure> {
         clean_signals::time::sleep(Duration::from_millis(20)).await;
-        Ok(())
+        Ok(String::new())
     }
 }
 
