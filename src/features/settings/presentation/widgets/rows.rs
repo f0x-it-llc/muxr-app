@@ -40,14 +40,10 @@ const MARK_ICON: f64 = spacing::LG;
 pub(super) const ROW_LINE_GAP: f64 = spacing::MICRO;
 /// `.set-chev{font-size:13px}`.
 const CHEVRON: f64 = 13.0;
-const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
+pub(super) const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 
 pub(super) fn h_gap<S: 'static>(gap: f64) -> FlexChild<S> {
     inflexible(SizedBox::<S>(Some(gap), None))
-}
-
-pub(super) fn spacer<S: 'static>() -> FlexChild<S> {
-    flexible(1, SizedBox::<S>(None, None))
 }
 
 pub(super) fn centered_row<S: 'static>(children: Vec<FlexChild<S>>) -> FlexView<S> {
@@ -248,7 +244,7 @@ pub(in super::super) enum RowAction {
     UpgradeSheet,
     AppSettings,
     GettingStarted,
-    /// Server settings' `auth tokens` row; the tokens page it leads to is not routed yet.
+    /// Server settings' `auth tokens` row, which pushes the tokens page.
     AuthTokens,
 }
 

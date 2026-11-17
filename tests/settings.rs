@@ -1,4 +1,4 @@
-//! Headless coverage for the `/settings` and `/settings/app` screens: a `RenderRoot` over the real page builders, driven through `tests/support`.
+//! Headless coverage for the `/settings`, `/settings/tokens` and `/settings/app` screens: a `RenderRoot` over the real page builders, driven through `tests/support`.
 //! The screen is the bottom layer of a `Stack` under an empty navigator; dialogs and picker sheets are located by painted geometry.
 //! Every frame lays out at [`SURFACE`] (the screen runs past 1000px), hence the local `pump_once`.
 
@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use clean_signals::Failure;
 use frust::{
-    AnyView, Component, GetUntracked, NavigatorController, Resolution, Set, SizedBox, Stack,
-    WindowMetrics, any, navigator, provide_context, spawn_local,
+    AnyView, Component, GetUntracked, NavigatorController, PopResult, Resolution, Set, SizedBox,
+    Stack, WindowMetrics, any, navigator, provide_context, spawn_local,
 };
 use frust_core::accesskit::{Node, Rect, Role, Toggled};
 use frust_core::{InputEvent, NamedKey, PointerPhase, RenderRoot, ScrollDelta};
@@ -48,9 +48,11 @@ use muxr::features::pro::presentation::controller::ProController;
 use muxr::features::pro::presentation::{NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, RESTORE_LABEL};
 use muxr::features::settings::data::repositories::MockAuthTokensRepository;
 use muxr::features::settings::data::repositories::mock_auth_tokens_repository::MOCK_MINTED_SECRET_PREFIX;
-use muxr::features::settings::di::{SharedAuthTokensRepository, expect_preferences_repository};
+use muxr::features::settings::di::{
+    SharedAuthTokensRepository, expect_auth_tokens_repository, expect_preferences_repository,
+};
 use muxr::features::settings::domain::entities::{
-    AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken,
+    AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken, TokenScope,
 };
 use muxr::features::settings::domain::repositories::AuthTokensRepository;
 use muxr::features::settings::presentation::app_pages::app_settings_page;
@@ -59,22 +61,25 @@ use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
     TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
 };
+use muxr::features::settings::presentation::token_pages::{open_new_token, tokens_page};
 use muxr::features::settings::presentation::widgets::{
-    CONNECTED_META, CREDENTIAL_CHIP, DELETE_LABEL, FORGET_SERVER_LABEL, PLAN_LABEL,
-    PRO_GROUP_LABEL, SAVED_CREDENTIAL_LABEL, SERVERS_GROUP_LABEL, SHEET_FOOTNOTE, SWITCH_LABEL,
-    THIS_SERVER_CHIP,
+    CONNECTED_META, CREDENTIAL_CHIP, DELETE_LABEL, FORGET_SERVER_LABEL, NEW_TOKEN_ACTION,
+    NO_MATCH_LABEL, PLAN_LABEL, PRO_GROUP_LABEL, SAVED_CREDENTIAL_LABEL, SERVERS_GROUP_LABEL,
+    SHEET_FOOTNOTE, SWITCH_LABEL, THIS_DEVICE_PREFIX, THIS_SERVER_CHIP, TokenMenu,
+    set_copy_name_sink_for_tests, token_actions_label,
 };
 use muxr::fonts::catalog::{CatalogStatus, FontState};
 use muxr::fonts::source::FontSource;
-use muxr::routes::{APP_SETTINGS_ROUTE, app_nav, install_app_router};
+use muxr::routes::{APP_SETTINGS_ROUTE, TOKENS_ROUTE, app_nav, install_app_router};
 use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
 mod support;
 use support::{
     EPSILON, RecScene, added, by_width, center, char_key, frame_sized, ime_bottom_inset, largest,
-    named_key, node_center_by_label, node_centers_by_label, node_centers_by_value, node_labels,
-    node_values, pointer, serial, settle_sized, setup, smallest, tap,
+    named_key, node_center_by_label, node_center_by_role, node_centers_by_label,
+    node_centers_by_value, node_labels, node_roles, node_values, pointer, serial, settle_sized,
+    setup, smallest, tap,
 };
 
 const SURFACE: Size = Size::new(800.0, 1700.0);
@@ -89,7 +94,9 @@ const LOCK_AND_DISCONNECT: &str = "Lock & disconnect";
 const ADD_SERVER_ROW: &str = "add server";
 
 const SEEDED_TOKENS: [&str; 2] = ["zelli-mobile-100-71-31-57-mr3g6w5g", "token_2"];
-const SERVER_GROUPS: [&str; 4] = ["ACCESS", "THIS SERVER", "APP", "AUTH TOKENS"];
+const SERVER_GROUPS: [&str; 3] = ["ACCESS", "THIS SERVER", "APP"];
+const SEEDED_COUNT_VALUE: &str = "2 tokens \u{b7} 1 read-only";
+const TABLET_TOKENS_TITLE: &str = "AUTH TOKENS \u{b7} 2";
 const APP_GROUPS: [&str; 5] = ["TERMINAL", "BEHAVIOUR", "MUXR PRO", "SERVERS", "ABOUT"];
 const APP_SETTINGS_ROW: &str = "app settings";
 
@@ -142,6 +149,7 @@ type Logic = Box<dyn FnMut(&mut AppState) -> AnyView<AppState>>;
 #[derive(Clone, Copy)]
 enum Page {
     Server,
+    Tokens,
     App,
 }
 
@@ -184,6 +192,7 @@ impl Harness {
             let overlay_nav = logic_nav.clone();
             let screen = match page {
                 Page::Server => any(settings_page(screen_nav)),
+                Page::Tokens => any(tokens_page(screen_nav)),
                 Page::App => any(app_settings_page(screen_nav)),
             };
             any(Stack(vec![
@@ -210,6 +219,18 @@ impl Harness {
     fn connected_with(trust_mode: TrustMode) -> Self {
         let mut harness = Harness::mount();
         expect_connection_controller().connect(mock_target(trust_mode));
+        harness.await_tokens();
+        harness
+    }
+
+    /// The `/settings/tokens` page over the seeded store, connected to the mock rig.
+    fn tokens() -> Self {
+        Self::tokens_seeded(|| {})
+    }
+
+    fn tokens_seeded(seed: impl FnOnce()) -> Self {
+        let mut harness = Self::mount_page(Page::Tokens, seed);
+        expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
         harness.await_tokens();
         harness
     }
@@ -285,11 +306,13 @@ impl Harness {
         }
     }
 
+    /// The list itself where one renders, else the server page's count row.
     fn await_tokens(&mut self) {
         self.pump_until_values("the seeded tokens", |values| {
-            SEEDED_TOKENS
-                .iter()
-                .all(|name| values.iter().any(|v| v == name))
+            values.iter().any(|v| v == SEEDED_COUNT_VALUE)
+                || SEEDED_TOKENS
+                    .iter()
+                    .all(|name| values.iter().any(|v| v == name))
         });
     }
 
@@ -553,7 +576,12 @@ fn the_server_page_shows_only_its_own_groups_and_the_disconnect_action() {
             "the device-wide {moved:?} row lives on the app page: {values:?}"
         );
     }
-    assert!(values.iter().any(|v| v == "create new token"), "{values:?}");
+    assert!(
+        !SEEDED_TOKENS
+            .iter()
+            .any(|name| values.iter().any(|v| v == name)),
+        "the token list lives on its own page: {values:?}"
+    );
     assert!(
         values.iter().any(|v| v == "fonts, bell, Muxr Pro, servers"),
         "{values:?}"
@@ -861,41 +889,46 @@ fn the_tokens_row_counts_the_tokens_and_the_read_only_ones() {
     let values = node_values(&h.root);
     assert_eq!(
         value_after(&values, "auth tokens"),
-        "2 tokens \u{b7} 1 read-only",
+        SEEDED_COUNT_VALUE,
         "{values:?}"
     );
     assert!(
-        values.iter().any(|v| v == SEEDED_TOKENS[0]),
-        "the list still renders below the page: {values:?}"
+        !values.iter().any(|v| v == SEEDED_TOKENS[0]),
+        "no list renders below the row: {values:?}"
     );
 }
 
 #[test]
-fn the_tokens_row_is_singular_for_one_token() {
+fn the_tokens_row_recounts_when_its_page_is_returned_to() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
-    let clock = AnimationClock::pinned();
+    let repository = expect_auth_tokens_repository();
 
-    let dialog = open_dialog_by_label(&mut h, "revoke");
-    confirm(&mut h, &dialog);
-    clock.advance(TIMELINE_MS + 1.0);
+    let revoked = run_to_end(&mut h, async move {
+        repository
+            .revoke_token(SEEDED_TOKENS[0].to_string())
+            .await
+            .is_ok()
+    });
+    assert!(revoked, "the mock revoked the token behind the page's back");
+    h.push_route_floor();
+    h.nav.pop();
+    h.settle();
     h.pump_until_values("the count to drop to one", |values| {
         values.iter().any(|v| v == "1 token \u{b7} 1 read-only")
     });
 }
 
 #[test]
-fn the_tokens_row_opens_nothing_yet() {
+fn the_tokens_row_pushes_the_tokens_page() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
 
-    let before = current_path(&h);
     h.tap_value("auth tokens");
     h.settle();
-    assert_eq!(h.depth(), 1, "no dialog or sheet");
-    assert_eq!(current_path(&h), before, "…and no route");
+    assert_eq!(current_path(&h).as_deref(), Some(TOKENS_ROUTE));
 }
 
 /// The server page over the seeded store plus the credential row, connected to that server.
@@ -1013,7 +1046,7 @@ fn forgetting_the_connected_server_confirms_then_removes_its_profile() {
 }
 
 #[test]
-fn everything_above_the_token_list_fits_a_phone_viewport() {
+fn the_phone_server_page_fits_one_viewport_and_ends_at_the_app_row() {
     let _g = serial();
     let _ambient = setup();
     let (mut h, _recording) = server_page_on_cred(true);
@@ -1022,27 +1055,52 @@ fn everything_above_the_token_list_fits_a_phone_viewport() {
     for _ in 0..2 {
         settle_sized(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, phone);
     }
-    let last_above = node_centers_by_value(&h.root, "fonts, bell, Muxr Pro, servers");
-    let tokens = node_centers_by_value(&h.root, "AUTH TOKENS");
+    let last = node_centers_by_value(&h.root, "fonts, bell, Muxr Pro, servers");
     assert!(
-        last_above.first().is_some_and(|p| p.y < phone.height),
-        "the app row is on screen: {last_above:?}"
+        last.first().is_some_and(|p| p.y < phone.height),
+        "the app row is on screen: {last:?}"
     );
+    let values = node_values(&h.root);
     assert!(
-        tokens.first().is_some_and(|p| p.y > last_above[0].y),
-        "the token list is the page's tail: {tokens:?}"
+        !values.iter().any(|v| v.starts_with("AUTH TOKENS")),
+        "no token group follows it: {values:?}"
     );
 }
 
+fn open_row_menu(h: &mut Harness, name: &str) {
+    h.tap_label(&token_actions_label(name));
+    h.settle();
+    assert_eq!(h.depth(), 2, "the row menu is its own page");
+}
+
+/// What the choice opened, by painted geometry.
+fn choose(h: &mut Harness, entry: TokenMenu) -> Chrome {
+    let before = h.frame();
+    h.nav.pop_with_result(PopResult::of(entry.index()));
+    h.flush();
+    let after = h.settle();
+    Chrome::diff(&before, &after)
+}
+
+fn open_revoke(h: &mut Harness, name: &str) -> Chrome {
+    open_row_menu(h, name);
+    choose(h, TokenMenu::Revoke)
+}
+
+fn actions_buttons(h: &Harness, name: &str) -> usize {
+    node_centers_by_label(&h.root, &token_actions_label(name)).len()
+}
+
 #[test]
-fn the_token_group_is_the_redesigns_two_tokens_verbatim() {
+fn the_token_page_is_the_redesigns_two_tokens_verbatim() {
     let _g = serial();
     let _ambient = setup();
-    let h = Harness::connected();
+    let h = Harness::tokens();
 
     let values = node_values(&h.root);
     for name in SEEDED_TOKENS {
         assert!(values.iter().any(|v| v == name), "{name:?}: {values:?}");
+        assert_eq!(actions_buttons(&h, name), 1, "one ⋯ per row");
     }
     for meta in ["created 2026-07-02", "created 2026-07-10"] {
         assert!(values.iter().any(|v| v == meta), "{meta:?}: {values:?}");
@@ -1051,9 +1109,14 @@ fn the_token_group_is_the_redesigns_two_tokens_verbatim() {
         values.iter().any(|v| v == "read-write") && values.iter().any(|v| v == "read-only"),
         "both scope chips render: {values:?}"
     );
-    assert_eq!(
-        node_centers_by_label(&h.root, "revoke").len(),
-        SEEDED_TOKENS.len()
+    let labels = node_labels(&h.root);
+    assert!(
+        !labels.iter().any(|l| l == "revoke"),
+        "no inline revoke button: {labels:?}"
+    );
+    assert!(
+        h.center_of(SEEDED_TOKENS[0]).y < h.center_of(SEEDED_TOKENS[1]).y,
+        "in the server's order"
     );
 }
 
@@ -1061,10 +1124,10 @@ fn the_token_group_is_the_redesigns_two_tokens_verbatim() {
 fn revoking_a_token_confirms_first_then_removes_it() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
     let clock = AnimationClock::pinned();
 
-    open_dialog_by_label(&mut h, "revoke");
+    open_revoke(&mut h, SEEDED_TOKENS[0]);
     assert_eq!(h.depth(), 2, "the confirmation is its own page");
     h.tap(SCRIM_POINT);
     h.flush();
@@ -1077,7 +1140,7 @@ fn revoking_a_token_confirms_first_then_removes_it() {
         "…and nothing was revoked"
     );
 
-    let dialog = open_dialog_by_label(&mut h, "revoke");
+    let dialog = open_revoke(&mut h, SEEDED_TOKENS[0]);
     confirm(&mut h, &dialog);
     clock.advance(TIMELINE_MS + 1.0);
     h.pump_until_values("the revoked row to disappear", |values| {
@@ -1158,10 +1221,7 @@ fn mount_with_reduced_motion() -> Harness {
     let mut theme = frust_glyph::baseline();
     theme.motion.reduce_motion = true;
     provide_context(theme);
-    let mut harness = Harness::mount();
-    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
-    harness.await_tokens();
-    harness
+    Harness::tokens()
 }
 
 fn pump_until(h: &mut Harness, what: &str, done: impl Fn() -> bool) {
@@ -1182,11 +1242,11 @@ fn revoke_landed(name: &str) -> bool {
 fn a_confirmed_revoke_scrambles_the_row_in_place_before_it_collapses() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
     let clock = AnimationClock::pinned();
 
     let second_row = h.center_of(SEEDED_TOKENS[1]).y;
-    let dialog = open_dialog_by_label(&mut h, "revoke");
+    let dialog = open_revoke(&mut h, SEEDED_TOKENS[0]);
     confirm(&mut h, &dialog);
 
     // Three of the scramble's fourteen frames in.
@@ -1218,12 +1278,12 @@ fn a_confirmed_revoke_scrambles_the_row_in_place_before_it_collapses() {
 fn the_scrambling_row_outlives_the_refresh_that_removes_its_token() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
     app_toasts().clear();
     let clock = AnimationClock::pinned();
 
     let second_row = h.center_of(SEEDED_TOKENS[1]).y;
-    let dialog = open_dialog_by_label(&mut h, "revoke");
+    let dialog = open_revoke(&mut h, SEEDED_TOKENS[0]);
     confirm(&mut h, &dialog);
 
     // Hold the timeline early while the RPC and its refresh land.
@@ -1265,8 +1325,8 @@ fn the_scrambling_row_outlives_the_refresh_that_removes_its_token() {
         "…and only that row went: {values:?}"
     );
     assert_eq!(
-        node_centers_by_label(&h.root, "revoke").len(),
-        1,
+        actions_buttons(&h, SEEDED_TOKENS[0]),
+        0,
         "the collapsed row's own button went with it"
     );
 }
@@ -1275,16 +1335,14 @@ fn the_scrambling_row_outlives_the_refresh_that_removes_its_token() {
 fn a_refused_revoke_restores_the_row_and_raises_the_failure_toast() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::mount_seeded(|| {
+    let mut h = Harness::tokens_seeded(|| {
         let refusing: SharedAuthTokensRepository = Arc::new(RefusingRevoke::seeded());
         provide_context(refusing);
     });
-    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
-    h.await_tokens();
     app_toasts().clear();
     let clock = AnimationClock::pinned();
 
-    let dialog = open_dialog_by_label(&mut h, "revoke");
+    let dialog = open_revoke(&mut h, SEEDED_TOKENS[0]);
     confirm(&mut h, &dialog);
     pump_until(&mut h, "the refusal to surface", || {
         !app_toasts().pending_untracked().is_empty()
@@ -1313,9 +1371,9 @@ fn a_refused_revoke_restores_the_row_and_raises_the_failure_toast() {
         "…all of it: {values:?}"
     );
     assert_eq!(
-        node_centers_by_label(&h.root, "revoke").len(),
-        SEEDED_TOKENS.len(),
-        "…with a live revoke button on it again"
+        actions_buttons(&h, SEEDED_TOKENS[0]),
+        1,
+        "…with its ⋯ on it again"
     );
 }
 
@@ -1327,7 +1385,7 @@ fn reduced_motion_revokes_instantly_with_no_scramble_frames() {
     app_toasts().clear();
     let _clock = AnimationClock::pinned();
 
-    let dialog = open_dialog_by_label(&mut h, "revoke");
+    let dialog = open_revoke(&mut h, SEEDED_TOKENS[0]);
     confirm(&mut h, &dialog);
 
     let deadline = Instant::now() + PUMP_DEADLINE;
@@ -1353,14 +1411,22 @@ fn reduced_motion_revokes_instantly_with_no_scramble_frames() {
         "{values:?}"
     );
     assert_eq!(
-        node_centers_by_label(&h.root, "revoke").len(),
-        1,
+        actions_buttons(&h, SEEDED_TOKENS[0]),
+        0,
         "the timeline was dropped, not left collapsed at zero height"
     );
 }
 
+/// The bar's `+`, as the shell's press reaches it.
+fn open_create_dialog(h: &mut Harness) -> Chrome {
+    let before = h.frame();
+    open_new_token(&mut h.state);
+    let after = h.settle();
+    Chrome::diff(&before, &after)
+}
+
 fn mint_token(h: &mut Harness, name: &str, read_only: bool) {
-    let dialog = open_dialog_by_value(h, "create new token");
+    let dialog = open_create_dialog(h);
     assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
     h.tap(center(dialog.content_child()));
     h.type_text(name);
@@ -1393,10 +1459,10 @@ fn dismiss_secret_reveal(h: &mut Harness) {
 }
 
 #[test]
-fn the_dashed_row_mints_a_token_then_reveals_and_reloads() {
+fn the_bars_plus_mints_a_token_then_reveals_and_reloads() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
     app_toasts().clear();
 
     mint_token(&mut h, "laptop", false);
@@ -1439,7 +1505,7 @@ fn the_dashed_row_mints_a_token_then_reveals_and_reloads() {
 fn the_read_only_toggle_mints_a_read_only_token_that_reloads_into_the_list() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
     app_toasts().clear();
 
     mint_token(&mut h, "phone", true);
@@ -1459,9 +1525,9 @@ fn the_read_only_toggle_mints_a_read_only_token_that_reloads_into_the_list() {
 fn the_read_only_toggle_is_a_real_switch_role_whose_own_tap_flips_it() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
 
-    open_dialog_by_value(&mut h, "create new token");
+    open_create_dialog(&mut h);
     assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
 
     let (role, state) = h
@@ -1486,7 +1552,7 @@ fn the_read_only_toggle_is_a_real_switch_role_whose_own_tap_flips_it() {
 fn a_rejected_mint_never_claims_to_have_created_anything() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
     app_toasts().clear();
 
     mint_token(&mut h, SEEDED_TOKENS[1], false);
@@ -1514,16 +1580,16 @@ fn a_rejected_mint_never_claims_to_have_created_anything() {
 }
 
 #[test]
-fn a_read_only_connected_session_disables_minting_and_revoking() {
+fn a_read_only_connected_session_disables_minting_and_revoking_but_not_copying() {
     // The mock connect flow always logs in read-write, so this flips the read-only signal directly.
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
     expect_connection_controller().is_read_only.set(true);
     h.frame();
     app_toasts().clear();
 
-    h.tap_value("create new token");
+    open_new_token(&mut h.state);
     h.settle();
     assert_eq!(h.depth(), 1, "a read-only session opens no create dialog");
     let toasted = app_toasts().pending_untracked();
@@ -1533,8 +1599,7 @@ fn a_read_only_connected_session_disables_minting_and_revoking() {
     );
 
     app_toasts().clear();
-    h.tap_label("revoke");
-    h.settle();
+    open_revoke(&mut h, SEEDED_TOKENS[1]);
     assert_eq!(
         h.depth(),
         1,
@@ -1546,6 +1611,12 @@ fn a_read_only_connected_session_disables_minting_and_revoking() {
         "…and says why: {toasted:?}"
     );
 
+    let copied = record_copies();
+    open_row_menu(&mut h, SEEDED_TOKENS[1]);
+    choose(&mut h, TokenMenu::CopyName);
+    assert_eq!(copied.borrow().as_slice(), [SEEDED_TOKENS[1]]);
+    set_copy_name_sink_for_tests(None);
+
     let values = node_values(&h.root);
     for name in SEEDED_TOKENS {
         assert!(values.iter().any(|v| v == name), "{name:?}: {values:?}");
@@ -1556,9 +1627,9 @@ fn a_read_only_connected_session_disables_minting_and_revoking() {
 fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
 
-    open_dialog_by_value(&mut h, "create new token");
+    open_create_dialog(&mut h);
     assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
 
     // An iPhone-SE-class display with a keyboard up.
@@ -1592,9 +1663,9 @@ fn new_token_dialog_actions_clear_the_keyboard_on_a_short_display() {
 fn a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::connected();
+    let mut h = Harness::tokens();
 
-    let dialog = open_dialog_by_value(&mut h, "create new token");
+    let dialog = open_create_dialog(&mut h);
     assert_eq!(h.depth(), 2, "the dialog is pushed as its own page");
 
     h.tap(center(dialog.content_child()));
@@ -1617,6 +1688,431 @@ fn a_dead_space_down_blurs_the_focused_name_field_without_closing_the_dialog() {
     assert!(
         h.root.ime_state().is_some(),
         "a second tap on the field re-engages it"
+    );
+}
+
+fn record_copies() -> Rc<std::cell::RefCell<Vec<String>>> {
+    let copied = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Rc::clone(&copied);
+    set_copy_name_sink_for_tests(Some(Rc::new(move |name: &str| {
+        sink.borrow_mut().push(name.to_string())
+    })));
+    copied
+}
+
+fn filter_tokens(h: &mut Harness, query: &str) {
+    let field = node_center_by_role(&h.root, Role::TextInput).expect("the filter field");
+    h.tap(field);
+    h.type_text(query);
+    h.frame();
+    h.frame();
+}
+
+fn filter_value(h: &Harness) -> Option<String> {
+    h.root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::TextInput)
+        .and_then(|(_, node)| node.value().map(str::to_string))
+}
+
+fn segment_labels(h: &Harness) -> Vec<String> {
+    h.root
+        .semantics()
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.role() == Role::Tab)
+        .filter_map(|(_, node)| node.label().map(str::to_string))
+        .collect()
+}
+
+fn selected_segment(h: &Harness) -> Option<String> {
+    h.root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Tab && node.is_selected() == Some(true))
+        .and_then(|(_, node)| node.label().map(str::to_string))
+}
+
+/// Every segment node carries the whole control's bounds, so this walks the control's width
+/// until the one named `prefix` reads selected.
+fn select_segment(h: &mut Harness, prefix: &str) {
+    let bar = h
+        .root
+        .semantics()
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::TabList)
+        .and_then(|(_, node)| node.bounds())
+        .expect("the segmented control");
+    let y = (bar.y0 + bar.y1) / 2.0;
+    let mut x = bar.x0 + 2.0;
+    while x < bar.x1 {
+        if selected_segment(h).is_some_and(|label| label.starts_with(prefix)) {
+            return;
+        }
+        h.tap(Point::new(x, y));
+        h.frame();
+        x += 6.0;
+    }
+    assert!(
+        selected_segment(h).is_some_and(|label| label.starts_with(prefix)),
+        "no segment named {prefix:?}: {:?}",
+        segment_labels(h)
+    );
+}
+
+#[test]
+fn the_filter_matches_a_case_insensitive_substring_and_counts_what_it_shows() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::tokens();
+
+    filter_tokens(&mut h, "TOKEN");
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == SEEDED_TOKENS[1]), "{values:?}");
+    assert!(!values.iter().any(|v| v == SEEDED_TOKENS[0]), "{values:?}");
+    assert!(values.iter().any(|v| v == "1 of 2 tokens"), "{values:?}");
+
+    filter_tokens(&mut h, "zz");
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == NO_MATCH_LABEL), "{values:?}");
+    assert!(
+        !values
+            .iter()
+            .any(|v| v.ends_with(" tokens") && v.contains(" of ")),
+        "no count under an empty result: {values:?}"
+    );
+}
+
+#[test]
+fn each_segment_narrows_by_scope_and_combines_with_the_filter() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::tokens();
+    assert_eq!(segment_labels(&h), ["all 2", "read-write 1", "read-only 1"]);
+    assert_eq!(selected_segment(&h).as_deref(), Some("all 2"));
+    assert!(
+        !node_values(&h.root).iter().any(|v| v.contains(" of ")),
+        "no count with nothing narrowed"
+    );
+
+    select_segment(&mut h, "read-only");
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == SEEDED_TOKENS[1]), "{values:?}");
+    assert!(!values.iter().any(|v| v == SEEDED_TOKENS[0]), "{values:?}");
+    assert!(values.iter().any(|v| v == "1 of 2 tokens"), "{values:?}");
+
+    select_segment(&mut h, "read-write");
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == SEEDED_TOKENS[0]), "{values:?}");
+    assert!(!values.iter().any(|v| v == SEEDED_TOKENS[1]), "{values:?}");
+
+    filter_tokens(&mut h, "token");
+    let values = node_values(&h.root);
+    assert!(
+        values.iter().any(|v| v == NO_MATCH_LABEL),
+        "read-write and \"token\" match nothing: {values:?}"
+    );
+    assert_eq!(
+        segment_labels(&h),
+        ["all 2", "read-write 1", "read-only 1"],
+        "the counts stay the server's"
+    );
+
+    select_segment(&mut h, "all");
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == SEEDED_TOKENS[1]), "{values:?}");
+}
+
+#[test]
+fn copy_name_writes_the_rows_name_to_the_clipboard() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::tokens();
+    app_toasts().clear();
+    let copied = record_copies();
+
+    open_row_menu(&mut h, SEEDED_TOKENS[0]);
+    choose(&mut h, TokenMenu::CopyName);
+    set_copy_name_sink_for_tests(None);
+
+    assert_eq!(copied.borrow().as_slice(), [SEEDED_TOKENS[0]]);
+    assert_eq!(h.depth(), 1, "copying opens nothing");
+    let toasted = app_toasts().pending_untracked();
+    assert!(
+        toasted.iter().any(|m| m == "Copied to clipboard"),
+        "{toasted:?}"
+    );
+}
+
+#[test]
+fn the_row_menus_revoke_targets_its_own_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let recording = Rc::new(std::cell::RefCell::new(None));
+    let slot = Rc::clone(&recording);
+    let mut h = Harness::tokens_seeded(move || {
+        *slot.borrow_mut() = Some(provide_recording_revoke());
+    });
+    let recording = recording.borrow_mut().take().expect("the seed ran");
+    let _clock = AnimationClock::pinned();
+
+    let dialog = open_revoke(&mut h, SEEDED_TOKENS[1]);
+    assert!(
+        dialog_says(&h, "disconnected immediately"),
+        "the existing confirm: {:?}",
+        node_values(&h.root)
+    );
+    confirm(&mut h, &dialog);
+    pump_until(&mut h, "the revoke to land", || {
+        !recording.revoked().is_empty()
+    });
+    assert_eq!(recording.revoked(), [SEEDED_TOKENS[1]]);
+}
+
+/// The pinned row needs the saved credential's token name for the connected endpoint.
+fn tokens_on_cred(token_name: Option<&str>) -> Harness {
+    let token_name = token_name.map(str::to_string);
+    let mut harness = Harness::mount_page(Page::Tokens, move || {
+        let mut row = credential_row(true);
+        row.token_name = token_name;
+        expect_saved_servers()
+            .save(row)
+            .expect("the mock store never fails");
+    });
+    expect_connection_controller().connect(connected_to_cred());
+    harness.await_tokens();
+    harness
+}
+
+#[test]
+fn the_token_this_device_signed_in_with_is_pinned_first_and_marked() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = tokens_on_cred(Some(SEEDED_TOKENS[1]));
+    let mine = format!("{THIS_DEVICE_PREFIX}created 2026-07-10");
+    h.pump_until_values("the pinned row", |values| values.contains(&mine));
+
+    assert!(
+        h.center_of(SEEDED_TOKENS[1]).y < h.center_of(SEEDED_TOKENS[0]).y,
+        "pinned above the server's first token"
+    );
+    let values = node_values(&h.root);
+    assert!(
+        values.iter().any(|v| v == "created 2026-07-02"),
+        "the other row keeps a plain meta line: {values:?}"
+    );
+    assert_eq!(
+        values
+            .iter()
+            .filter(|v| v.starts_with(THIS_DEVICE_PREFIX))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn an_unknown_or_unmatched_credential_name_pins_and_marks_nothing() {
+    let _g = serial();
+    let _ambient = setup();
+    for name in [None, Some("gone")] {
+        let mut h = tokens_on_cred(name);
+        for _ in 0..3 {
+            h.pump_once();
+        }
+        let values = node_values(&h.root);
+        assert!(
+            !values.iter().any(|v| v.starts_with(THIS_DEVICE_PREFIX)),
+            "{name:?}: {values:?}"
+        );
+        assert!(
+            h.center_of(SEEDED_TOKENS[0]).y < h.center_of(SEEDED_TOKENS[1]).y,
+            "{name:?}: the server's order"
+        );
+    }
+}
+
+/// A token store with a fixed list, recording its revokes.
+struct ScriptedTokens {
+    tokens: Mutex<Vec<AuthToken>>,
+    revoked: Mutex<Vec<String>>,
+}
+
+impl ScriptedTokens {
+    fn named(prefix: &str, count: usize) -> Arc<Self> {
+        Arc::new(Self {
+            tokens: Mutex::new(
+                (0..count)
+                    .map(|i| AuthToken {
+                        name: format!("{prefix}-{i:02}"),
+                        scope: if i % 3 == 2 {
+                            TokenScope::ReadOnly
+                        } else {
+                            TokenScope::ReadWrite
+                        },
+                        created: "2026-11-02".to_string(),
+                    })
+                    .collect(),
+            ),
+            revoked: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn revoked(&self) -> Vec<String> {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+#[clean_signals::async_trait]
+impl AuthTokensRepository for ScriptedTokens {
+    async fn list_tokens(&self) -> Result<Vec<AuthToken>, AppFailure> {
+        Ok(self
+            .tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone())
+    }
+
+    async fn create_token(&self, request: CreateTokenRequest) -> Result<MintedToken, AppFailure> {
+        Err(AppFailure::Internal(format!(
+            "not scripted: {}",
+            request.name
+        )))
+    }
+
+    async fn revoke_token(&self, name: String) -> Result<(), AppFailure> {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(name.clone());
+        self.tokens
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|token| token.name != name);
+        Ok(())
+    }
+}
+
+/// Answers for whichever server is live, as the real repository does over its connection.
+struct PerServerTokens {
+    servers: [Arc<ScriptedTokens>; 2],
+    second: AtomicBool,
+}
+
+impl PerServerTokens {
+    fn live(&self) -> &ScriptedTokens {
+        &self.servers[usize::from(self.second.load(Ordering::SeqCst))]
+    }
+}
+
+#[clean_signals::async_trait]
+impl AuthTokensRepository for PerServerTokens {
+    async fn list_tokens(&self) -> Result<Vec<AuthToken>, AppFailure> {
+        self.live().list_tokens().await
+    }
+
+    async fn create_token(&self, request: CreateTokenRequest) -> Result<MintedToken, AppFailure> {
+        self.live().create_token(request).await
+    }
+
+    async fn revoke_token(&self, name: String) -> Result<(), AppFailure> {
+        self.live().revoke_token(name).await
+    }
+}
+
+#[test]
+fn a_server_switch_reloads_the_list_clears_the_filter_and_revokes_on_the_new_server() {
+    let _g = serial();
+    let _ambient = setup();
+    let first = ScriptedTokens::named("alpha", 3);
+    let second = ScriptedTokens::named("beta", 2);
+    let repository = Arc::new(PerServerTokens {
+        servers: [Arc::clone(&first), Arc::clone(&second)],
+        second: AtomicBool::new(false),
+    });
+    let shared: SharedAuthTokensRepository = repository.clone();
+    let mut h = Harness::mount_page(Page::Tokens, move || provide_context(shared));
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+    h.pump_until_values("the first server's tokens", |values| {
+        values.iter().any(|v| v == "alpha-00")
+    });
+    filter_tokens(&mut h, "alpha");
+    assert_eq!(filter_value(&h).as_deref(), Some("alpha"));
+
+    repository.second.store(true, Ordering::SeqCst);
+    expect_connection_controller().switch_to(connected_to_cred(), |_| {});
+    h.frame();
+    let values = node_values(&h.root);
+    assert!(
+        !values.iter().any(|v| v.starts_with("alpha-")),
+        "the previous server's tokens leave with it: {values:?}"
+    );
+    h.pump_until_values("the new server's tokens", |values| {
+        values.iter().any(|v| v == "beta-00") && values.iter().any(|v| v == "beta-01")
+    });
+    assert_eq!(filter_value(&h).as_deref(), Some(""), "the filter cleared");
+    assert_eq!(segment_labels(&h), ["all 2", "read-write 2", "read-only 0"]);
+
+    let _clock = AnimationClock::pinned();
+    let dialog = open_revoke(&mut h, "beta-01");
+    confirm(&mut h, &dialog);
+    pump_until(&mut h, "the revoke to land", || {
+        !second.revoked().is_empty()
+    });
+    assert_eq!(second.revoked(), ["beta-01"]);
+    assert!(first.revoked().is_empty(), "the old server is never asked");
+}
+
+#[test]
+fn forty_tokens_scroll_beneath_a_filter_that_stays_in_reach() {
+    let _g = serial();
+    let _ambient = setup();
+    let shared: SharedAuthTokensRepository = ScriptedTokens::named("fleet", 40);
+    let mut h = Harness::mount_page(Page::Tokens, move || provide_context(shared));
+    expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
+    h.pump_until_values("the fleet", |values| values.iter().any(|v| v == "fleet-00"));
+
+    let phone = Size::new(402.0, 874.0);
+    let settle_phone =
+        |h: &mut Harness| settle_sized(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, phone);
+    settle_phone(&mut h);
+    assert_eq!(
+        segment_labels(&h),
+        ["all 40", "read-write 27", "read-only 13"]
+    );
+    let field = node_center_by_role(&h.root, Role::TextInput).expect("the filter field");
+    let last = h.center_of("fleet-39");
+    assert!(
+        last.y > phone.height,
+        "the list overflows the phone: {last:?}"
+    );
+
+    let list = h.center_of("fleet-03");
+    for _ in 0..60 {
+        h.root.event(
+            &mut h.state,
+            &InputEvent::Scroll {
+                position: list,
+                delta: ScrollDelta::Lines(0.0, 3.0),
+            },
+        );
+        settle_phone(&mut h);
+    }
+    let last = h.center_of("fleet-39");
+    assert!(
+        last.y < phone.height,
+        "wheeling reached the last row: {last:?}"
+    );
+    let still = node_center_by_role(&h.root, Role::TextInput).expect("the filter field");
+    assert!(
+        (still.y - field.y).abs() < EPSILON,
+        "the filter never scrolled away: {field:?} -> {still:?}"
     );
 }
 
@@ -2063,7 +2559,7 @@ fn with_vault_credential(page: Page, unlocked: bool, pro: bool) -> Harness {
     });
     expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
     match page {
-        Page::Server => harness.await_tokens(),
+        Page::Server | Page::Tokens => harness.await_tokens(),
         Page::App => await_label(&mut harness, CRED_LABEL),
     }
     if pro {
@@ -3622,7 +4118,7 @@ fn a_full_band_tablet_packs_the_cards_into_two_columns() {
     h.frame();
 
     let values = node_values(&h.root);
-    for group in ["ACCESS", "THIS SERVER", "AUTH TOKENS"] {
+    for group in ["ACCESS", "THIS SERVER", TABLET_TOKENS_TITLE] {
         assert!(values.iter().any(|v| v == group), "{group:?}: {values:?}");
     }
     assert!(
@@ -3632,7 +4128,7 @@ fn a_full_band_tablet_packs_the_cards_into_two_columns() {
     let identity = value_center(&h, "TLS");
     let access = value_center(&h, "ACCESS");
     let this_server = value_center(&h, "THIS SERVER");
-    let tokens = value_center(&h, "AUTH TOKENS");
+    let tokens = value_center(&h, TABLET_TOKENS_TITLE);
     assert!(
         identity.y < access.y && access.y < this_server.y,
         "the left column runs identity, access, this server: {identity:?} {access:?} {this_server:?}"
@@ -3653,10 +4149,41 @@ fn a_full_band_tablet_packs_the_cards_into_two_columns() {
         lock.x < tokens.x - 100.0 && lock.y > this_server.y,
         "…under its title, in the left column: {lock:?}"
     );
+    for name in SEEDED_TOKENS {
+        assert!(
+            value_center(&h, name).x > tokens.x - 100.0,
+            "the token list is in the right card: {values:?}"
+        );
+    }
+}
+
+#[test]
+fn the_full_band_tokens_card_carries_the_filter_segments_rows_and_new_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = connected_with_metrics(Some(support::metrics_at(1024.0, 720.0)));
+    h.frame();
+
+    let roles = node_roles(&h.root);
+    assert!(roles.contains(&Role::TextInput), "the filter: {roles:?}");
+    assert!(roles.contains(&Role::TabList), "the segments: {roles:?}");
+    assert_eq!(segment_labels(&h), ["all 2", "read-write 1", "read-only 1"]);
+    for name in SEEDED_TOKENS {
+        assert_eq!(actions_buttons(&h, name), 1, "{name:?} has its row");
+    }
+
+    filter_tokens(&mut h, "token");
+    let values = node_values(&h.root);
     assert!(
-        values.iter().any(|v| v == "create new token"),
-        "the token list is in the right card: {values:?}"
+        !values.iter().any(|v| v == SEEDED_TOKENS[0]),
+        "the card filters like the page: {values:?}"
     );
+    assert!(values.iter().any(|v| v == "1 of 2 tokens"), "{values:?}");
+
+    h.tap_value(NEW_TOKEN_ACTION);
+    h.settle();
+    assert_eq!(h.depth(), 2, "+ new token opens the create dialog");
+    assert!(node_labels(&h.root).iter().any(|l| l == "Save"));
 }
 
 #[test]
@@ -3669,14 +4196,23 @@ fn a_collapsed_band_tablet_stacks_the_cards() {
     let identity = value_center(&h, "TLS");
     let access = value_center(&h, "ACCESS");
     let this_server = value_center(&h, "THIS SERVER");
-    let tokens = value_center(&h, "AUTH TOKENS");
+    let tokens_row = value_center(&h, "auth tokens");
     assert!(
-        (access.x - tokens.x).abs() < 20.0 && (access.x - this_server.x).abs() < 20.0,
-        "one column (title centres differ only by text width): {access:?} {this_server:?} {tokens:?}"
+        (access.x - this_server.x).abs() < 20.0,
+        "one column (title centres differ only by text width): {access:?} {this_server:?}"
     );
     assert!(
-        identity.y < access.y && access.y < this_server.y && this_server.y < tokens.y,
-        "stacked in phone order: {identity:?} {access:?} {this_server:?} {tokens:?}"
+        identity.y < access.y && access.y < tokens_row.y && tokens_row.y < this_server.y,
+        "stacked in phone order, the tokens row in access: {identity:?} {access:?} {tokens_row:?} \
+         {this_server:?}"
+    );
+    let values = node_values(&h.root);
+    assert_eq!(value_after(&values, "auth tokens"), SEEDED_COUNT_VALUE);
+    assert!(
+        !values
+            .iter()
+            .any(|v| v.starts_with("AUTH TOKENS") || v == SEEDED_TOKENS[0]),
+        "the list is the page's, not a card's: {values:?}"
     );
 }
 

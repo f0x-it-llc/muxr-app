@@ -6,7 +6,7 @@ use frust_core::RenderRoot;
 use frust_text::TextContext;
 
 use muxr::connection::{ConnectTarget, TrustMode, expect_connection_controller};
-use muxr::routes::{APP_SETTINGS_ROUTE, Nav, app_nav};
+use muxr::routes::{APP_SETTINGS_ROUTE, Nav, TOKENS_ROUTE, app_nav};
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -282,6 +282,23 @@ fn app_settings_resolves_connected_and_disconnected_while_settings_still_bounces
     assert_eq!(resolved_path(&state, "/settings"), "/settings");
 }
 
+#[test]
+fn the_tokens_page_redirects_to_connect_until_a_server_is_connected() {
+    let _g = serial();
+    let _ambient = setup();
+    let state = MuxrApp.init();
+
+    assert_eq!(
+        resolved_path(&state, TOKENS_ROUTE),
+        "/",
+        "/settings/tokens bounces while unauthenticated"
+    );
+
+    expect_connection_controller().connect(mock_target());
+
+    assert_eq!(resolved_path(&state, TOKENS_ROUTE), TOKENS_ROUTE);
+}
+
 fn shown(root: &Root) -> Vec<String> {
     [node_values(root), node_labels(root)].concat()
 }
@@ -384,6 +401,41 @@ fn app_settings_pushed_from_server_settings_pops_back_to_it() {
     let values = shown(&root);
     assert!(
         values.iter().any(|v| v == "server settings") && !values.iter().any(|v| v == "font family"),
+        "back landed on server settings: {values:?}"
+    );
+}
+
+#[test]
+fn the_tokens_page_pushed_from_server_settings_wears_its_bar_and_pops_back_to_it() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let mut root: Root = RenderRoot::new();
+    let mut state = MuxrApp.init();
+    let mut logic = |s: &mut AppState| AnyView::new(MuxrApp.build(s));
+    let mut tcx = TextContext::new();
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    expect_connection_controller().connect(mock_target());
+    app_nav().push("/settings");
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    app_nav().push(TOKENS_ROUTE);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    let values = shown(&root);
+    assert!(
+        values.iter().any(|v| v == "auth tokens") && values.iter().any(|v| v == "New token"),
+        "the bar's title and its + action: {values:?}"
+    );
+
+    app_nav().pop();
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+    settle(&mut root, &mut logic, &mut state, &mut tcx);
+
+    let values = shown(&root);
+    assert!(
+        values.iter().any(|v| v == "server settings") && !values.iter().any(|v| v == "New token"),
         "back landed on server settings: {values:?}"
     );
 }

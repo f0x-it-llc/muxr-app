@@ -45,12 +45,13 @@ fn card_children<S: 'static, V: View<S>>(children: Vec<V>, flex: Option<u32>) ->
 }
 
 /// The server screen's cards. The Full band puts `identity`, `access` and `this_server` in the
-/// left column and the `tokens` card in the right; the Collapsed band stacks them in that order.
+/// left column and the `tokens` card, built whole, in the right; the Collapsed band stacks them in
+/// that order.
 pub(in super::super) struct ServerCards {
     pub identity: AnyView<SettingsState>,
     pub access: Vec<AnyView<SettingsState>>,
     pub this_server: Vec<AnyView<SettingsState>>,
-    pub tokens: Vec<AnyView<SettingsState>>,
+    pub tokens: Option<AnyView<SettingsState>>,
 }
 
 pub(in super::super) fn server_tablet_scroller(
@@ -62,12 +63,12 @@ pub(in super::super) fn server_tablet_scroller(
         identity,
         access,
         this_server,
-        tokens,
+        mut tokens,
     } = cards;
     let access = any(group_card("access", access, colors));
     let this_server = any(group_card("this server", this_server, colors));
-    let tokens = any(group_card("auth tokens", tokens, colors));
-    let lines: Vec<AnyView<SettingsState>> = if full {
+    // erasure: keep accumulator into Vec<AnyView>
+    let mut lines: Vec<AnyView<SettingsState>> = if full {
         let column = |cards: Vec<AnyView<SettingsState>>| {
             FlexView::new(Axis::Vertical, card_children(cards, None))
                 .gap(CARD_GAP)
@@ -78,7 +79,7 @@ pub(in super::super) fn server_tablet_scroller(
             card_children(
                 vec![
                     column(vec![identity, access, this_server]),
-                    column(vec![tokens]),
+                    column(tokens.take().into_iter().collect()),
                 ],
                 Some(1),
             ),
@@ -86,8 +87,9 @@ pub(in super::super) fn server_tablet_scroller(
         .gap(CARD_GAP)
         .cross_axis(CrossAxisAlignment::Start))]
     } else {
-        vec![identity, access, this_server, tokens]
+        vec![identity, access, this_server]
     };
+    lines.extend(tokens);
     grid_shell(lines)
 }
 

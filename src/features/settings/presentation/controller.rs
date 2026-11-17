@@ -3,9 +3,10 @@
 //! device-wide preferences. Only the last two serve with no server connected.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use clean_signals::{ControllerCore, NoParams, RunOptions};
-use frust::{GetUntracked, RwSignal, Set, spawn_local};
+use frust::{Get, GetUntracked, RwSignal, Set, spawn_local};
 use zeroize::Zeroizing;
 
 use crate::connection::ConnectionController;
@@ -15,7 +16,7 @@ use crate::features::connect::domain::entities::{CredentialStatus, SavedServer};
 use crate::features::connect::presentation::controller::SAVED_LIST_UNAVAILABLE_MESSAGE;
 use crate::features::connect::presentation::{KeyringUnlock, KeyringUnlockOutcome};
 use crate::features::settings::domain::entities::{
-    AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken, PollPrefs, Preferences,
+    AppearancePrefs, AuthToken, CreateTokenRequest, MintedToken, PollPrefs, Preferences, TokenScope,
 };
 use crate::features::settings::domain::repositories::{
     AuthTokensRepository, PreferencesRepository,
@@ -49,6 +50,109 @@ fn report(status: CredentialStatus) {
     }
 }
 
+/// The token list's scope segments, in their on-screen order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScopeFilter {
+    #[default]
+    All,
+    ReadWrite,
+    ReadOnly,
+}
+
+impl ScopeFilter {
+    pub const SEGMENTS: [ScopeFilter; 3] = [
+        ScopeFilter::All,
+        ScopeFilter::ReadWrite,
+        ScopeFilter::ReadOnly,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ScopeFilter::All => "all",
+            ScopeFilter::ReadWrite => TokenScope::ReadWrite.label(),
+            ScopeFilter::ReadOnly => TokenScope::ReadOnly.label(),
+        }
+    }
+
+    pub fn index(self) -> usize {
+        Self::SEGMENTS
+            .iter()
+            .position(|segment| *segment == self)
+            .unwrap_or(0)
+    }
+
+    fn admits(self, scope: TokenScope) -> bool {
+        match self {
+            ScopeFilter::All => true,
+            ScopeFilter::ReadWrite => scope == TokenScope::ReadWrite,
+            ScopeFilter::ReadOnly => scope == TokenScope::ReadOnly,
+        }
+    }
+}
+
+/// A case-insensitive substring of the name, combined with the segment; a blank query admits all.
+pub fn token_shown(name: &str, scope: TokenScope, query: &str, segment: ScopeFilter) -> bool {
+    let query = query.trim().to_lowercase();
+    segment.admits(scope) && (query.is_empty() || name.to_lowercase().contains(&query))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenRow {
+    pub token: AuthToken,
+    /// The token this device signed in with.
+    pub this_device: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenListView {
+    pub rows: Vec<TokenRow>,
+    /// Per segment, in [`ScopeFilter::SEGMENTS`] order; the query never narrows them.
+    pub counts: [usize; 3],
+    pub total: usize,
+    /// A query or a segment other than `all` is active.
+    pub narrowed: bool,
+}
+
+/// The server's order, except that the row named `device_token` is pinned first.
+pub fn token_list_view(
+    tokens: &[AuthToken],
+    query: &str,
+    segment: ScopeFilter,
+    device_token: Option<&str>,
+) -> TokenListView {
+    let counts = ScopeFilter::SEGMENTS.map(|segment| {
+        tokens
+            .iter()
+            .filter(|token| segment.admits(token.scope))
+            .count()
+    });
+    let mine = |token: &AuthToken| device_token == Some(token.name.as_str());
+    let (pinned, rest): (Vec<&AuthToken>, Vec<&AuthToken>) =
+        tokens.iter().partition(|token| mine(token));
+    let rows = pinned
+        .into_iter()
+        .chain(rest)
+        .filter(|token| token_shown(&token.name, token.scope, query, segment))
+        .map(|token| TokenRow {
+            token: token.clone(),
+            this_device: mine(token),
+        })
+        .collect();
+    TokenListView {
+        rows,
+        counts,
+        total: tokens.len(),
+        narrowed: !query.trim().is_empty() || segment != ScopeFilter::All,
+    }
+}
+
+/// What a screen shows of the token list: only a list read under the live connection.
+pub struct TokenSnapshot {
+    pub tokens: Vec<AuthToken>,
+    pub loaded: bool,
+    pub failed: bool,
+}
+
 pub struct SettingsController {
     core: ControllerCore<AppFailure>,
     list_tokens: ListTokens,
@@ -58,6 +162,10 @@ pub struct SettingsController {
     pub loaded: RwSignal<bool>,
     /// The last token list read failed; a later success clears it.
     pub load_failed: RwSignal<bool>,
+    /// The connection epoch [`Self::tokens`] was read under, once one has been.
+    pub list_epoch: RwSignal<Option<u64>>,
+    /// Bumped by every [`Self::load_for`], so a reply to a superseded read is dropped.
+    generation: AtomicU64,
     /// A minted secret stays here until the next mint or an explicit dismissal clears it.
     pub pending_token_secret: RwSignal<Option<MintedToken>>,
 }
@@ -72,6 +180,8 @@ impl SettingsController {
             tokens: RwSignal::new(Vec::new()),
             loaded: RwSignal::new(false),
             load_failed: RwSignal::new(false),
+            list_epoch: RwSignal::new(None),
+            generation: AtomicU64::new(0),
             pending_token_secret: RwSignal::new(None),
         }
     }
@@ -82,22 +192,72 @@ impl SettingsController {
     }
 
     pub async fn refresh(&self) {
-        self.refresh_tokens().await;
+        if self.refresh_tokens().await {
+            self.loaded.set(true);
+        }
+    }
+
+    /// Tracked. Under any other connection than `epoch` the list reads as still loading.
+    pub fn snapshot_for(&self, epoch: u64) -> TokenSnapshot {
+        if self.list_epoch.get() != Some(epoch) {
+            return TokenSnapshot {
+                tokens: Vec::new(),
+                loaded: false,
+                failed: false,
+            };
+        }
+        TokenSnapshot {
+            tokens: self.tokens.get(),
+            loaded: self.loaded.get(),
+            failed: self.load_failed.get(),
+        }
+    }
+
+    /// Reads the list for connection `epoch`, superseding every read still in flight; a failed
+    /// read for a new connection leaves no other server's token behind.
+    pub async fn load_for(&self, epoch: u64) {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let result = self
+            .core
+            .run(&self.list_tokens, NoParams, RunOptions::default())
+            .await;
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        match result {
+            Ok(tokens) => {
+                self.tokens.set(tokens);
+                self.load_failed.set(false);
+            }
+            Err(_) => {
+                if self.list_epoch.try_get_untracked().flatten() != Some(epoch) {
+                    self.tokens.set(Vec::new());
+                }
+                self.load_failed.set(true);
+            }
+        }
+        self.list_epoch.set(Some(epoch));
         self.loaded.set(true);
     }
 
-    pub async fn refresh_tokens(&self) {
-        match self
+    /// `false` when a [`Self::load_for`] started meanwhile, whose answer then stands.
+    pub async fn refresh_tokens(&self) -> bool {
+        let generation = self.generation.load(Ordering::SeqCst);
+        let result = self
             .core
             .run(&self.list_tokens, NoParams, RunOptions::default())
-            .await
-        {
+            .await;
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return false;
+        }
+        match result {
             Ok(tokens) => {
                 self.tokens.set(tokens);
                 self.load_failed.set(false);
             }
             Err(_) => self.load_failed.set(true),
         }
+        true
     }
 
     pub async fn create_token(&self, name: String, read_only: bool) -> bool {
@@ -722,6 +882,94 @@ mod tests {
             SEEDED_COUNT,
             "the list is back where it started"
         );
+    }
+
+    fn token(name: &str, scope: TokenScope) -> AuthToken {
+        AuthToken {
+            name: name.to_string(),
+            scope,
+            created: "2026-11-02".to_string(),
+        }
+    }
+
+    fn names(view: &TokenListView) -> Vec<&str> {
+        view.rows
+            .iter()
+            .map(|row| row.token.name.as_str())
+            .collect()
+    }
+
+    fn fleet() -> Vec<AuthToken> {
+        vec![
+            token("ed-laptop", TokenScope::ReadWrite),
+            token("CI-runner", TokenScope::ReadWrite),
+            token("demo-viewer", TokenScope::ReadOnly),
+            token("ed-iphone", TokenScope::ReadWrite),
+        ]
+    }
+
+    #[test]
+    fn the_filter_is_a_case_insensitive_substring_of_the_name() {
+        let view = token_list_view(&fleet(), "  ci ", ScopeFilter::All, None);
+        assert_eq!(names(&view), ["CI-runner"]);
+        assert!(view.narrowed);
+        let view = token_list_view(&fleet(), "ED-", ScopeFilter::All, None);
+        assert_eq!(
+            names(&view),
+            ["ed-laptop", "ed-iphone"],
+            "server order kept"
+        );
+    }
+
+    #[test]
+    fn segments_narrow_by_scope_and_combine_with_the_query() {
+        let all = token_list_view(&fleet(), "", ScopeFilter::All, None);
+        assert_eq!(all.counts, [4, 3, 1]);
+        assert!(!all.narrowed);
+        let read_only = token_list_view(&fleet(), "", ScopeFilter::ReadOnly, None);
+        assert_eq!(names(&read_only), ["demo-viewer"]);
+        assert!(read_only.narrowed);
+        let both = token_list_view(&fleet(), "ed", ScopeFilter::ReadWrite, None);
+        assert_eq!(names(&both), ["ed-laptop", "ed-iphone"]);
+        assert_eq!(both.counts, [4, 3, 1], "the query never narrows the counts");
+        assert!(
+            token_list_view(&fleet(), "zz", ScopeFilter::All, None)
+                .rows
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_device_token_is_pinned_first_and_marked_and_an_unknown_one_pins_nothing() {
+        let view = token_list_view(&fleet(), "", ScopeFilter::All, Some("ed-iphone"));
+        assert_eq!(
+            names(&view),
+            ["ed-iphone", "ed-laptop", "CI-runner", "demo-viewer"]
+        );
+        assert!(view.rows[0].this_device);
+        assert!(view.rows[1..].iter().all(|row| !row.this_device));
+        for device in [None, Some("gone")] {
+            let view = token_list_view(&fleet(), "", ScopeFilter::All, device);
+            assert_eq!(names(&view)[0], "ed-laptop");
+            assert!(view.rows.iter().all(|row| !row.this_device));
+        }
+    }
+
+    #[test]
+    fn a_list_shows_only_under_the_connection_it_was_read_for() {
+        let c = controller();
+        block_on(c.load_for(3));
+        assert_eq!(c.snapshot_for(3).tokens.len(), SEEDED_COUNT);
+        let other = c.snapshot_for(4);
+        assert!(other.tokens.is_empty() && !other.loaded && !other.failed);
+    }
+
+    #[test]
+    fn a_refresh_overtaken_by_a_reload_never_lands() {
+        let c = controller();
+        let (refreshed, ()) = block_on(async { tokio::join!(c.refresh_tokens(), c.load_for(2)) });
+        assert!(!refreshed, "the reload started meanwhile owns the list");
+        assert_eq!(c.list_epoch.get_untracked(), Some(2));
     }
 
     #[test]

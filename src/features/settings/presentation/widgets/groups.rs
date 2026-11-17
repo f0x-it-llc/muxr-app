@@ -3,12 +3,10 @@ use std::rc::Rc;
 use frust::{AnyView, ButtonStyle, any, button};
 
 use crate::connection::{ServerBackend, TrustMode};
-use crate::features::settings::domain::entities::{
-    AppearancePrefs, AuthToken, PollPrefs, TokenScope,
-};
+use crate::features::settings::domain::entities::{AppearancePrefs, PollPrefs};
 use crate::features::settings::presentation::app_pages::AppSettingsState;
+use crate::features::settings::presentation::controller::TokenListView;
 use crate::features::settings::presentation::pages::{self, SettingsState};
-use crate::features::settings::presentation::scramble::{RevokeScramble, ScramblePose};
 use crate::ui::palette::Palette;
 
 use super::misc::bell_notifications_row;
@@ -18,7 +16,6 @@ use super::server_sheet::{DELETE_LABEL, FORGET_SERVER_LABEL, SAVED_CREDENTIAL_LA
 
 const APP_SETTINGS_VALUE: &str = "fonts, bell, Muxr Pro, servers";
 const GETTING_STARTED_VALUE: &str = "pair a server in three steps";
-use super::tokens::{scrambling_token_item, token_item};
 
 /// The same copy the saved-server sheet prints for these two actions.
 const SAVED_CREDENTIAL_VALUE: &str = "on this device";
@@ -30,67 +27,31 @@ const TOKENS_FAILED_VALUE: &str = "couldn't load tokens";
 /// `/settings` is not route-guarded, so a deep link or a disconnect racing a rebuild shows this.
 pub(super) const DISCONNECTED_VALUE: &str = "not connected";
 
-/// A token whose refresh already removed it keeps its scramble row at its old index (clamped),
-/// orphans in ascending index, so nothing under it jumps while the collapse plays out.
-pub(in super::super) fn token_rows(
-    tokens: &[AuthToken],
-    showing: &[(RevokeScramble, ScramblePose)],
-    read_only: bool,
-    colors: &Palette,
-) -> Vec<AnyView<SettingsState>> {
-    let animating = |token: &AuthToken| {
-        showing
-            .iter()
-            .find(|(entry, _)| entry.token.name == token.name)
-    };
-    let mut rows: Vec<AnyView<SettingsState>> = tokens
-        .iter()
-        .map(|token| match animating(token) {
-            Some((entry, pose)) => scrambling_token_item(&entry.token, pose, colors),
-            None => token_item(token, colors, !read_only),
-        })
-        .collect();
-
-    let mut orphans: Vec<&(RevokeScramble, ScramblePose)> = showing
-        .iter()
-        .filter(|(entry, _)| !tokens.iter().any(|token| token.name == entry.token.name))
-        .collect();
-    orphans.sort_by_key(|(entry, _)| entry.index);
-    for (entry, pose) in orphans {
-        let at = entry.index.min(rows.len());
-        rows.insert(at, scrambling_token_item(&entry.token, pose, colors));
-    }
-    rows
-}
-
 /// `<n> tokens · <m> read-only`, singular for one; the load states stand in for it until a list
 /// has landed.
-fn token_count_value(tokens: &[AuthToken], loaded: bool, failed: bool) -> String {
+fn token_count_value(total: usize, read_only: usize, loaded: bool, failed: bool) -> String {
     if failed {
         return TOKENS_FAILED_VALUE.to_string();
     }
     if !loaded {
         return TOKENS_LOADING_VALUE.to_string();
     }
-    let read_only = tokens
-        .iter()
-        .filter(|token| token.scope == TokenScope::ReadOnly)
-        .count();
-    let noun = if tokens.len() == 1 { "token" } else { "tokens" };
-    format!("{} {noun} \u{b7} {read_only} read-only", tokens.len())
+    let noun = if total == 1 { "token" } else { "tokens" };
+    format!("{total} {noun} \u{b7} {read_only} read-only")
 }
 
-/// Opens nothing yet: the token list renders beneath the page until its own page is routed.
+/// Pushes the tokens page.
 pub(in super::super) fn tokens_row(
-    tokens: &[AuthToken],
+    view: &TokenListView,
     loaded: bool,
     failed: bool,
     colors: &Palette,
 ) -> AnyView<SettingsState> {
+    let [_, _, read_only] = view.counts;
     settings_row(
         rows::MARK_TOKENS,
         TOKENS_LABEL,
-        token_count_value(tokens, loaded, failed),
+        token_count_value(view.total, read_only, loaded, failed),
         ValueTone::Plain,
         RowAction::AuthTokens,
         colors,
@@ -256,40 +217,26 @@ mod tests {
         ));
     }
 
-    fn token(name: &str, scope: TokenScope) -> AuthToken {
-        AuthToken {
-            name: name.to_string(),
-            scope,
-            created: "2026-11-02".to_string(),
-        }
-    }
-
     #[test]
     fn the_token_count_names_both_totals_and_is_singular_for_one() {
-        let one = [token("a", TokenScope::ReadWrite)];
         assert_eq!(
-            token_count_value(&one, true, false),
+            token_count_value(1, 0, true, false),
             "1 token \u{b7} 0 read-only"
         );
-        let many = [
-            token("a", TokenScope::ReadWrite),
-            token("b", TokenScope::ReadOnly),
-            token("c", TokenScope::ReadOnly),
-        ];
         assert_eq!(
-            token_count_value(&many, true, false),
+            token_count_value(3, 2, true, false),
             "3 tokens \u{b7} 2 read-only"
         );
         assert_eq!(
-            token_count_value(&[], true, false),
+            token_count_value(0, 0, true, false),
             "0 tokens \u{b7} 0 read-only"
         );
     }
 
     #[test]
     fn the_token_count_shows_the_load_state_until_a_list_lands() {
-        assert_eq!(token_count_value(&[], false, false), TOKENS_LOADING_VALUE);
-        assert_eq!(token_count_value(&[], true, true), TOKENS_FAILED_VALUE);
+        assert_eq!(token_count_value(0, 0, false, false), TOKENS_LOADING_VALUE);
+        assert_eq!(token_count_value(0, 0, true, true), TOKENS_FAILED_VALUE);
     }
 
     #[test]

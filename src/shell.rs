@@ -25,6 +25,7 @@ use crate::features::servers::presentation::widgets::{bar::servers_bar, faces, l
 use crate::features::sessions::presentation::widgets::{
     sessions_snapshot, shell_responsive, switcher_fab,
 };
+use crate::features::settings::presentation::token_pages::open_new_token;
 use crate::features::terminal::presentation::pages::open_terminal_menu;
 use crate::responsive::Responsive;
 use crate::routes::{
@@ -41,6 +42,7 @@ const TABLET_CARD_SCALE: f64 = 0.58;
 /// The scaffold's default (16 px) is the Compact parity.
 const TABLET_FAB_MARGIN: f64 = 24.0;
 const TERMINAL_MENU_LABEL: &str = "Terminal menu";
+const NEW_TOKEN_LABEL: &str = "New token";
 
 /// Toasts mount above this host; `Stack` reconciles positionally, so the navigator keeps index 0.
 pub fn root_view(
@@ -252,6 +254,16 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<impl View<A
             TERMINAL_MENU_LABEL,
             open_terminal_menu,
         )],
+        // Dimmed on a read-only session, whose tap only toasts why.
+        Some(BarAction::NewToken) => {
+            let colors = Palette::from_theme(&active_theme());
+            let ink = if connection.is_read_only.get() {
+                colors.fg_faintest
+            } else {
+                colors.amber
+            };
+            vec![bar_icon(icons::ADD, NEW_TOKEN_LABEL, open_new_token).ink(ink)]
+        }
         None => Vec::new(),
     };
     Some(bar.actions(actions))

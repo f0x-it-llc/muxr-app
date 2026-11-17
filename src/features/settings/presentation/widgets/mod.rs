@@ -20,7 +20,7 @@ pub(super) use font_picker::{
 };
 pub(super) use groups::{
     about_rows, app_settings_rows, appearance_rows, forget_server_row, poll_rows,
-    saved_credential_row, token_rows, tokens_row,
+    saved_credential_row, tokens_row,
 };
 pub(super) use identity::identity_card;
 pub(super) use misc::{DISCONNECT_COPY, DISCONNECT_LABEL, disconnect_button};
@@ -34,4 +34,11 @@ pub use server_sheet::{
     DELETE_LABEL, FORGET_SERVER_LABEL, SAVED_CREDENTIAL_LABEL, SHEET_FOOTNOTE, SWITCH_LABEL,
 };
 pub(super) use server_sheet::{ServerSheetActions, SheetAction, server_sheet};
-pub(super) use tokens::{create_token_row, open_create_token_dialog, secret_reveal_sheet};
+pub use tokens::{
+    FILTER_PLACEHOLDER, NEW_TOKEN_ACTION, NO_MATCH_LABEL, THIS_DEVICE_PREFIX, TokenMenu,
+    set_copy_name_sink_for_tests, token_actions_label,
+};
+pub(super) use tokens::{
+    copy_token_name, open_create_token_dialog, secret_reveal_sheet, token_menu, tokens_card,
+    tokens_phone_page,
+};

@@ -21,6 +21,7 @@ use crate::features::sessions::presentation::pages::sessions_page;
 use crate::features::sessions::presentation::widgets::host_of;
 use crate::features::settings::presentation::app_pages::app_settings_page;
 use crate::features::settings::presentation::pages::settings_page;
+use crate::features::settings::presentation::token_pages::tokens_page;
 use crate::features::terminal::presentation::pages::terminal_page;
 
 pub(crate) const CONNECT_LOCATION: &str = "/";
@@ -28,6 +29,7 @@ const SESSIONS_ROUTE: &str = "/sessions";
 const TERMINAL_ROUTE: &str = "/terminal";
 pub const SETTINGS_ROUTE: &str = "/settings";
 pub const APP_SETTINGS_ROUTE: &str = "/settings/app";
+pub const TOKENS_ROUTE: &str = "/settings/tokens";
 
 /// The `/terminal` query keys, shared by the screens that push it and the one that reads it.
 pub const TERMINAL_SESSION_QUERY_KEY: &str = "session";
@@ -79,6 +81,7 @@ pub enum BarLeading {
 pub enum BarAction {
     Settings,
     TerminalMenu,
+    NewToken,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +134,12 @@ pub fn route_meta(path: &str) -> Option<RouteMeta> {
             leading: BarLeading::Back,
             action: None,
             guarded: false,
+        }),
+        TOKENS_ROUTE => Some(RouteMeta {
+            title: BarTitle::Fixed("auth tokens"),
+            leading: BarLeading::Back,
+            action: Some(BarAction::NewToken),
+            guarded: true,
         }),
         _ => None,
     }
@@ -565,6 +574,10 @@ pub(crate) fn build_routes(
                     let overlays = overlays.clone();
                     move |_params: &RouteParams| app_settings_page(overlays.clone())
                 }),
+                Route::new(TOKENS_ROUTE, {
+                    let overlays = overlays.clone();
+                    move |_params: &RouteParams| tokens_page(overlays.clone())
+                }),
             ],
         ),
     ]
@@ -634,7 +647,7 @@ mod tests {
         let connection = Arc::new(ConnectionController::detached());
         let guard = session_guard_with(Arc::clone(&connection));
 
-        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE] {
+        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE, TOKENS_ROUTE] {
             assert!(route_meta(path).is_some(), "{path} is in the shell");
             assert_eq!(
                 guard(&Location::parse(path)),
@@ -653,7 +666,7 @@ mod tests {
 
         connection.connect(target());
 
-        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE] {
+        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE, TOKENS_ROUTE] {
             assert_eq!(
                 guard(&Location::parse(path)),
                 None,
@@ -676,6 +689,7 @@ mod tests {
             TERMINAL_ROUTE,
             SETTINGS_ROUTE,
             APP_SETTINGS_ROUTE,
+            TOKENS_ROUTE,
         ] {
             assert_eq!(
                 router.resolve(path).page_count(),
@@ -739,6 +753,7 @@ mod tests {
             TERMINAL_ROUTE,
             SETTINGS_ROUTE,
             APP_SETTINGS_ROUTE,
+            TOKENS_ROUTE,
         ] {
             assert!(route_meta(path).is_some(), "{path} carries a bar");
         }
@@ -770,6 +785,15 @@ mod tests {
         assert_eq!(meta.title, BarTitle::Fixed("app settings"));
         assert_eq!(meta.action, None);
         assert!(!meta.guarded);
+    }
+
+    #[test]
+    fn the_tokens_page_is_titled_backed_guarded_and_carries_the_new_token_action() {
+        let meta = route_meta(TOKENS_ROUTE).expect("a shell route");
+        assert_eq!(meta.title, BarTitle::Fixed("auth tokens"));
+        assert_eq!(meta.leading, BarLeading::Back);
+        assert_eq!(meta.action, Some(BarAction::NewToken));
+        assert!(meta.guarded);
     }
 
     #[test]
