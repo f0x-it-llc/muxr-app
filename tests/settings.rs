@@ -89,7 +89,7 @@ const LOCK_AND_DISCONNECT: &str = "Lock & disconnect";
 const ADD_SERVER_ROW: &str = "add server";
 
 const SEEDED_TOKENS: [&str; 2] = ["zelli-mobile-100-71-31-57-mr3g6w5g", "token_2"];
-const SERVER_GROUPS: [&str; 3] = ["CONNECTION", "AUTH TOKENS", "APP"];
+const SERVER_GROUPS: [&str; 4] = ["ACCESS", "THIS SERVER", "APP", "AUTH TOKENS"];
 const APP_GROUPS: [&str; 5] = ["TERMINAL", "BEHAVIOUR", "MUXR PRO", "SERVERS", "ABOUT"];
 const APP_SETTINGS_ROW: &str = "app settings";
 
@@ -522,14 +522,22 @@ fn the_server_page_shows_only_its_own_groups_and_the_disconnect_action() {
     );
     let values = node_values(&h.root);
     for label in [
-        "server url",
-        "tls certificate",
-        "zellij version",
+        "TLS",
+        "LATENCY",
+        "ZELLIJ",
+        "auth tokens",
+        FORGET_SERVER_LABEL,
         APP_SETTINGS_ROW,
     ] {
         assert!(
             values.iter().any(|v| v == label),
             "the {label:?} row renders: {values:?}"
+        );
+    }
+    for gone in ["server url", "tls certificate", "zellij version"] {
+        assert!(
+            !values.iter().any(|v| v == gone),
+            "the identity card replaced the {gone:?} row: {values:?}"
         );
     }
     for moved in [
@@ -719,81 +727,106 @@ fn a_full_band_tablet_lays_the_app_page_out_in_two_columns() {
     );
 }
 
-#[test]
-fn the_connection_group_prints_the_mocks_latency_after_the_tls_row() {
-    let _g = serial();
-    let _ambient = setup();
-    let h = Harness::connected();
-
-    let values = node_values(&h.root);
-    let at = |needle: &str| {
-        values
-            .iter()
-            .position(|v| v == needle)
-            .unwrap_or_else(|| panic!("{needle:?} renders: {values:?}"))
-    };
-    assert!(at("latency") > at("tls certificate"), "{values:?}");
-    assert_eq!(at(MOCK_LATENCY_VALUE), at("latency") + 1, "{values:?}");
-}
-
-#[test]
-fn a_disconnected_latency_row_says_not_connected() {
-    let _g = serial();
-    let _ambient = setup();
-    let h = Harness::mount();
-
-    let values = node_values(&h.root);
+fn value_after(values: &[String], needle: &str) -> String {
     let at = values
         .iter()
-        .position(|v| v == "latency")
-        .unwrap_or_else(|| panic!("the latency row renders: {values:?}"));
-    assert_eq!(values[at + 1], "not connected", "{values:?}");
+        .position(|v| v == needle)
+        .unwrap_or_else(|| panic!("{needle:?} renders: {values:?}"));
+    values[at + 1].clone()
 }
 
 #[test]
-fn the_connection_group_prints_the_live_servers_facts() {
+fn the_identity_card_prints_the_live_servers_facts() {
     let _g = serial();
     let _ambient = setup();
     let h = Harness::connected();
 
     let values = node_values(&h.root);
+    assert!(
+        values.iter().any(|v| v == "mock.example"),
+        "an unsaved server is named by its host: {values:?}"
+    );
     assert!(
         values.iter().any(|v| v == "mock.example:7777"),
         "the endpoint is the connected one: {values:?}"
     );
     assert!(
-        values.iter().any(|v| v == "0.44.3"),
-        "the zellij row prints the version without the product name: {values:?}"
+        node_labels(&h.root).iter().any(|l| l == CONNECTED_META),
+        "the connected chip renders: {:?}",
+        node_labels(&h.root)
     );
+    assert_eq!(value_after(&values, "TLS"), "insecure (plaintext)");
+    assert_eq!(value_after(&values, "LATENCY"), MOCK_LATENCY_VALUE);
     assert_eq!(
-        values
-            .iter()
-            .filter(|v| v.as_str() == "zellij version")
-            .count(),
-        1,
-        "one version row per reported backend: {values:?}"
+        value_after(&values, "ZELLIJ"),
+        "0.44.3",
+        "the version prints without the product name"
+    );
+    assert!(
+        !values.iter().any(|v| v == "HERDR"),
+        "a single-backend server gets one version cell: {values:?}"
     );
 }
 
 #[test]
-fn the_tls_row_warns_only_for_the_posture_that_skips_validation() {
+fn the_identity_card_prefers_the_saved_label_over_the_host() {
+    let _g = serial();
+    let _ambient = setup();
+    let (h, _recording) = server_page_on_cred(true);
+
+    let values = node_values(&h.root);
+    assert!(values.iter().any(|v| v == CRED_LABEL), "{values:?}");
+    assert!(values.iter().any(|v| v == CRED_ENDPOINT), "{values:?}");
+    assert_eq!(value_after(&values, "TLS"), "public CA");
+}
+
+#[test]
+fn a_disconnected_identity_card_says_not_connected_in_every_cell() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = Harness::mount();
+
+    let values = node_values(&h.root);
+    assert!(
+        values.iter().filter(|v| *v == "not connected").count() >= 4,
+        "the name and each stat say so: {values:?}"
+    );
+    assert_eq!(value_after(&values, "LATENCY"), "not connected");
+    assert!(
+        !node_labels(&h.root).iter().any(|l| l == CONNECTED_META),
+        "no connected chip with nothing connected"
+    );
+    for absent in [FORGET_SERVER_LABEL, SAVED_CREDENTIAL_LABEL] {
+        assert!(
+            !values.iter().any(|v| v == absent),
+            "{absent:?} needs a server: {values:?}"
+        );
+    }
+    assert!(
+        node_labels(&h.root)
+            .iter()
+            .any(|l| l == LOCK_AND_DISCONNECT),
+        "the page still renders its action"
+    );
+}
+
+#[test]
+fn the_tls_stat_warns_only_for_the_posture_that_skips_validation() {
     let _g = serial();
     let _ambient = setup();
 
     let insecure = Harness::connected_with(TrustMode::NoVerification);
     let values = node_values(&insecure.root);
-    assert!(
-        values.iter().any(|v| v == "insecure (plaintext)"),
+    assert_eq!(
+        value_after(&values, "TLS"),
+        "insecure (plaintext)",
         "the unverified posture is named by its consequence: {values:?}"
     );
     drop(insecure);
 
     let validated = Harness::connected_with(TrustMode::System);
     let values = node_values(&validated.root);
-    assert!(
-        values.iter().any(|v| v == "public CA"),
-        "a validated posture reads as one: {values:?}"
-    );
+    assert_eq!(value_after(&values, "TLS"), "public CA", "{values:?}");
     assert!(
         !values.iter().any(|v| v == "insecure (plaintext)"),
         "…and never as the insecure one: {values:?}"
@@ -801,48 +834,204 @@ fn the_tls_row_warns_only_for_the_posture_that_skips_validation() {
 }
 
 #[test]
-fn a_disconnected_settings_screen_still_renders_every_row() {
-    let _g = serial();
-    let _ambient = setup();
-    let mut h = Harness::mount();
-    h.await_tokens();
-
-    let values = node_values(&h.root);
-    assert!(
-        values.iter().filter(|v| *v == "not connected").count() >= 2,
-        "the endpoint and TLS rows both say so: {values:?}"
-    );
-    assert!(
-        values.iter().any(|v| v == "server url"),
-        "every row still renders: {values:?}"
-    );
-}
-
-#[test]
-fn the_connection_rows_are_informational_like_version_rows() {
+fn the_identity_stats_are_informational() {
     let _g = serial();
     let _ambient = setup();
     let mut h = Harness::connected();
     app_toasts().clear();
 
-    h.tap_value("server url");
-    h.frame();
-    let pending = app_toasts().pending_untracked();
-    assert!(
-        pending.is_empty(),
-        "server url row is inert, no toast: {pending:?}"
-    );
-    assert_eq!(h.depth(), 1, "…and it pushed nothing");
+    for stat in ["TLS", "LATENCY"] {
+        h.tap_value(stat);
+        h.frame();
+        let pending = app_toasts().pending_untracked();
+        assert!(
+            pending.is_empty(),
+            "{stat:?} is inert, no toast: {pending:?}"
+        );
+        assert_eq!(h.depth(), 1, "…and it pushed nothing");
+    }
+}
 
-    app_toasts().clear();
-    h.tap_value("tls certificate");
-    h.frame();
-    let pending = app_toasts().pending_untracked();
-    assert!(
-        pending.is_empty(),
-        "tls certificate row is inert, no toast: {pending:?}"
+#[test]
+fn the_tokens_row_counts_the_tokens_and_the_read_only_ones() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = Harness::connected();
+
+    let values = node_values(&h.root);
+    assert_eq!(
+        value_after(&values, "auth tokens"),
+        "2 tokens \u{b7} 1 read-only",
+        "{values:?}"
     );
-    assert_eq!(h.depth(), 1, "…and it pushed nothing");
+    assert!(
+        values.iter().any(|v| v == SEEDED_TOKENS[0]),
+        "the list still renders below the page: {values:?}"
+    );
+}
+
+#[test]
+fn the_tokens_row_is_singular_for_one_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+    let clock = AnimationClock::pinned();
+
+    let dialog = open_dialog_by_label(&mut h, "revoke");
+    confirm(&mut h, &dialog);
+    clock.advance(TIMELINE_MS + 1.0);
+    h.pump_until_values("the count to drop to one", |values| {
+        values.iter().any(|v| v == "1 token \u{b7} 1 read-only")
+    });
+}
+
+#[test]
+fn the_tokens_row_opens_nothing_yet() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::connected();
+
+    let before = current_path(&h);
+    h.tap_value("auth tokens");
+    h.settle();
+    assert_eq!(h.depth(), 1, "no dialog or sheet");
+    assert_eq!(current_path(&h), before, "…and no route");
+}
+
+/// The server page over the seeded store plus the credential row, connected to that server.
+fn server_page_on_cred(has_credential: bool) -> (Harness, Arc<RecordingRevoke>) {
+    let recording = Rc::new(std::cell::RefCell::new(None));
+    let slot = Rc::clone(&recording);
+    let mut harness = Harness::mount_seeded(move || {
+        *slot.borrow_mut() = Some(provide_recording_revoke());
+        expect_saved_servers()
+            .save(credential_row(has_credential))
+            .expect("the mock store never fails");
+        if has_credential {
+            mock_credentials()
+                .expect("tests/support opted this process into the mock")
+                .seed(CRED_ENDPOINT, CRED_TOKEN);
+        }
+    });
+    expect_connection_controller().connect(connected_to_cred());
+    harness.await_tokens();
+    await_label(&mut harness, CRED_LABEL);
+    let recording = recording.borrow_mut().take().expect("the seed ran");
+    (harness, recording)
+}
+
+#[test]
+fn the_saved_credential_row_shows_only_for_a_server_with_a_credential() {
+    let _g = serial();
+    let _ambient = setup();
+
+    let (with, _recording) = server_page_on_cred(true);
+    let values = node_values(&with.root);
+    assert_eq!(
+        value_after(&values, SAVED_CREDENTIAL_LABEL),
+        "on this device",
+        "{values:?}"
+    );
+    assert!(node_labels(&with.root).iter().any(|l| l == DELETE_LABEL));
+    drop(with);
+
+    let (without, _recording) = server_page_on_cred(false);
+    let values = node_values(&without.root);
+    assert!(
+        !values.iter().any(|v| v == SAVED_CREDENTIAL_LABEL),
+        "{values:?}"
+    );
+    assert!(!node_labels(&without.root).iter().any(|l| l == DELETE_LABEL));
+}
+
+#[test]
+fn deleting_the_connected_servers_credential_confirms_then_revokes_its_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, recording) = server_page_on_cred(true);
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    open_dialog_by_label(&mut h, DELETE_LABEL);
+    assert_eq!(h.depth(), 2, "the confirmation is its own page");
+    assert!(
+        dialog_says(&h, "its token revoked on the server"),
+        "the connected server's copy promises the revoke: {:?}",
+        node_values(&h.root)
+    );
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert_eq!(h.depth(), 1, "dismissed");
+    assert!(recording.revoked().is_empty(), "{:?}", recording.revoked());
+    assert_eq!(
+        credentials.stored(CRED_ENDPOINT).as_deref(),
+        Some(CRED_TOKEN)
+    );
+
+    let dialog = open_dialog_by_label(&mut h, DELETE_LABEL);
+    confirm(&mut h, &dialog);
+    h.pump_until_shown("the credential row to go", |h| {
+        !node_values(&h.root)
+            .iter()
+            .any(|v| v == SAVED_CREDENTIAL_LABEL)
+    });
+    assert_eq!(recording.revoked(), vec![CRED_TOKEN_NAME.to_string()]);
+    assert_eq!(credentials.stored(CRED_ENDPOINT), None);
+    assert!(
+        saved_endpoints().contains(&CRED_ENDPOINT.to_string()),
+        "the saved server itself is kept"
+    );
+}
+
+#[test]
+fn forgetting_the_connected_server_confirms_then_removes_its_profile() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, recording) = server_page_on_cred(true);
+    let credentials = mock_credentials().expect("the mock service is published");
+
+    open_dialog_by_value(&mut h, FORGET_SERVER_LABEL);
+    assert_eq!(h.depth(), 2, "the confirmation is its own page");
+    assert!(
+        dialog_says(&h, "along with its saved credential"),
+        "{:?}",
+        node_values(&h.root)
+    );
+    h.tap(SCRIM_POINT);
+    h.flush();
+    assert!(
+        saved_endpoints().contains(&CRED_ENDPOINT.to_string()),
+        "a dismissed confirmation forgets nothing"
+    );
+
+    let dialog = open_dialog_by_value(&mut h, FORGET_SERVER_LABEL);
+    confirm(&mut h, &dialog);
+    pump_until(&mut h, "the profile to go", || {
+        !saved_endpoints().contains(&CRED_ENDPOINT.to_string())
+    });
+    assert_eq!(credentials.stored(CRED_ENDPOINT), None);
+    assert_eq!(recording.revoked(), vec![CRED_TOKEN_NAME.to_string()]);
+}
+
+#[test]
+fn everything_above_the_token_list_fits_a_phone_viewport() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _recording) = server_page_on_cred(true);
+
+    let phone = Size::new(402.0, 874.0);
+    for _ in 0..2 {
+        settle_sized(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, phone);
+    }
+    let last_above = node_centers_by_value(&h.root, "fonts, bell, Muxr Pro, servers");
+    let tokens = node_centers_by_value(&h.root, "AUTH TOKENS");
+    assert!(
+        last_above.first().is_some_and(|p| p.y < phone.height),
+        "the app row is on screen: {last_above:?}"
+    );
+    assert!(
+        tokens.first().is_some_and(|p| p.y > last_above[0].y),
+        "the token list is the page's tail: {tokens:?}"
+    );
 }
 
 #[test]
@@ -3366,7 +3555,7 @@ fn disconnect_confirms_first_then_deauthenticates_and_lands_on_connect() {
     h.frame();
     assert!(
         node_values(&h.root).iter().any(|v| v == "not connected"),
-        "the connection group cleared: {:?}",
+        "the identity card cleared: {:?}",
         node_values(&h.root)
     );
     match app_nav().resolve("/sessions") {
@@ -3421,34 +3610,52 @@ fn value_center(h: &Harness, value: &str) -> Point {
     h.center_of(value)
 }
 
+fn connected_with_metrics(metrics: Option<WindowMetrics>) -> Harness {
+    support::mount_with_metrics(metrics, Harness::connected)
+}
+
 #[test]
 fn a_full_band_tablet_packs_the_cards_into_two_columns() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = mount_with_metrics(Some(support::metrics_at(1024.0, 720.0)));
+    let mut h = connected_with_metrics(Some(support::metrics_at(1024.0, 720.0)));
     h.frame();
 
     let values = node_values(&h.root);
-    for group in SERVER_GROUPS {
+    for group in ["ACCESS", "THIS SERVER", "AUTH TOKENS"] {
         assert!(values.iter().any(|v| v == group), "{group:?}: {values:?}");
     }
-    let connection = value_center(&h, "CONNECTION");
+    assert!(
+        !values.iter().any(|v| v == "auth tokens"),
+        "the tokens card replaces the tokens row: {values:?}"
+    );
+    let identity = value_center(&h, "TLS");
+    let access = value_center(&h, "ACCESS");
+    let this_server = value_center(&h, "THIS SERVER");
     let tokens = value_center(&h, "AUTH TOKENS");
     assert!(
-        (connection.y - tokens.y).abs() < 0.5,
-        "the first pair shares a top edge: {connection:?} vs {tokens:?}"
-    );
-    assert!(tokens.x > connection.x + 100.0, "side by side: {tokens:?}");
-    let app = value_center(&h, "APP");
-    assert!(
-        app.x < tokens.x - 100.0 && app.y > connection.y,
-        "the app group packs under the connection: app {app:?} vs {connection:?}"
+        identity.y < access.y && access.y < this_server.y,
+        "the left column runs identity, access, this server: {identity:?} {access:?} {this_server:?}"
     );
     assert!(
-        node_labels(&h.root)
-            .iter()
-            .any(|l| l == LOCK_AND_DISCONNECT),
-        "the Disconnect card's button renders"
+        (identity.x - access.x).abs() < 120.0 && (access.x - this_server.x).abs() < 20.0,
+        "…in one column: {identity:?} {access:?} {this_server:?}"
+    );
+    assert!(tokens.x > access.x + 100.0, "side by side: {tokens:?}");
+    assert!(tokens.y < access.y, "the tokens card tops its column");
+    for left in [APP_SETTINGS_ROW, FORGET_SERVER_LABEL] {
+        let at = value_center(&h, left);
+        assert!(at.x < tokens.x - 100.0, "{left:?} sits left: {at:?}");
+    }
+    let lock = node_center_by_label(&h.root, LOCK_AND_DISCONNECT)
+        .expect("the this-server card holds the button");
+    assert!(
+        lock.x < tokens.x - 100.0 && lock.y > this_server.y,
+        "…under its title, in the left column: {lock:?}"
+    );
+    assert!(
+        values.iter().any(|v| v == "create new token"),
+        "the token list is in the right card: {values:?}"
     );
 }
 
@@ -3456,16 +3663,21 @@ fn a_full_band_tablet_packs_the_cards_into_two_columns() {
 fn a_collapsed_band_tablet_stacks_the_cards() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = mount_with_metrics(Some(support::metrics_at(720.0, 720.0)));
+    let mut h = connected_with_metrics(Some(support::metrics_at(720.0, 720.0)));
     h.frame();
 
-    let connection = value_center(&h, "CONNECTION");
+    let identity = value_center(&h, "TLS");
+    let access = value_center(&h, "ACCESS");
+    let this_server = value_center(&h, "THIS SERVER");
     let tokens = value_center(&h, "AUTH TOKENS");
     assert!(
-        (connection.x - tokens.x).abs() < 20.0,
-        "one column (title centres differ only by text width): {connection:?} vs {tokens:?}"
+        (access.x - tokens.x).abs() < 20.0 && (access.x - this_server.x).abs() < 20.0,
+        "one column (title centres differ only by text width): {access:?} {this_server:?} {tokens:?}"
     );
-    assert!(tokens.y > connection.y, "stacked: {tokens:?}");
+    assert!(
+        identity.y < access.y && access.y < this_server.y && this_server.y < tokens.y,
+        "stacked in phone order: {identity:?} {access:?} {this_server:?} {tokens:?}"
+    );
 }
 
 #[test]

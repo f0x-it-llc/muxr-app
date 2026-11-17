@@ -652,8 +652,9 @@ fn a_route_pushed_as_a_sheet_closes_keeps_its_bar_entry_under_the_next_overlay()
         h.labels()
     );
     assert!(
-        !h.values().iter().any(|v| v == HOST),
-        "…and the bar did not fall back to the route underneath: {:?}",
+        h.values().iter().filter(|v| *v == HOST).count() <= 1,
+        "…and the bar did not fall back to the route underneath (the identity card's own host \
+         label is the one allowed): {:?}",
         h.values()
     );
 }

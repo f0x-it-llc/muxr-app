@@ -1,12 +1,13 @@
 //! The `/settings` route: the connected server's own settings. Its own gestures take
 //! `&mut SettingsState`; a dialog or sheet it pushes is a page on the app's overlay host and sees
 //! `&mut AppState`, so [`Actions`] is a clonable bundle serving both sides.
+use std::rc::Rc;
 use std::sync::Arc;
 
 use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::{
-    AnyView, Component, Either, Get, GetUntracked, NavigatorController, View, WindowMetrics, any,
-    component, spawn_local, use_context,
+    AnyView, Component, EdgeInsets, Either, Get, GetUntracked, NavigatorController, Padding, View,
+    WindowMetrics, any, component, spawn_local, use_context,
 };
 
 use crate::AppState;
@@ -19,8 +20,10 @@ use crate::routes::{APP_SETTINGS_ROUTE, Nav, app_nav};
 use crate::ui::dialogs::confirm_dialog;
 use crate::ui::palette::{Palette, active_theme};
 use crate::ui::sheet::show_sheet;
+use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
 
+use super::app_pages::ServerActions;
 use super::controller::SettingsController;
 use super::scramble::{RevokeAnimations, RevokeScramble, ScramblePose};
 use super::widgets::{self, DISCONNECT_COPY, DISCONNECT_LABEL, RowAction, RowHost};
@@ -40,6 +43,8 @@ pub struct SettingsScreen {
 
 pub struct SettingsState {
     pub actions: Actions,
+    /// The connection the saved list was last read under; a change re-reads it.
+    servers_seen: Option<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -49,6 +54,8 @@ pub struct Actions {
     pub controller: Arc<SettingsController>,
     pub connection: Arc<ConnectionController>,
     pub keyring: KeyringHandle,
+    /// The connected server's saved row: its credential delete and its forget.
+    pub servers: ServerActions,
     pub(super) scrambles: RevokeAnimations,
 }
 
@@ -69,6 +76,8 @@ impl Component for SettingsScreen {
         let first_load = Arc::clone(&controller);
         spawn_local(async move { first_load.refresh().await });
 
+        let servers = ServerActions::init(&self.overlays);
+
         SettingsState {
             actions: Actions {
                 overlays: self.overlays.clone(),
@@ -76,8 +85,10 @@ impl Component for SettingsScreen {
                 controller,
                 connection,
                 keyring,
+                servers,
                 scrambles: RevokeAnimations::new(),
             },
+            servers_seen: None,
         }
     }
 
@@ -91,11 +102,18 @@ impl Component for SettingsScreen {
 
         let responsive = Responsive::of(use_context::<WindowMetrics>());
 
-        let mut groups: Vec<(&'static str, Vec<AnyView<SettingsState>>)> = Vec::new();
-        groups.push((
-            "connection",
-            widgets::connection_rows(info.as_ref(), &colors),
-        ));
+        let saved = state.actions.servers.controller.saved.get();
+        let connected = state.actions.servers.connected_endpoint();
+        state.reread_servers_on_change(connected.clone());
+        let saved_row = connected
+            .as_deref()
+            .and_then(|endpoint| saved.iter().find(|server| server.endpoint() == endpoint));
+        let label = info.as_ref().map(|info| {
+            saved_row.map_or_else(|| host_of(&info.endpoint), |server| server.label.clone())
+        });
+        let has_credential = saved_row.is_some_and(|server| server.has_credential);
+        let loaded = state.actions.controller.loaded.get();
+        let load_failed = state.actions.controller.load_failed.get();
 
         // Tracked: a start or an RPC answer wakes this rebuild; the row's ticker drives the frames.
         let reduce_motion = theme.motion.reduce_motion;
@@ -113,13 +131,28 @@ impl Component for SettingsScreen {
 
         let mut token_group = widgets::token_rows(&tokens, &showing, read_only, &colors);
         token_group.push(any(widgets::create_token_row(&colors, !read_only))); // erasure: keep accumulator into Vec<AnyView>
-        groups.push(("auth tokens", token_group));
-        groups.push(("app", widgets::app_settings_rows(&colors)));
+
+        let identity = widgets::identity_card(info.as_ref(), label.as_deref(), &colors);
+        let credential = has_credential.then(|| widgets::saved_credential_row(&colors));
+        let forget = connected
+            .is_some()
+            .then(|| widgets::forget_server_row(&colors));
 
         if responsive.is_tablet() {
+            let mut access: Vec<AnyView<SettingsState>> = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
+            access.extend(credential);
+            access.extend(widgets::app_settings_rows(&colors));
+            let mut this_server: Vec<AnyView<SettingsState>> = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
+            this_server.extend(forget);
+            this_server.push(any(widgets::disconnect_button()));
             return widgets::page_tone(
-                Either::Left(widgets::tablet_scroller(
-                    groups,
+                Either::Left(widgets::server_tablet_scroller(
+                    widgets::ServerCards {
+                        identity: any(identity),
+                        access,
+                        this_server,
+                        tokens: token_group,
+                    },
                     responsive.is_full(),
                     &colors,
                 )),
@@ -127,17 +160,50 @@ impl Component for SettingsScreen {
             );
         }
 
-        let mut body = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
-        for (label, rows) in groups {
-            body.push(any(widgets::group_label(label, &colors)));
-            body.extend(rows);
+        // The token list closes the page, so everything above it fits one phone viewport.
+        let mut body = vec![any(Padding(
+            EdgeInsets::symmetric(spacing::XL, 0.0),
+            identity,
+        ))]; // erasure: keep accumulator into Vec<AnyView>
+        body.push(any(widgets::group_label("access", &colors)));
+        body.push(widgets::tokens_row(&tokens, loaded, load_failed, &colors));
+        body.extend(credential);
+        if let Some(forget) = forget {
+            body.push(any(widgets::group_label("this server", &colors)));
+            body.push(forget);
         }
         body.push(any(widgets::disconnect_button()));
+        body.push(any(widgets::group_label("app", &colors)));
+        body.extend(widgets::app_settings_rows(&colors));
+        body.push(any(widgets::group_label("auth tokens", &colors)));
+        body.extend(token_group);
 
         widgets::page_tone(
             Either::Right(widgets::phone_scroller(body, responsive.wide_clamp)),
             &colors,
         )
+    }
+}
+
+/// The endpoint without its port: the label a row saved nowhere falls back to.
+fn host_of(endpoint: &str) -> String {
+    endpoint
+        .rsplit_once(':')
+        .map_or(endpoint, |(host, _)| host)
+        .to_string()
+}
+
+impl SettingsState {
+    /// A connect, switch or teardown re-reads the store, which `connect` may have written;
+    /// read off this build.
+    fn reread_servers_on_change(&mut self, connected: Option<String>) {
+        let seen = Some(connected);
+        if self.servers_seen == seen {
+            return;
+        }
+        self.servers_seen = seen;
+        let servers = Arc::clone(&self.actions.servers.controller);
+        spawn_local(async move { servers.refresh_saved_servers() });
     }
 }
 
@@ -232,6 +298,22 @@ impl Actions {
         );
     }
 
+    /// The connected server's own credential: its token is revoked on the server, as the sheet's
+    /// delete does for it. Nothing to close afterwards: the row leaves with the claim.
+    pub fn open_delete_credential_dialog(&self) {
+        if let Some(endpoint) = self.servers.connected_endpoint_untracked() {
+            self.servers
+                .confirm_delete_credential(&endpoint, Rc::new(|| {}));
+        }
+    }
+
+    pub fn open_forget_server_dialog(&self) {
+        if let Some(endpoint) = self.servers.connected_endpoint_untracked() {
+            self.servers
+                .confirm_forget_server(&endpoint, Rc::new(|| {}));
+        }
+    }
+
     pub fn open_app_settings(&self) {
         self.app_nav.push(APP_SETTINGS_ROUTE);
     }
@@ -260,6 +342,8 @@ impl RowHost for SettingsState {
     fn row_tapped(&mut self, action: RowAction) {
         match action {
             RowAction::AppSettings => self.actions.open_app_settings(),
+            // Not routed yet: the tokens page arrives with its own card; the list is below.
+            RowAction::AuthTokens => {}
             // Unreachable: this screen renders no such row, and an inert row carries no gesture.
             RowAction::Static
             | RowAction::Picker(_)
@@ -279,4 +363,12 @@ pub(super) fn open_revoke_dialog(state: &mut SettingsState, name: &str) {
 
 pub(super) fn open_disconnect_dialog(state: &mut SettingsState) {
     state.actions.open_disconnect_dialog();
+}
+
+pub(super) fn open_delete_credential_dialog(state: &mut SettingsState) {
+    state.actions.open_delete_credential_dialog();
+}
+
+pub(super) fn open_forget_server_dialog(state: &mut SettingsState) {
+    state.actions.open_forget_server_dialog();
 }

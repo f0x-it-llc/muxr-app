@@ -116,36 +116,14 @@ impl Component for AppSettingsScreen {
         let pro_refresh = Arc::clone(&pro);
         spawn_local(async move { pro_refresh.refresh().await });
 
-        let connection = expect_connection_controller();
-        let servers = use_controller::<SavedServersController, AppFailure>({
-            let connection = Arc::clone(&connection);
-            move || {
-                SavedServersController::new(
-                    expect_auth_tokens_repository(),
-                    expect_saved_servers(),
-                    expect_credential_service(),
-                    expect_keyring(),
-                    connection,
-                )
-            }
-        });
-        use_failure_listener(servers.core().failures(), |failure: AppFailure| {
-            app_toasts().raise(&failure);
-        });
-        servers.refresh_saved_servers();
+        let servers = ServerActions::init(&self.overlays);
 
         AppSettingsState {
             actions: AppActions {
                 overlays: self.overlays.clone(),
                 controller,
-                pro: Arc::clone(&pro),
-                servers: ServerActions {
-                    overlays: self.overlays.clone(),
-                    app_nav: app_nav(),
-                    controller: servers,
-                    connection,
-                    pro,
-                },
+                pro,
+                servers,
             },
             servers_seen: None,
         }
@@ -243,7 +221,7 @@ impl RowHost for AppSettingsState {
             RowAction::UpgradeSheet => self.actions.open_upgrade_sheet(),
             RowAction::GettingStarted => open_getting_started(&self.actions.overlays),
             // Unreachable: this screen renders no such row, and an inert row carries no gesture.
-            RowAction::Static | RowAction::AppSettings => {}
+            RowAction::Static | RowAction::AppSettings | RowAction::AuthTokens => {}
         }
     }
 }
@@ -574,6 +552,46 @@ impl SwitchLanding {
 }
 
 impl ServerActions {
+    /// Mounts the device's saved-server controller under the calling screen, so it must run in
+    /// that screen's `Component::init`; the list is read once here and re-read by the screen.
+    pub fn init(overlays: &NavigatorController<AppState>) -> Self {
+        let connection = expect_connection_controller();
+        let controller = use_controller::<SavedServersController, AppFailure>({
+            let connection = Arc::clone(&connection);
+            move || {
+                SavedServersController::new(
+                    expect_auth_tokens_repository(),
+                    expect_saved_servers(),
+                    expect_credential_service(),
+                    expect_keyring(),
+                    connection,
+                )
+            }
+        });
+        use_failure_listener(controller.core().failures(), |failure: AppFailure| {
+            app_toasts().raise(&failure);
+        });
+        controller.refresh_saved_servers();
+        ServerActions {
+            overlays: overlays.clone(),
+            app_nav: app_nav(),
+            controller,
+            connection,
+            pro: expect_pro_controller(),
+        }
+    }
+
+    /// Untracked: names the endpoint a press acts on, never a build.
+    pub fn connected_endpoint_untracked(&self) -> Option<String> {
+        if !self.connection.connected.get_untracked() {
+            return None;
+        }
+        self.connection
+            .server_info
+            .get_untracked()
+            .map(|info| info.endpoint)
+    }
+
     /// Tracked: a connect, switch or teardown re-renders the rows.
     pub fn connected_endpoint(&self) -> Option<String> {
         if !self.connection.connected.get() {
@@ -670,6 +688,12 @@ impl ServerActions {
 
     /// No read-only guard: deleting a device-local credential is not a server mutation.
     pub fn open_delete_credential_dialog(&self, endpoint: &str, sheet: &SheetHandle) {
+        let sheet = sheet.clone();
+        self.confirm_delete_credential(endpoint, Rc::new(move || _ = sheet.close()));
+    }
+
+    /// `on_deleted` runs once the credential is gone, where the host closes what it opened.
+    pub fn confirm_delete_credential(&self, endpoint: &str, on_deleted: Rc<dyn Fn()>) {
         let revokes = self.controller.is_connected_endpoint(endpoint);
         let token_clause = if revokes {
             " and its token revoked on the server"
@@ -682,7 +706,6 @@ impl ServerActions {
         );
         let controller = Arc::clone(&self.controller);
         let endpoint = endpoint.to_string();
-        let sheet = sheet.clone();
         confirm_dialog(
             &self.overlays,
             "Delete credential?",
@@ -691,11 +714,11 @@ impl ServerActions {
             move |_app: &mut AppState| {
                 let handle = Arc::clone(&controller);
                 let endpoint = endpoint.clone();
-                let sheet = sheet.clone();
+                let on_deleted = Rc::clone(&on_deleted);
                 let confirmation = format!("Deleted the credential for {endpoint}");
                 spawn_local(async move {
                     if handle.delete_credential(endpoint).await {
-                        sheet.close();
+                        on_deleted();
                         app_toasts().show(confirmation);
                     }
                 });
@@ -704,6 +727,12 @@ impl ServerActions {
     }
 
     pub fn open_forget_server_dialog(&self, endpoint: &str, sheet: &SheetHandle) {
+        let sheet = sheet.clone();
+        self.confirm_forget_server(endpoint, Rc::new(move || _ = sheet.close()));
+    }
+
+    /// `on_forgotten` runs once the profile is gone, where the host closes what it opened.
+    pub fn confirm_forget_server(&self, endpoint: &str, on_forgotten: Rc<dyn Fn()>) {
         let has_credential = self
             .controller
             .saved
@@ -727,7 +756,6 @@ impl ServerActions {
         );
         let controller = Arc::clone(&self.controller);
         let endpoint = endpoint.to_string();
-        let sheet = sheet.clone();
         confirm_dialog(
             &self.overlays,
             "Forget server?",
@@ -736,11 +764,11 @@ impl ServerActions {
             move |_app: &mut AppState| {
                 let handle = Arc::clone(&controller);
                 let endpoint = endpoint.clone();
-                let sheet = sheet.clone();
+                let on_forgotten = Rc::clone(&on_forgotten);
                 let confirmation = format!("Forgot {endpoint}");
                 spawn_local(async move {
                     if handle.forget_server(endpoint).await {
-                        sheet.close();
+                        on_forgotten();
                         app_toasts().show(confirmation);
                     }
                 });

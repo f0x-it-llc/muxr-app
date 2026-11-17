@@ -5,6 +5,7 @@
 mod cards;
 mod font_picker;
 mod groups;
+mod identity;
 mod misc;
 mod pickers;
 mod pro;
@@ -13,13 +14,15 @@ mod saved_servers;
 mod server_sheet;
 mod tokens;
 
-pub(super) use cards::{CardColumn, card_grid, tablet_scroller};
+pub(super) use cards::{CardColumn, ServerCards, card_grid, server_tablet_scroller};
 pub(super) use font_picker::{
     FONT_META_BUILT_IN, FONT_META_DOWNLOADED, FontPicker, FontRow, font_picker_sheet,
 };
 pub(super) use groups::{
-    about_rows, app_settings_rows, appearance_rows, connection_rows, poll_rows, token_rows,
+    about_rows, app_settings_rows, appearance_rows, forget_server_row, poll_rows,
+    saved_credential_row, token_rows, tokens_row,
 };
+pub(super) use identity::identity_card;
 pub(super) use misc::{DISCONNECT_COPY, DISCONNECT_LABEL, disconnect_button};
 pub(super) use pickers::{Picker, PickerKind, picker_sheet};
 pub(super) use pro::pro_rows;

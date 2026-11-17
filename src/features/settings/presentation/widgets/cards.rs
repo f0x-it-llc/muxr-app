@@ -2,17 +2,15 @@
 //! neighbour's row open.
 
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, FlexChild,
-    FlexView, Padding, SizedBox, View, any, button, flexible, inflexible, row, safe_area,
-    scroll_view, text,
+    Align, Alignment, AnyView, Axis, CrossAxisAlignment, EdgeInsets, FlexChild, FlexView, Padding,
+    SizedBox, View, any, flexible, inflexible, safe_area, scroll_view,
 };
 use frust_glyph::glyph_card;
 
-use crate::features::settings::presentation::pages::{SettingsState, open_disconnect_dialog};
-use crate::ui::palette::{Palette, active_theme, inked};
+use crate::features::settings::presentation::pages::SettingsState;
+use crate::ui::palette::Palette;
 use crate::ui::spacing;
 
-use super::misc::{DISCONNECT_COPY, DISCONNECT_LABEL};
 use super::rows::{SCROLL_PAD_BOTTOM, SCROLL_PAD_TOP, group_label};
 
 const CARD_GRID_MAX_WIDTH: f64 = 920.0;
@@ -36,26 +34,6 @@ fn group_card<S: 'static>(
     )
 }
 
-fn disconnect_card(colors: &Palette) -> impl View<SettingsState> {
-    let theme = active_theme();
-    let row = row()
-        .flex(
-            1,
-            text(DISCONNECT_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
-        )
-        .child(
-            button(DISCONNECT_LABEL, |state: &mut SettingsState| {
-                open_disconnect_dialog(state)
-            })
-            .style(ButtonStyle::Danger),
-        )
-        .gap(CARD_GAP)
-        .cross_axis(CrossAxisAlignment::Center);
-    glyph_card::<SettingsState>()
-        .title(group_label("lock & disconnect", colors))
-        .desc(Padding(EdgeInsets::symmetric(spacing::XL, 0.0), row))
-}
-
 fn card_children<S: 'static, V: View<S>>(children: Vec<V>, flex: Option<u32>) -> Vec<FlexChild<S>> {
     children
         .into_iter()
@@ -66,26 +44,51 @@ fn card_children<S: 'static, V: View<S>>(children: Vec<V>, flex: Option<u32>) ->
         .collect()
 }
 
-/// The server screen alternates its groups between the columns and closes on Lock & disconnect.
-pub(in super::super) fn tablet_scroller(
-    groups: Vec<(&'static str, Vec<AnyView<SettingsState>>)>,
+/// The server screen's cards. The Full band puts `identity`, `access` and `this_server` in the
+/// left column and the `tokens` card in the right; the Collapsed band stacks them in that order.
+pub(in super::super) struct ServerCards {
+    pub identity: AnyView<SettingsState>,
+    pub access: Vec<AnyView<SettingsState>>,
+    pub this_server: Vec<AnyView<SettingsState>>,
+    pub tokens: Vec<AnyView<SettingsState>>,
+}
+
+pub(in super::super) fn server_tablet_scroller(
+    cards: ServerCards,
     full: bool,
     colors: &Palette,
 ) -> impl View<SettingsState> + use<> {
-    let placed = groups
-        .into_iter()
-        .enumerate()
-        .map(|(index, (label, rows))| {
-            let column = if index % 2 == 0 {
-                CardColumn::Left
-            } else {
-                CardColumn::Right
-            };
-            (column, label, rows)
-        })
-        .collect();
-    let tail = any(disconnect_card(colors)); // erasure: keep accumulator into Vec<AnyView>
-    card_grid(placed, full, Some(tail), colors)
+    let ServerCards {
+        identity,
+        access,
+        this_server,
+        tokens,
+    } = cards;
+    let access = any(group_card("access", access, colors));
+    let this_server = any(group_card("this server", this_server, colors));
+    let tokens = any(group_card("auth tokens", tokens, colors));
+    let lines: Vec<AnyView<SettingsState>> = if full {
+        let column = |cards: Vec<AnyView<SettingsState>>| {
+            FlexView::new(Axis::Vertical, card_children(cards, None))
+                .gap(CARD_GAP)
+                .cross_axis(CrossAxisAlignment::Stretch)
+        };
+        vec![any(FlexView::new(
+            Axis::Horizontal,
+            card_children(
+                vec![
+                    column(vec![identity, access, this_server]),
+                    column(vec![tokens]),
+                ],
+                Some(1),
+            ),
+        )
+        .gap(CARD_GAP)
+        .cross_axis(CrossAxisAlignment::Start))]
+    } else {
+        vec![identity, access, this_server, tokens]
+    };
+    grid_shell(lines)
 }
 
 pub(in super::super) fn card_grid<S: 'static>(
@@ -121,7 +124,10 @@ pub(in super::super) fn card_grid<S: 'static>(
             .collect()
     };
     lines.extend(tail);
+    grid_shell(lines)
+}
 
+fn grid_shell<S: 'static>(lines: Vec<AnyView<S>>) -> impl View<S> + use<S> {
     let grid = Padding(
         EdgeInsets {
             left: spacing::XL,

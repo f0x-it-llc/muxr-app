@@ -56,6 +56,8 @@ pub struct SettingsController {
     revoke_token: RevokeToken,
     pub tokens: RwSignal<Vec<AuthToken>>,
     pub loaded: RwSignal<bool>,
+    /// The last token list read failed; a later success clears it.
+    pub load_failed: RwSignal<bool>,
     /// A minted secret stays here until the next mint or an explicit dismissal clears it.
     pub pending_token_secret: RwSignal<Option<MintedToken>>,
 }
@@ -69,6 +71,7 @@ impl SettingsController {
             revoke_token: RevokeToken::new(tokens),
             tokens: RwSignal::new(Vec::new()),
             loaded: RwSignal::new(false),
+            load_failed: RwSignal::new(false),
             pending_token_secret: RwSignal::new(None),
         }
     }
@@ -84,12 +87,16 @@ impl SettingsController {
     }
 
     pub async fn refresh_tokens(&self) {
-        if let Ok(tokens) = self
+        match self
             .core
             .run(&self.list_tokens, NoParams, RunOptions::default())
             .await
         {
-            self.tokens.set(tokens);
+            Ok(tokens) => {
+                self.tokens.set(tokens);
+                self.load_failed.set(false);
+            }
+            Err(_) => self.load_failed.set(true),
         }
     }
 
