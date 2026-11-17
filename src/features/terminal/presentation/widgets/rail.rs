@@ -105,6 +105,7 @@ fn status_chip(link: Option<LinkStatus>, needs_you: bool) -> (&'static str, Badg
         Some(LinkStatus::Idle | LinkStatus::Reconnecting) => ("connecting", BadgeVariant::Warning),
         Some(LinkStatus::Disconnected) => ("offline", BadgeVariant::Error),
         Some(LinkStatus::Closed) => ("exited", BadgeVariant::Neutral),
+        Some(LinkStatus::PaneGone) => ("no pane", BadgeVariant::Neutral),
     }
 }
 
@@ -459,5 +460,14 @@ mod tests {
             status_chip(Some(LinkStatus::Disconnected), false).1,
             BadgeVariant::Error
         );
+    }
+
+    #[test]
+    fn a_gone_pane_never_reads_as_an_exited_session() {
+        for needs_you in [false, true] {
+            let (label, _) = status_chip(Some(LinkStatus::PaneGone), needs_you);
+            assert_eq!(label, "no pane");
+        }
+        assert_eq!(status_chip(Some(LinkStatus::Closed), false).0, "exited");
     }
 }

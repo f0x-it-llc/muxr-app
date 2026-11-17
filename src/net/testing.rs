@@ -410,7 +410,7 @@ impl AgentScript {
 
 enum ServerCommand {
     Render(Vec<u8>),
-    Exit,
+    Exit(String),
     Kill,
     /// A half-open connection: no frame, no end, no read, short of the keepalive.
     Stall,
@@ -479,7 +479,12 @@ impl TerminalScript {
     }
 
     pub fn send_exit(&self) {
-        self.command(ServerCommand::Exit);
+        self.send_exit_with("");
+    }
+
+    /// The payload says why; a test names the one the client must act on.
+    pub fn send_exit_with(&self, payload: &str) {
+        self.command(ServerCommand::Exit(payload.to_string()));
     }
 
     pub fn kill(&self) {
@@ -577,9 +582,9 @@ async fn serve_attach(
                         return;
                     }
                 }
-                Some(ServerCommand::Exit) => {
+                Some(ServerCommand::Exit(payload)) => {
                     let _ = frames
-                        .send(Ok(control_frame(CONTROL_EXIT, String::new())))
+                        .send(Ok(control_frame(CONTROL_EXIT, payload)))
                         .await;
                     return;
                 }

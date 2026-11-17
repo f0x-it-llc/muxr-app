@@ -3,6 +3,7 @@ use std::sync::Arc;
 use clean_signals::UseCase;
 
 use crate::failure::AppFailure;
+use crate::features::sessions::domain::entities::SessionStatus;
 use crate::features::sessions::domain::repositories::SessionsRepository;
 use crate::features::terminal::domain::entities::Workspace;
 use crate::features::terminal::domain::repositories::TerminalRepository;
@@ -14,6 +15,8 @@ pub struct WorkspaceQuery {
     /// The session name is looked up by this id; `None` for a bare `/terminal`.
     pub session_id: Option<String>,
     pub with_spaces: bool,
+    /// Tabs are read for this space by id: a stream that ended leaves no relay to answer for one.
+    pub pinned_space: Option<String>,
 }
 
 /// The session name comes from [`SessionsRepository`], the same store a rename writes to.
@@ -41,6 +44,14 @@ impl LoadWorkspace {
             .find(|session| session.id == id)
             .map(|session| session.name))
     }
+
+    /// Listed and not resurrectable-only; a failed lookup is a failure, not an answer.
+    pub async fn session_alive(&self, id: &str) -> Result<bool, AppFailure> {
+        let sessions = self.sessions.list_sessions().await?;
+        Ok(sessions
+            .iter()
+            .any(|session| session.id == id && session.status != SessionStatus::Resurrectible))
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -56,7 +67,10 @@ impl UseCase for LoadWorkspace {
         } else {
             Vec::new()
         };
-        let tabs = self.terminal.list_tabs().await?;
+        let tabs = match &query.pinned_space {
+            Some(space_id) => self.terminal.list_tabs_in_space(space_id).await?,
+            None => self.terminal.list_tabs().await?,
+        };
         let lines = match tabs.iter().find(|tab| tab.active).or_else(|| tabs.first()) {
             Some(tab) => self.terminal.tab_lines(tab.key.clone()).await?,
             None => Vec::new(),

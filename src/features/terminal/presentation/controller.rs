@@ -2,7 +2,7 @@
 //! generation counter commits only the newest fetch, and single-flight claims guard the poll,
 //! creates and every move. The feed writes no signal; `mirror_link` turns link status into one.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::rc::Rc;
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use clean_signals::{ControllerCore, RunOptions};
 use clean_signals_frust::use_interval;
 use frust::authoring::text::FontFamily;
-use frust::{Get, GetUntracked, RwSignal, Set, With, WithUntracked, spawn_local};
+use frust::{Get, GetUntracked, RwSignal, Set, With, WithUntracked, on_cleanup, spawn_local};
 
 use crate::agents::{AgentStatus, agent_sort_key};
 use crate::connection::{CAP_AGENTS_STREAM, ConnectionController};
@@ -114,6 +114,18 @@ pub struct TerminalController {
     /// `Relaxed`: atomics for the `Send + Sync` bound on the UI executor, not for concurrency.
     docked: AtomicBool,
     attach_target: Mutex<Option<AttachTarget>>,
+    /// The attached pane exited and the session did not: nothing is sent until a fresh stream binds.
+    pane_gone: AtomicBool,
+    ended_connection_id: Mutex<String>,
+    /// An exit was mirrored and its cause is still to be settled ([`resolve_exit`](Self::resolve_exit)).
+    exit_due: AtomicBool,
+    exit_claimed: AtomicBool,
+    /// Bumped by a pick in the no-pane state; the screen answers each bump with a fresh attach.
+    pub revive_requests: RwSignal<u64>,
+    reviving: AtomicBool,
+    revived: AtomicBool,
+    /// zellij ignores resume hints, so the picked pane is focused once the fresh stream binds.
+    revive_focus: Mutex<Option<(u32, bool)>>,
 }
 
 /// Applied at most once, against a tab list published after the link could route. Only a landed
@@ -353,6 +365,14 @@ impl TerminalController {
             resume: Arc::new(ResumeSlot::default()),
             docked: AtomicBool::new(false),
             attach_target: Mutex::new(None),
+            pane_gone: AtomicBool::new(false),
+            ended_connection_id: Mutex::new(String::new()),
+            exit_due: AtomicBool::new(false),
+            exit_claimed: AtomicBool::new(false),
+            revive_requests: RwSignal::new(0),
+            reviving: AtomicBool::new(false),
+            revived: AtomicBool::new(false),
+            revive_focus: Mutex::new(None),
         }
     }
 
@@ -373,9 +393,11 @@ impl TerminalController {
     /// Only the tabs go through the staleness guard; nothing else reads that generation.
     pub async fn load(&self) {
         let generation = self.begin_layout_fetch();
+        let pinned_space = self.detached_space();
         let query = WorkspaceQuery {
             session_id: self.session_id.clone(),
             with_spaces: self.has_spaces(),
+            pinned_space: pinned_space.clone(),
         };
         let Ok(workspace) = self
             .core
@@ -393,6 +415,11 @@ impl TerminalController {
         if !self.signals_alive() {
             return;
         }
+        // Without a relay the answer's selection is the daemon's, not this screen's.
+        let spaces = match &pinned_space {
+            Some(id) => select_by_id(spaces, id),
+            None => spaces,
+        };
         self.spaces.set(spaces);
         self.publish_if_newest(generation, tabs, Seed::Fresh);
         self.lines.set(lines);
@@ -444,7 +471,10 @@ impl TerminalController {
     /// the target, so a claim held elsewhere leaves it for the next publish; an unknown tab or pane
     /// drops it silently.
     pub async fn apply_attach_target(&self) {
-        if !self.attach_target_ready() || self.focus_verbs_in_flight.load(Ordering::SeqCst) != 0 {
+        if self.stream_ended()
+            || !self.attach_target_ready()
+            || self.focus_verbs_in_flight.load(Ordering::SeqCst) != 0
+        {
             return;
         }
         let Some(_claim) = self.claim_move() else {
@@ -656,6 +686,9 @@ impl TerminalController {
         let Some(_claim) = self.claim_user_move() else {
             return false;
         };
+        if self.is_pane_gone() {
+            return self.revive_at(None, &tab_key, None, pane_id, is_plugin);
+        }
         self.commit_pane_unclaimed(tab_key, pane_id, is_plugin)
             .await
     }
@@ -714,6 +747,10 @@ impl TerminalController {
         let Some(_claim) = self.claim_user_move() else {
             return false;
         };
+        if self.is_pane_gone() {
+            let tabs = Some(cached_tabs.as_slice());
+            return self.revive_at(Some(space_id), &tab_key, tabs, pane_id, is_plugin);
+        }
         self.land_in_space(space_id, cached_tabs, tab_key, Some((pane_id, is_plugin)))
             .await
     }
@@ -1084,6 +1121,11 @@ impl TerminalController {
             Err(AppFailure::Network(
                 "list_tabs failed (test seam)".to_string(),
             ))
+        } else if self.is_pane_gone() && self.is_herdr_session() {
+            let Some(space_id) = self.detached_space() else {
+                return;
+            };
+            self.terminal.list_tabs_in_space(&space_id).await
         } else {
             self.terminal.list_tabs().await
         };
@@ -1523,7 +1565,12 @@ impl TerminalController {
             .map(|space| space.id)
     }
 
+    /// Nothing is sent on an ended stream's id: the server would answer that it needs a reattach.
     async fn tell(&self, work: impl Future<Output = Result<(), AppFailure>>) -> bool {
+        if self.stream_ended() {
+            log::debug!("terminal verb dropped: the attach stream ended");
+            return false;
+        }
         match work.await {
             Ok(()) => true,
             Err(failure) => {
@@ -1541,6 +1588,10 @@ impl TerminalController {
         moves_without_info: bool,
         work: impl Future<Output = Result<String, AppFailure>>,
     ) -> Option<String> {
+        if self.stream_ended() {
+            log::debug!("terminal create dropped: the attach stream ended");
+            return None;
+        }
         self.focus_verbs_in_flight.fetch_add(1, Ordering::SeqCst);
         let _in_flight = VerbGuard(&self.focus_verbs_in_flight);
         let created = match work.await {
@@ -1657,11 +1708,34 @@ impl TerminalController {
 
     /// Read-compare-then-write: [`link`](Self::link) is tracked in `build`. Answers `true` on the
     /// first wake with a real connection id, the caller's cue for a catch-up reload.
+    /// An exit is held back until [`resolve_exit`](Self::resolve_exit) settles its cause, and the
+    /// no-pane state is left only by a connected stream minting an id the ended one did not carry.
     pub fn mirror_link(&self, status: LinkStatus, connection_id: Option<String>) -> bool {
+        let connection_id = connection_id.unwrap_or_default();
+        if self.is_pane_gone() {
+            let fresh = status == LinkStatus::Connected
+                && !connection_id.is_empty()
+                && connection_id != *lock(&self.ended_connection_id);
+            if !fresh {
+                return false;
+            }
+            self.leave_pane_gone();
+        }
+        match status {
+            LinkStatus::PaneGone => {
+                self.enter_pane_gone(connection_id);
+                self.exit_due.store(true, Ordering::SeqCst);
+                return false;
+            }
+            LinkStatus::Closed if self.link.get_untracked() != Some(LinkStatus::Closed) => {
+                self.exit_due.store(true, Ordering::SeqCst);
+                return false;
+            }
+            _ => {}
+        }
         if self.link.get_untracked() != Some(status) {
             self.link.set(Some(status));
         }
-        let connection_id = connection_id.unwrap_or_default();
         let mut bound = self
             .bound_connection_id
             .lock()
@@ -1681,6 +1755,154 @@ impl TerminalController {
             self.settle_generation.store(current, Ordering::SeqCst);
         }
         settled
+    }
+
+    /// The settle's catch-up: after a fresh attach the zellij focus first, then a full reload,
+    /// since the relay may sit in another space than the one the tree last showed.
+    pub async fn settle_attach(&self) {
+        if !self.revived.swap(false, Ordering::SeqCst) {
+            self.reload_tabs_quiet().await;
+            self.apply_attach_target().await;
+            return;
+        }
+        let focus = lock(&self.revive_focus).take();
+        if let Some((pane_id, is_plugin)) = focus {
+            self.tell_move(self.terminal.focus_pane(pane_id, is_plugin))
+                .await;
+        }
+        self.load().await;
+    }
+
+    pub fn is_pane_gone(&self) -> bool {
+        self.pane_gone.load(Ordering::SeqCst)
+    }
+
+    fn stream_ended(&self) -> bool {
+        self.is_pane_gone()
+            || self.exit_due.load(Ordering::SeqCst)
+            || self.exit_claimed.load(Ordering::SeqCst)
+    }
+
+    /// Answers `true` once per exit: the caller then runs [`resolve_exit`](Self::resolve_exit).
+    pub fn take_exit_check(&self) -> bool {
+        self.exit_due.swap(false, Ordering::SeqCst)
+            && !self.exit_claimed.swap(true, Ordering::SeqCst)
+    }
+
+    /// An exit without the gone-pane payload (an older server's included) leaves only a session
+    /// that is still listed and not resurrectable-only on a recoverable screen; a failed lookup
+    /// ends it like an absent one.
+    pub async fn resolve_exit(&self) {
+        if !self.is_pane_gone() {
+            let alive = match &self.session_id {
+                Some(id) => self.load.session_alive(id).await.unwrap_or_else(|failure| {
+                    log::debug!("session lookup after an exit: {failure}");
+                    false
+                }),
+                None => false,
+            };
+            if !self.signals_alive() {
+                return;
+            }
+            if !alive {
+                self.link.set(Some(LinkStatus::Closed));
+                return;
+            }
+            self.enter_pane_gone(String::new());
+        }
+        self.reload_tabs_quiet().await;
+    }
+
+    fn enter_pane_gone(&self, connection_id: String) {
+        if self.pane_gone.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let ended = if connection_id.is_empty() {
+            lock(&self.bound_connection_id).clone()
+        } else {
+            connection_id
+        };
+        *lock(&self.ended_connection_id) = ended;
+        if self.link.try_get_untracked() != Some(Some(LinkStatus::PaneGone)) {
+            self.link.set(Some(LinkStatus::PaneGone));
+        }
+    }
+
+    /// The fresh stream settles anew: the previous one's settle routed by the ended id.
+    fn leave_pane_gone(&self) {
+        self.pane_gone.store(false, Ordering::SeqCst);
+        self.reviving.store(false, Ordering::SeqCst);
+        self.exit_due.store(false, Ordering::SeqCst);
+        self.exit_claimed.store(false, Ordering::SeqCst);
+        self.attach_settled.store(false, Ordering::SeqCst);
+        self.revived.store(true, Ordering::SeqCst);
+    }
+
+    /// A pick with no live stream aims the next attach instead of moving a relay that is gone:
+    /// space first, then tab and pane together (herdr honours the pane hint only with its tab).
+    fn revive_at(
+        &self,
+        space_id: Option<String>,
+        tab_key: &str,
+        tabs: Option<&[TabEntry]>,
+        pane_id: u32,
+        is_plugin: bool,
+    ) -> bool {
+        if self.reviving.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        if self.is_herdr_session() {
+            let tab_id = match tabs {
+                Some(tabs) => tabs
+                    .iter()
+                    .find(|tab| tab.key == tab_key)
+                    .map(|tab| tab.tab_id),
+                None => self.tab_id_for(tab_key),
+            };
+            if let Some(space_id) = space_id.or_else(|| self.selected_space_id()) {
+                self.resume.remember_space(space_id);
+            }
+            self.resume.remember_pane(tab_id, pane_id);
+        } else {
+            *lock(&self.revive_focus) = Some((pane_id, is_plugin));
+        }
+        self.supersede_attach_target();
+        let Some(requests) = self.revive_requests.try_get_untracked() else {
+            return false;
+        };
+        self.revive_requests.set(requests + 1);
+        true
+    }
+
+    /// Fed every pump tick: a fresh attach that dropped or ended before binding leaves the screen
+    /// in the no-pane state with a toast; `true` tells the caller to stop that feed.
+    pub fn revive_failed(&self, status: LinkStatus, backoff_step: usize) -> bool {
+        if !self.is_pane_gone() || !self.reviving.load(Ordering::SeqCst) {
+            return false;
+        }
+        let failed = backoff_step > 0
+            || matches!(
+                status,
+                LinkStatus::Disconnected | LinkStatus::Closed | LinkStatus::PaneGone
+            );
+        if !failed {
+            return false;
+        }
+        self.reviving.store(false, Ordering::SeqCst);
+        lock(&self.revive_focus).take();
+        self.core.failures().emit(&AppFailure::Network(
+            "the attach after a pane exit failed".to_string(),
+        ));
+        true
+    }
+
+    /// herdr's no-space layout read answers, with no relay, for the daemon's focused workspace.
+    fn detached_space(&self) -> Option<String> {
+        if self.is_pane_gone() && self.is_herdr_session() {
+            self.selected_space_id()
+        } else {
+            None
+        }
     }
 
     /// Read-compare-then-write, since all three are tracked in `build`. Each tick spawns detached
@@ -1900,6 +2122,60 @@ pub struct LiveSession {
     /// A tracked read in `Component::build` is what wakes the live pane's repaint.
     pub generation: RwSignal<u64>,
     pub reattach: Option<Reattach>,
+    pump: Option<FeedPump>,
+    /// The last [`TerminalController::revive_requests`] count this session answered.
+    revived: Cell<u64>,
+}
+
+/// Restartable: the pump returns once its feed has ended, and a fresh attach after a pane exit
+/// needs one again. Each run has its own stop flag; unmount stops whichever is current.
+struct FeedPump {
+    feed: term::SharedFeed,
+    emulator: term::SharedEmulator,
+    generation: RwSignal<u64>,
+    on_tick: Rc<dyn Fn()>,
+    stop: Arc<Mutex<Arc<AtomicBool>>>,
+}
+
+impl FeedPump {
+    /// Under the screen's owner, like [`LiveSession::enter`].
+    fn start(
+        feed: term::SharedFeed,
+        emulator: term::SharedEmulator,
+        generation: RwSignal<u64>,
+        on_tick: Rc<dyn Fn()>,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let pump = Self {
+            feed,
+            emulator,
+            generation,
+            on_tick,
+            stop: Arc::new(Mutex::new(Arc::clone(&stop))),
+        };
+        let current = Arc::clone(&pump.stop);
+        on_cleanup(move || lock(&current).store(true, Ordering::Relaxed));
+        pump.run(stop);
+        pump
+    }
+
+    fn restart(&self) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let previous = std::mem::replace(&mut *lock(&self.stop), Arc::clone(&stop));
+        previous.store(true, Ordering::Relaxed);
+        self.run(stop);
+    }
+
+    fn run(&self, stop: Arc<AtomicBool>) {
+        let on_tick = Rc::clone(&self.on_tick);
+        spawn_local(term::run_feed_watched(
+            self.feed.clone(),
+            Rc::clone(&self.emulator),
+            self.generation,
+            stop,
+            move || on_tick(),
+        ));
+    }
 }
 
 struct AttachSpec {
@@ -1945,7 +2221,7 @@ impl LiveSession {
         input.wire_pump(Rc::clone(&emulator), generation);
         let selection = term::SelectionSeam::new(Rc::clone(&emulator));
 
-        let reattach = match (&feed, spec) {
+        let wiring = match (&feed, spec) {
             (LiveFeed::Grpc(grpc), Some(spec)) => {
                 // Rides the repaint pump: already awake and on the UI thread.
                 let watch = Rc::clone(grpc);
@@ -1953,37 +2229,41 @@ impl LiveSession {
                 let expiry = Arc::clone(&spec.connection);
                 let flag = Arc::clone(&spec.auth_expired);
                 let feed_client = Arc::clone(&spec.client);
-                term::spawn_feed_pump_watched(
-                    feed_dyn,
-                    Rc::clone(&emulator),
-                    generation,
-                    move || {
-                        let (status, connection_id) = {
-                            let feed = watch.borrow();
-                            (feed.status(), feed.connection_id())
-                        };
-                        if mirror.mirror_link(status, connection_id) {
-                            // Settled: re-read the layout, since the mount's own load had no connection id.
-                            let settled = Arc::clone(&mirror);
-                            spawn_local(async move {
-                                settled.reload_tabs_quiet().await;
-                                settled.apply_attach_target().await;
-                            });
+                let on_tick: Rc<dyn Fn()> = Rc::new(move || {
+                    let (status, connection_id, backoff_step) = {
+                        let feed = watch.borrow();
+                        (feed.status(), feed.connection_id(), feed.backoff_step())
+                    };
+                    if mirror.mirror_link(status, connection_id) {
+                        // Settled: re-read the layout, since the mount's own load had no connection id.
+                        let settled = Arc::clone(&mirror);
+                        spawn_local(async move { settled.settle_attach().await });
+                    }
+                    if mirror.take_exit_check() {
+                        let exited = Arc::clone(&mirror);
+                        spawn_local(async move { exited.resolve_exit().await });
+                    }
+                    if mirror.revive_failed(status, backoff_step) {
+                        watch.borrow().shutdown();
+                    }
+                    if flag.swap(false, Ordering::AcqRel) {
+                        match lock(&feed_client).clone() {
+                            Some(client) => expiry.on_session_expired_for(&client),
+                            None => expiry.on_session_expired(),
                         }
-                        if flag.swap(false, Ordering::AcqRel) {
-                            match lock(&feed_client).clone() {
-                                Some(client) => expiry.on_session_expired_for(&client),
-                                None => expiry.on_session_expired(),
-                            }
-                        }
-                    },
-                );
-                Some(spec.hook(grpc, &emulator))
+                    }
+                });
+                let pump = FeedPump::start(feed_dyn, Rc::clone(&emulator), generation, on_tick);
+                Some((spec.hook(grpc, &emulator), pump))
             }
             _ => {
                 term::spawn_feed_pump(feed_dyn, Rc::clone(&emulator), generation);
                 None
             }
+        };
+        let (reattach, pump) = match wiring {
+            Some((reattach, pump)) => (Some(reattach), Some(pump)),
+            None => (None, None),
         };
 
         let now = Arc::clone(controller);
@@ -2014,6 +2294,20 @@ impl LiveSession {
             selection,
             generation,
             reattach,
+            pump,
+            revived: Cell::new(controller.revive_requests.get_untracked()),
+        }
+    }
+
+    /// Answers each pick the controller made in the no-pane state with one fresh attach, which
+    /// replaces the ended feed in place; a demo replay has nothing to re-attach.
+    pub fn revive_to(&self, requests: u64) {
+        if self.revived.replace(requests) == requests {
+            return;
+        }
+        if let Some(pump) = &self.pump {
+            self.reattach();
+            pump.restart();
         }
     }
 
@@ -4908,5 +5202,204 @@ mod tests {
         target.tab_key.clear();
         assert!(!block_on(c.commit_agent(&target)));
         assert_eq!(repository.actions().len(), before);
+    }
+
+    fn gone_pane(session_id: &str) -> (Arc<TerminalController>, Arc<RecordingRepository>) {
+        let (c, repository) = recorded(session_id);
+        c.attach_live();
+        assert!(c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+        assert!(!c.mirror_link(LinkStatus::PaneGone, Some("c-1".to_string())));
+        (c, repository)
+    }
+
+    #[test]
+    fn a_gone_pane_is_its_own_state_and_drops_every_verb_on_the_ended_stream() {
+        let (c, repository) = gone_pane("herdr:work");
+        assert_eq!(c.link.get_untracked(), Some(LinkStatus::PaneGone));
+        assert!(c.is_pane_gone());
+
+        block_on(async {
+            assert!(!c.select_space("ws-2".to_string()).await);
+            c.new_tab("t".to_string()).await;
+            c.rename_tab(1, "r".to_string()).await;
+            c.new_pane(false).await;
+        });
+        assert!(
+            repository.actions().is_empty(),
+            "{:?}",
+            repository.actions()
+        );
+    }
+
+    #[test]
+    fn a_herdr_pick_with_no_pane_aims_a_fresh_attach_and_sends_nothing() {
+        let (c, repository) = gone_pane("herdr:work");
+        let before = repository.calls().len();
+
+        assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
+
+        assert_eq!(
+            c.resume_slot().target(),
+            ResumeTarget {
+                space_id: Some("ws-1".to_string()),
+                tab_id: Some(2),
+                pane_id: Some(21),
+            }
+        );
+        assert_eq!(c.revive_requests.get_untracked(), 1);
+        assert!(repository.calls()[before..].is_empty());
+
+        assert!(!c.mirror_link(LinkStatus::Connected, Some("c-1".to_string())));
+        assert_eq!(c.link.get_untracked(), Some(LinkStatus::PaneGone));
+        assert!(c.mirror_link(LinkStatus::Connected, Some("c-2".to_string())));
+        assert_eq!(c.link.get_untracked(), Some(LinkStatus::Connected));
+        assert_eq!(repository.last_binding().as_deref(), Some("c-2"));
+
+        block_on(c.settle_attach());
+        let since: Vec<String> = repository.calls().into_iter().skip(before).collect();
+        assert_eq!(since.first().map(String::as_str), Some("bind(c-2)"));
+        assert!(since.contains(&"list_spaces".to_string()), "{since:?}");
+        assert!(repository.actions().is_empty(), "{since:?}");
+    }
+
+    #[test]
+    fn a_zellij_pick_with_no_pane_focuses_the_pane_once_on_the_fresh_stream() {
+        let (c, repository) = gone_pane(SEEDED_DEV_ID);
+        assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
+        assert_eq!(c.resume_slot().target(), ResumeTarget::default());
+        assert!(repository.actions().is_empty());
+
+        assert!(c.mirror_link(LinkStatus::Connected, Some("c-2".to_string())));
+        block_on(c.settle_attach());
+
+        assert_eq!(repository.actions(), ["focus_pane(21,false)"]);
+        let calls = repository.calls();
+        let bound = calls.iter().position(|call| call == "bind(c-2)");
+        let focused = calls.iter().position(|call| call == "focus_pane(21,false)");
+        assert!(bound < focused, "{calls:?}");
+        assert_eq!(focused_pane(&c, "beta"), Some(21));
+    }
+
+    #[test]
+    fn a_failed_fresh_attach_keeps_the_no_pane_state_and_toasts_once() {
+        let (c, _repository) = gone_pane("herdr:work");
+        let failures = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&failures);
+        c.core()
+            .failures()
+            .subscribe(move |_: &AppFailure| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            })
+            .forget();
+        assert!(
+            !c.revive_failed(LinkStatus::Reconnecting, 1),
+            "no attach asked for"
+        );
+
+        assert!(block_on(c.commit_pane("beta".to_string(), 21, false)));
+        assert!(!c.revive_failed(LinkStatus::Reconnecting, 0));
+        assert!(c.revive_failed(LinkStatus::Reconnecting, 1));
+        assert!(!c.revive_failed(LinkStatus::Reconnecting, 2));
+
+        assert_eq!(failures.load(Ordering::SeqCst), 1);
+        assert_eq!(c.link.get_untracked(), Some(LinkStatus::PaneGone));
+        assert!(block_on(c.commit_pane("alpha".to_string(), 11, false)));
+        assert_eq!(
+            c.revive_requests.get_untracked(),
+            2,
+            "the user can pick again"
+        );
+    }
+
+    fn exited(
+        session_id: &str,
+        sessions: Arc<dyn SessionsRepository + Send + Sync>,
+    ) -> TerminalController {
+        let c = TerminalController::new(
+            Arc::new(MockTerminalRepository::seeded()),
+            sessions,
+            Arc::new(MockPreferencesRepository::seeded()),
+            Some(session_id.to_string()),
+        );
+        c.mirror_link(LinkStatus::Connected, Some("c-1".to_string()));
+        assert!(!c.mirror_link(LinkStatus::Closed, Some("c-1".to_string())));
+        assert_eq!(
+            c.link.get_untracked(),
+            Some(LinkStatus::Connected),
+            "held back"
+        );
+        assert!(c.take_exit_check());
+        assert!(!c.take_exit_check(), "one lookup per exit");
+        block_on(c.resolve_exit());
+        c
+    }
+
+    struct UnreachableSessions;
+
+    #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", clean_signals::async_trait(?Send))]
+    impl SessionsRepository for UnreachableSessions {
+        async fn list_sessions(
+            &self,
+        ) -> Result<Vec<crate::features::sessions::domain::entities::Session>, AppFailure> {
+            Err(AppFailure::Network("unreachable".to_string()))
+        }
+        async fn create_session(
+            &self,
+            _params: crate::features::sessions::domain::entities::CreateSessionParams,
+        ) -> Result<crate::features::sessions::domain::entities::Session, AppFailure> {
+            Err(AppFailure::Network("unreachable".to_string()))
+        }
+        async fn rename_session(
+            &self,
+            _request: RenameRequest,
+        ) -> Result<crate::features::sessions::domain::entities::Session, AppFailure> {
+            Err(AppFailure::Network("unreachable".to_string()))
+        }
+        async fn kill_session(&self, _id: String) -> Result<(), AppFailure> {
+            Err(AppFailure::Network("unreachable".to_string()))
+        }
+    }
+
+    #[test]
+    fn an_exit_without_the_payload_ends_the_session_only_when_the_lookup_says_so() {
+        let seeded = || Arc::new(MockSessionsRepository::seeded());
+        let link = |c: TerminalController| c.link.get_untracked();
+        assert_eq!(
+            link(exited(SEEDED_DEV_ID, seeded())),
+            Some(LinkStatus::PaneGone)
+        );
+        assert_eq!(
+            link(exited("herdr:herdr", seeded())),
+            Some(LinkStatus::PaneGone)
+        );
+        assert_eq!(
+            link(exited("zellij:gone", seeded())),
+            Some(LinkStatus::Closed)
+        );
+        assert_eq!(
+            link(exited("zellij:jumping-peach", seeded())),
+            Some(LinkStatus::Closed),
+            "a resurrectable-only session is dead"
+        );
+        assert_eq!(
+            link(exited(SEEDED_DEV_ID, Arc::new(UnreachableSessions))),
+            Some(LinkStatus::Closed)
+        );
+    }
+
+    #[test]
+    fn a_herdr_reload_with_no_pane_reads_the_selected_space_by_id() {
+        let (c, repository) = gone_pane("herdr:work");
+        let before = repository.calls().len();
+        block_on(c.reload_tabs());
+        assert!(
+            repository.calls()[before..]
+                .iter()
+                .all(|call| call == "list_tabs")
+        );
+        assert_eq!(c.detached_space().as_deref(), Some("ws-1"));
+        let (zellij, _) = gone_pane(SEEDED_DEV_ID);
+        assert_eq!(zellij.detached_space(), None);
     }
 }

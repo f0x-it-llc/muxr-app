@@ -11,10 +11,10 @@ use clean_signals_frust::{use_controller, use_failure_listener};
 use frust::authoring::text::FontStyle;
 use frust::authoring::{Rect, Size, WindowInsets};
 use frust::{
-    Axis, Component, CrossAxisAlignment, EdgeInsets, Either, FlexView, Get, GetUntracked, IconData,
-    NavigatorController, PopResult, RwSignal, Set, SystemUiMode, View, WindowMetrics, column,
-    component, container, flexible, icons, inflexible, on_cleanup, row, set_system_ui_mode,
-    spawn_local, text, use_context,
+    Axis, Component, CrossAxisAlignment, EdgeInsets, Either, EitherOf3, FlexView, Get,
+    GetUntracked, IconData, NavigatorController, PopResult, RwSignal, Set, SystemUiMode, View,
+    WindowMetrics, column, component, container, flexible, icons, inflexible, on_cleanup, row,
+    set_system_ui_mode, spawn_local, text, use_context,
 };
 use frust_glyph::{show_glyph_dialog, show_glyph_menu};
 
@@ -26,7 +26,7 @@ use crate::features::settings::di::expect_preferences_repository;
 use crate::features::terminal::data::feeds::demo_feed::DemoFeed;
 use crate::features::terminal::di::expect_terminal_repository;
 use crate::features::terminal::domain::entities::{AgentEntry, PaneEntry, ScrollStep, TabEntry};
-use crate::features::terminal::domain::feed::WheelKind;
+use crate::features::terminal::domain::feed::{LinkStatus, WheelKind};
 use crate::responsive::Responsive;
 use crate::routes::{Nav, app_nav};
 use crate::ui::dialogs::name_input_dialog;
@@ -46,7 +46,7 @@ use super::widgets::agents_section::{
     AgentsData, FocusedPane, PressAgent, agents_section, tree_split,
 };
 use super::widgets::card::{CardInk, card_body};
-use super::widgets::link_strip::link_strip;
+use super::widgets::link_strip::{link_strip, no_pane_body};
 use super::widgets::new_tab_dialog::new_tab_dialog;
 use super::widgets::rail::MiniActions;
 use super::widgets::side_sheet_tree::{
@@ -384,6 +384,11 @@ impl Component for TerminalScreen {
 
             state.live = Some(session);
         }
+        // Tracked: a pick in the no-pane state asks for the fresh attach this answers.
+        let revive_requests = controller.revive_requests.get();
+        if let Some(session) = state.live.as_ref() {
+            session.revive_to(revive_requests);
+        }
         // The app-side `SIGWINCH`: forward the size the previous layout recorded, if it changed.
         if let Some(session) = state.live.as_ref()
             && let Some((cols, rows)) = session.emulator.borrow_mut().take_pending_resize()
@@ -398,6 +403,7 @@ impl Component for TerminalScreen {
         let active = controller.active_tab.get();
         let title = active_title(&tabs, &active);
         let link = controller.link.get();
+        let pane_gone = link == Some(LinkStatus::PaneGone);
         // Gates every control read-only refuses and puts the grid in its no-byte read-only mode.
         let read_only = state.actions.connection.is_read_only.get();
 
@@ -434,6 +440,7 @@ impl Component for TerminalScreen {
         };
 
         let body = match state.live.as_ref() {
+            Some(_) if pane_gone => EitherOf3::C(no_pane_body(!tablet)),
             Some(session) => {
                 // Tracked: the pump's one write per wake repaints the live pane.
                 let generation = session.generation.get();
@@ -463,14 +470,14 @@ impl Component for TerminalScreen {
                 if let Some(sink) = demo_copy_sink() {
                     chip = chip.copy_sink(sink);
                 }
-                Either::Left(term::terminal_surface_with_pinch(
+                EitherOf3::A(term::terminal_surface_with_pinch(
                     session.selection.clone(),
                     grid,
                     chip,
                     pinch,
                 ))
             }
-            None => Either::Right(card_body(lines, epoch, &ink)),
+            None => EitherOf3::B(card_body(lines, epoch, &ink)),
         };
 
         let crumbs = if tablet && responsive.is_full() {
@@ -523,7 +530,7 @@ impl Component for TerminalScreen {
         match state.live.as_ref() {
             Some(session) => {
                 let bar = if tablet {
-                    let shown = controller.key_bar_visible.get() && !read_only;
+                    let shown = controller.key_bar_visible.get() && !read_only && !pane_gone;
                     let fn_row = controller.fn_row_visible;
                     Either::Left(keybar::tablet_key_bar(
                         shown,
@@ -535,7 +542,8 @@ impl Component for TerminalScreen {
                     // The keyboard's height is the one IME proxy: this screen has no other text input.
                     let keyboard_up = use_context::<WindowInsets>()
                         .map(|insets| insets.view_insets.bottom > 0.0)
-                        .unwrap_or(false);
+                        .unwrap_or(false)
+                        && !pane_gone;
                     Either::Right(keybar::key_bar(keyboard_up, &session.input))
                 };
                 Either::Left(
