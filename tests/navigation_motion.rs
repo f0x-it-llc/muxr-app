@@ -20,9 +20,11 @@ use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
 use muxr::features::connect::domain::keyring::Keyring;
 use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::connect::presentation::widgets::cta::CONNECT_LABEL;
+use muxr::features::connect::presentation::widgets::getting_started::APP_SETTINGS_LABEL;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::pro::presentation::NOT_NOW_LABEL;
+use muxr::features::settings::presentation::widgets::SWITCH_LABEL;
 use muxr::routes::{ADD_SERVER_LOCATION, add_server_location, app_nav, sessions_back_signal};
 use muxr::ui::dialogs::confirm_dialog;
 use muxr::ui::sheet::{SheetHandle, show_sheet};
@@ -1131,6 +1133,7 @@ fn a_free_install_meets_the_paywall_first_and_not_now_pops_the_add_page() {
 const SAVED_HOST: &str = "saved.example";
 const SAVED_ENDPOINT: &str = "saved.example:50051";
 const SAVED_LABEL: &str = "Saved rig";
+const APP_SETTINGS_TITLE: &str = "app settings";
 const SAVED_TOKEN: &str = "saved-s3cr3t";
 const REMEMBER_LABEL: &str = "Remember for 4 weeks";
 
@@ -1153,9 +1156,7 @@ fn pump_until_true(h: &mut Harness, done: impl FnMut() -> bool) {
     );
 }
 
-fn on_settings_with_a_saved_server(unlocked: bool) -> Harness {
-    let mut h = Harness::on_sessions();
-    unlock_pro(&mut h);
+fn seed_saved_server(unlocked: bool) {
     expect_saved_servers()
         .save(SavedServer {
             host: SAVED_HOST.to_string(),
@@ -1177,7 +1178,9 @@ fn on_settings_with_a_saved_server(unlocked: bool) -> Harness {
         keyring.insert(SAVED_ENDPOINT, Zeroizing::new(SAVED_TOKEN.to_string()));
         expect_keyring().publish(keyring);
     }
-    h.push("/settings");
+}
+
+fn await_saved_row(h: &mut Harness) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !h.values().iter().any(|v| v == SAVED_LABEL) {
         assert!(
@@ -1188,8 +1191,79 @@ fn on_settings_with_a_saved_server(unlocked: bool) -> Harness {
         pump_frames(&mut h.root, &mut h.logic, &mut h.state, &mut h.tcx, 1);
     }
     h.park();
+}
+
+/// Sessions, then server settings, then app settings: the stack its own link builds.
+fn on_app_settings_over_server_settings(unlocked: bool) -> Harness {
+    let mut h = Harness::on_sessions();
+    unlock_pro(&mut h);
+    seed_saved_server(unlocked);
+    h.push("/settings");
     assert_titled(&h, "server settings");
+    h.push("/settings/app");
+    await_saved_row(&mut h);
+    assert_titled(&h, APP_SETTINGS_TITLE);
+    assert_eq!(h.depth(), 2, "Connect plus the placed shell page");
     h
+}
+
+/// Connect's gear with nothing connected: the shell is placed holding app settings alone.
+fn on_app_settings_from_connect() -> Harness {
+    let mut h = Harness::mount();
+    unlock_pro(&mut h);
+    seed_saved_server(true);
+    h.park();
+    assert!(!connected(), "nothing is connected yet");
+    h.tap_label(APP_SETTINGS_LABEL);
+    h.settle();
+    await_saved_row(&mut h);
+    assert_titled(&h, APP_SETTINGS_TITLE);
+    assert_eq!(h.depth(), 2, "Connect plus the placed shell page");
+    h
+}
+
+fn open_saved_sheet(h: &mut Harness) {
+    let row = saved_row_point(h);
+    tap(&mut h.root, &mut h.state, row);
+    h.settle();
+    assert_eq!(h.overlay_depth(), REST_DEPTH + 1, "the server sheet is up");
+    assert!(
+        h.labels().iter().any(|l| l == SWITCH_LABEL),
+        "…offering the switch: {:?}",
+        h.labels()
+    );
+}
+
+fn switch_point(h: &Harness) -> Point {
+    node_centers_by_label(&h.root, SWITCH_LABEL)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no switch button: {:?}", h.labels()))
+}
+
+/// Sessions of the switched-to server, as its root: one Back asks to disconnect, as after a
+/// connect, rather than popping back into settings.
+fn assert_on_switched_sessions(h: &mut Harness) {
+    assert_eq!(h.depth(), 2, "the shell is still placed");
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "the sheet closed");
+    assert_titled(h, SAVED_HOST);
+    assert!(
+        h.labels().iter().any(|l| l == GEAR),
+        "…on Sessions, which wears the gear: {:?}",
+        h.labels()
+    );
+    assert!(connected(), "…on the switched-to server");
+
+    press_back(h);
+    assert_eq!(h.depth(), 2, "Back popped no route");
+    assert!(
+        h.values().iter().any(|v| v == DISCONNECT_TITLE)
+            && h.labels().iter().any(|l| l == DISCONNECT_ACTION),
+        "…it asked to disconnect instead: {:?} / {:?}",
+        h.values(),
+        h.labels()
+    );
+    assert!(connected(), "nothing is disconnected until it is confirmed");
 }
 
 fn saved_row_point(h: &mut Harness) -> Point {
@@ -1255,15 +1329,20 @@ fn a_marked_pop_still_takes_its_own_page_off_and_only_once() {
 fn a_settings_switch_settling_after_back_lands_on_sessions_still_connected() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = on_settings_with_a_saved_server(false);
+    let mut h = on_app_settings_over_server_settings(false);
+    open_saved_sheet(&mut h);
 
-    let row = saved_row_point(&mut h);
-    tap(&mut h.root, &mut h.state, row);
+    let switch = switch_point(&h);
+    tap(&mut h.root, &mut h.state, switch);
     assert_ne!(connected_endpoint().as_deref(), Some(SAVED_ENDPOINT));
-    h.tap_label(BACK);
-    h.settle();
-    h.park();
-    assert_titled(&h, HOST);
+    press_back(&mut h);
+    assert_eq!(h.overlay_depth(), REST_DEPTH, "Back took the sheet down");
+    for title in ["server settings", HOST] {
+        h.tap_label(BACK);
+        h.settle();
+        h.park();
+        assert_titled(&h, title);
+    }
 
     pump_until_true(&mut h, || {
         connected_endpoint().as_deref() == Some(SAVED_ENDPOINT)
@@ -1278,17 +1357,18 @@ fn a_settings_switch_settling_after_back_lands_on_sessions_still_connected() {
 }
 
 #[test]
-fn a_double_tap_on_a_saved_row_switches_and_pops_once() {
+fn a_double_tap_on_the_sheets_switch_switches_and_pops_once() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = on_settings_with_a_saved_server(true);
+    let mut h = on_app_settings_over_server_settings(true);
+    open_saved_sheet(&mut h);
     let epoch = expect_connection_controller()
         .connection_epoch
         .get_untracked();
 
-    let row = saved_row_point(&mut h);
-    tap(&mut h.root, &mut h.state, row);
-    tap(&mut h.root, &mut h.state, row);
+    let switch = switch_point(&h);
+    tap(&mut h.root, &mut h.state, switch);
+    tap(&mut h.root, &mut h.state, switch);
     h.settle();
     h.park();
 
@@ -1299,9 +1379,53 @@ fn a_double_tap_on_a_saved_row_switches_and_pops_once() {
         epoch + 2,
         "one switch: one teardown, one connect"
     );
-    assert_eq!(h.depth(), 2, "one pop: Settings off, the shell kept");
+    assert_eq!(h.depth(), 2, "the shell kept");
     assert_titled(&h, SAVED_HOST);
+    assert!(
+        h.labels().iter().any(|l| l == GEAR),
+        "one landing: both settings pages off, Sessions on top: {:?}",
+        h.labels()
+    );
     assert!(connected());
+}
+
+#[test]
+fn a_sheet_switch_over_server_settings_lands_on_sessions_of_the_new_server() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_app_settings_over_server_settings(true);
+    open_saved_sheet(&mut h);
+
+    h.tap_label(SWITCH_LABEL);
+    pump_until_true(&mut h, || {
+        connected_endpoint().as_deref() == Some(SAVED_ENDPOINT)
+    });
+    h.settle();
+    h.park();
+
+    assert_on_switched_sessions(&mut h);
+}
+
+#[test]
+fn a_sheet_switch_from_connects_app_settings_lands_on_sessions_of_the_new_server() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_app_settings_from_connect();
+    open_saved_sheet(&mut h);
+
+    h.tap_label(SWITCH_LABEL);
+    pump_until_true(&mut h, || {
+        connected_endpoint().as_deref() == Some(SAVED_ENDPOINT)
+    });
+    h.settle();
+    h.park();
+
+    assert!(
+        !h.labels().iter().any(|l| l == APP_SETTINGS_TITLE),
+        "app settings is gone: {:?}",
+        h.labels()
+    );
+    assert_on_switched_sessions(&mut h);
 }
 
 #[test]

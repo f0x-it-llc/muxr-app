@@ -54,12 +54,16 @@ use muxr::features::settings::domain::entities::{
 };
 use muxr::features::settings::domain::repositories::AuthTokensRepository;
 use muxr::features::settings::presentation::app_pages::app_settings_page;
-use muxr::features::settings::presentation::controller::SettingsController;
+use muxr::features::settings::presentation::controller::SavedServersController;
 use muxr::features::settings::presentation::pages::settings_page;
 use muxr::features::settings::presentation::scramble::{
     TIMELINE_MS, advance_animation_clock_for_tests, set_animation_clock_for_tests,
 };
-use muxr::features::settings::presentation::widgets::{PLAN_LABEL, PRO_GROUP_LABEL};
+use muxr::features::settings::presentation::widgets::{
+    CONNECTED_META, CREDENTIAL_CHIP, DELETE_LABEL, FORGET_SERVER_LABEL, PLAN_LABEL,
+    PRO_GROUP_LABEL, SAVED_CREDENTIAL_LABEL, SERVERS_GROUP_LABEL, SHEET_FOOTNOTE, SWITCH_LABEL,
+    THIS_SERVER_CHIP,
+};
 use muxr::fonts::catalog::{CatalogStatus, FontState};
 use muxr::fonts::source::FontSource;
 use muxr::routes::{APP_SETTINGS_ROUTE, app_nav, install_app_router};
@@ -82,12 +86,11 @@ const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 const MOCK_LATENCY_VALUE: &str = "36ms";
 const ROW_PAD_X: f64 = 16.0;
 const LOCK_AND_DISCONNECT: &str = "Lock & disconnect";
-const CONNECTED_CHIP: &str = "connected";
 const ADD_SERVER_ROW: &str = "add server";
 
 const SEEDED_TOKENS: [&str; 2] = ["zelli-mobile-100-71-31-57-mr3g6w5g", "token_2"];
-const SERVER_GROUPS: [&str; 4] = ["CONNECTION", "AUTH TOKENS", "SAVED SERVERS", "APP"];
-const APP_GROUPS: [&str; 4] = ["TERMINAL", "BEHAVIOUR", "MUXR PRO", "ABOUT"];
+const SERVER_GROUPS: [&str; 3] = ["CONNECTION", "AUTH TOKENS", "APP"];
+const APP_GROUPS: [&str; 5] = ["TERMINAL", "BEHAVIOUR", "MUXR PRO", "SERVERS", "ABOUT"];
 const APP_SETTINGS_ROW: &str = "app settings";
 
 const CRED_ENDPOINT: &str = "cred.example:50051";
@@ -254,6 +257,18 @@ impl Harness {
     fn pump_until_values(&mut self, what: &str, done: impl Fn(&[String]) -> bool) {
         let deadline = Instant::now() + PUMP_DEADLINE;
         while !done(&node_values(&self.root)) {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}; on screen: {:?}",
+                node_values(&self.root)
+            );
+            self.pump_once();
+        }
+    }
+
+    fn pump_until_shown(&mut self, what: &str, done: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + PUMP_DEADLINE;
+        while !done(self) {
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for {what}; on screen: {:?}",
@@ -484,7 +499,7 @@ fn group_labels_in_order(h: &Harness) -> Vec<String> {
     let known = [
         SERVER_GROUPS.as_slice(),
         APP_GROUPS.as_slice(),
-        &["SERVERS", "TERMINAL APPEARANCE", "SESSION POLL"],
+        &["SAVED SERVERS", "TERMINAL APPEARANCE", "SESSION POLL"],
     ]
     .concat();
     node_values(&h.root)
@@ -535,6 +550,12 @@ fn the_server_page_shows_only_its_own_groups_and_the_disconnect_action() {
         values.iter().any(|v| v == "fonts, bell, Muxr Pro, servers"),
         "{values:?}"
     );
+    assert!(
+        !values
+            .iter()
+            .any(|v| v.eq_ignore_ascii_case("saved servers") || v == ADD_SERVER_ROW),
+        "saved servers live on the app page: {values:?}"
+    );
     let labels = node_labels(&h.root);
     assert!(
         labels.iter().any(|l| l == LOCK_AND_DISCONNECT),
@@ -563,12 +584,13 @@ fn the_server_pages_app_settings_row_pushes_the_app_page() {
 }
 
 #[test]
-fn the_app_page_renders_its_four_groups_in_order_on_a_phone() {
+fn the_app_page_renders_its_five_groups_in_order_on_a_phone() {
     let _g = serial();
     let _ambient = setup();
     let h = Harness::app();
 
     assert_eq!(PRO_GROUP_LABEL.to_uppercase(), "MUXR PRO");
+    assert_eq!(SERVERS_GROUP_LABEL.to_uppercase(), "SERVERS");
     assert_eq!(
         group_labels_in_order(&h),
         APP_GROUPS,
@@ -589,6 +611,8 @@ fn the_app_page_renders_its_four_groups_in_order_on_a_phone() {
         "layout refresh",
         "bell notifications",
         PLAN_LABEL,
+        "Home rig",
+        ADD_SERVER_ROW,
         "version",
         "getting started",
     ];
@@ -675,6 +699,11 @@ fn a_full_band_tablet_lays_the_app_page_out_in_two_columns() {
     let pro = value_center(&h, "MUXR PRO");
     let behaviour = value_center(&h, "BEHAVIOUR");
     let about = value_center(&h, "ABOUT");
+    let servers = value_center(&h, "SERVERS");
+    assert!(
+        (servers.x - pro.x).abs() < 20.0 && servers.y > pro.y,
+        "the servers card sits under muxr pro in the right column: {servers:?} vs {pro:?}"
+    );
     assert!(
         (terminal.y - pro.y).abs() < 0.5,
         "terminal and muxr pro open each column: {terminal:?} vs {pro:?}"
@@ -1416,8 +1445,63 @@ fn credential_row(has_credential: bool) -> SavedServer {
     }
 }
 
-fn with_saved_credential(has_credential: bool) -> Harness {
-    let mut harness = Harness::mount_seeded(|| {
+/// An auth-tokens mock that records every revoke it is asked for.
+struct RecordingRevoke {
+    inner: MockAuthTokensRepository,
+    revoked: Mutex<Vec<String>>,
+}
+
+impl RecordingRevoke {
+    fn revoked(&self) -> Vec<String> {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+}
+
+#[clean_signals::async_trait]
+impl AuthTokensRepository for RecordingRevoke {
+    async fn list_tokens(&self) -> Result<Vec<AuthToken>, AppFailure> {
+        self.inner.list_tokens().await
+    }
+
+    async fn create_token(&self, request: CreateTokenRequest) -> Result<MintedToken, AppFailure> {
+        self.inner.create_token(request).await
+    }
+
+    async fn revoke_token(&self, name: String) -> Result<(), AppFailure> {
+        self.revoked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(name.clone());
+        self.inner.revoke_token(name).await
+    }
+}
+
+/// Published before any screen resolves its repository, so the page's revokes land here.
+fn provide_recording_revoke() -> Arc<RecordingRevoke> {
+    let recording = Arc::new(RecordingRevoke {
+        inner: MockAuthTokensRepository::seeded(),
+        revoked: Mutex::new(Vec::new()),
+    });
+    let shared: SharedAuthTokensRepository = recording.clone();
+    provide_context(shared);
+    recording
+}
+
+fn await_label(h: &mut Harness, label: &str) {
+    h.pump_until_values("the saved-server rows", |values| {
+        values.iter().any(|v| v == label)
+    });
+}
+
+/// The app page over the seeded store plus the credential row, connected to the mock rig.
+fn with_saved_credential(has_credential: bool) -> (Harness, Arc<RecordingRevoke>) {
+    let recording = Rc::new(std::cell::RefCell::new(None));
+    let slot = Rc::clone(&recording);
+    let mut harness = Harness::app_seeded(move || {
+        *slot.borrow_mut() = Some(provide_recording_revoke());
         expect_saved_servers()
             .save(credential_row(has_credential))
             .expect("the mock store never fails");
@@ -1428,63 +1512,230 @@ fn with_saved_credential(has_credential: bool) -> Harness {
         }
     });
     expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
-    harness.await_tokens();
-    harness.pump_until_values("the saved-server rows", |values| {
-        values.iter().any(|v| v == CRED_LABEL)
-    });
-    harness
+    await_label(&mut harness, CRED_LABEL);
+    let recording = recording.borrow_mut().take().expect("the seed ran");
+    (harness, recording)
+}
+
+fn open_server_sheet(h: &mut Harness, label: &str) {
+    h.tap_value(label);
+    h.settle();
+    assert_eq!(h.depth(), 2, "the server sheet is its own page");
+    assert!(
+        node_labels(&h.root).iter().any(|l| l == SWITCH_LABEL),
+        "{:?}",
+        node_labels(&h.root)
+    );
+}
+
+fn chip_count(h: &Harness, chip: &str) -> usize {
+    node_labels(&h.root).iter().filter(|l| *l == chip).count()
+}
+
+fn current_path(h: &Harness) -> Option<String> {
+    h.nav
+        .route_stack()
+        .current_route()
+        .map(|location| location.path.clone())
 }
 
 #[test]
-fn the_saved_server_group_lists_each_rig_and_flags_the_one_with_a_credential() {
+fn the_servers_group_rows_print_label_meta_and_the_right_chip() {
     let _g = serial();
     let _ambient = setup();
-    let h = with_saved_credential(true);
+    let (mut h, _) = with_saved_credential(true);
+    expect_saved_servers()
+        .save(mock_row_without_credential())
+        .expect("the mock store never fails");
+    h.push_route_floor();
+    h.nav.pop();
+    h.settle();
+    await_label(&mut h, "Mock rig");
 
     let values = node_values(&h.root);
     assert!(
-        values.iter().any(|v| v == CRED_LABEL),
-        "the seeded rig's own label heads its row: {values:?}"
+        values
+            .iter()
+            .any(|v| v.starts_with(&format!("{CRED_ENDPOINT} \u{b7} "))),
+        "a plain row's meta is its endpoint and recency: {values:?}"
     );
     assert!(
-        values.iter().any(|v| v.starts_with(CRED_ENDPOINT)),
-        "…over its endpoint and recency: {values:?}"
+        values
+            .iter()
+            .any(|v| v == &format!("mock.example:7777 \u{b7} {CONNECTED_META}")),
+        "…the connected row's says so: {values:?}"
     );
-    assert!(
-        values.iter().any(|v| v == "credential saved"),
-        "the stored credential is visible as such: {values:?}"
-    );
-    assert_eq!(node_centers_by_label(&h.root, "forget").len(), 4);
+    assert_eq!(chip_count(&h, THIS_SERVER_CHIP), 1, "only the live row");
     assert_eq!(
-        node_centers_by_label(&h.root, "delete credential").len(),
+        chip_count(&h, CREDENTIAL_CHIP),
         1,
-        "a row with no credential offers no way to delete one"
+        "only the credentialed row that is not connected: {:?}",
+        node_labels(&h.root)
+    );
+    for plain in ["Home rig", "zelli", "herdr staging"] {
+        assert!(values.iter().any(|v| v == plain), "{plain}: {values:?}");
+    }
+    assert!(values.iter().any(|v| v == ADD_SERVER_ROW), "{values:?}");
+}
+
+#[test]
+fn with_no_connection_no_row_is_marked_connected() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::app_seeded(|| {
+        expect_saved_servers()
+            .save(mock_row_without_credential())
+            .expect("the mock store never fails");
+    });
+    await_label(&mut h, "Mock rig");
+
+    assert_eq!(chip_count(&h, THIS_SERVER_CHIP), 0);
+    assert!(
+        !node_values(&h.root)
+            .iter()
+            .any(|v| v.ends_with(CONNECTED_META)),
+        "{:?}",
+        node_values(&h.root)
     );
 }
 
 #[test]
-fn deleting_a_credential_confirms_first_then_clears_the_row_and_revokes_its_token() {
+fn an_empty_store_says_no_saved_servers_above_add_server() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_saved_credential(true);
-    let credentials = mock_credentials().expect("the mock service is published");
+    let mut h = Harness::app_seeded(|| {
+        for server in expect_saved_servers()
+            .list()
+            .expect("the mock store never fails")
+        {
+            expect_saved_servers()
+                .remove(&server.endpoint())
+                .expect("the mock store never fails");
+        }
+    });
+    h.frame();
 
-    open_dialog_by_label(&mut h, "delete credential");
-    assert_eq!(h.depth(), 2, "the confirmation is its own page");
+    let values = node_values(&h.root);
+    let at = |needle: &str| values.iter().position(|v| v == needle);
+    let empty = at("no saved servers").unwrap_or_else(|| panic!("{values:?}"));
+    assert!(
+        at(ADD_SERVER_ROW).is_some_and(|add| add > empty),
+        "{values:?}"
+    );
+}
+
+#[test]
+fn the_connected_row_pushes_server_settings() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _) = with_saved_credential(false);
+    expect_saved_servers()
+        .save(mock_row_without_credential())
+        .expect("the mock store never fails");
+    h.push_route_floor();
+    h.nav.pop();
+    h.settle();
+    await_label(&mut h, "Mock rig");
+
+    h.tap_value("Mock rig");
+    h.settle();
+
+    assert_eq!(current_path(&h).as_deref(), Some("/settings"));
+    assert!(
+        !node_labels(&h.root).iter().any(|l| l == SWITCH_LABEL),
+        "no sheet for the connected server"
+    );
+}
+
+#[test]
+fn another_row_opens_its_sheet_with_the_three_actions() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _) = with_saved_credential(true);
+
+    open_server_sheet(&mut h, CRED_LABEL);
+
+    let values = node_values(&h.root);
+    for value in [SAVED_CREDENTIAL_LABEL, FORGET_SERVER_LABEL, SHEET_FOOTNOTE] {
+        assert!(values.iter().any(|v| v == value), "{value:?}: {values:?}");
+    }
+    assert!(
+        values
+            .iter()
+            .any(|v| v.starts_with(&format!("{CRED_ENDPOINT} \u{b7} public CA \u{b7} "))),
+        "the header names the endpoint, its trust posture and its recency: {values:?}"
+    );
+    let labels = node_labels(&h.root);
+    assert!(labels.iter().any(|l| l == DELETE_LABEL), "{labels:?}");
+    assert_eq!(current_path(&h), None, "the sheet pushes no route");
+}
+
+#[test]
+fn a_sheet_for_a_row_without_a_credential_offers_no_delete() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, _) = with_saved_credential(false);
+
+    open_server_sheet(&mut h, CRED_LABEL);
+
+    assert!(!node_labels(&h.root).iter().any(|l| l == DELETE_LABEL));
+    assert!(
+        !node_values(&h.root)
+            .iter()
+            .any(|v| v == SAVED_CREDENTIAL_LABEL)
+    );
+    assert!(
+        node_values(&h.root)
+            .iter()
+            .any(|v| v == FORGET_SERVER_LABEL)
+    );
+}
+
+const DEVICE_ONLY_COPY: &str = "Its token stays valid on that server until revoked there";
+
+fn dialog_says(h: &Harness, needle: &str) -> bool {
+    node_values(&h.root).iter().any(|v| v.contains(needle))
+}
+
+#[test]
+fn deleting_a_credential_from_the_sheet_confirms_then_clears_it_without_revoking_elsewhere() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, recording) = with_saved_credential(true);
+    let credentials = mock_credentials().expect("the mock service is published");
+    open_server_sheet(&mut h, CRED_LABEL);
+
+    open_dialog_by_label(&mut h, DELETE_LABEL);
+    assert_eq!(
+        h.depth(),
+        3,
+        "the confirmation is its own page over the sheet"
+    );
+    assert!(
+        dialog_says(&h, DEVICE_ONLY_COPY),
+        "{:?}",
+        node_values(&h.root)
+    );
+    assert!(
+        !dialog_says(&h, "revoked on the server"),
+        "the copy never promises a revoke it cannot send"
+    );
     h.tap(SCRIM_POINT);
     h.flush();
-    assert_eq!(h.depth(), 1);
+    assert_eq!(h.depth(), 2, "dismissed back to the sheet");
     assert_eq!(
         credentials.stored(CRED_ENDPOINT).as_deref(),
         Some(CRED_TOKEN),
         "the secret survives a dismissed confirmation"
     );
 
-    let dialog = open_dialog_by_label(&mut h, "delete credential");
+    let dialog = open_dialog_by_label(&mut h, DELETE_LABEL);
     confirm(&mut h, &dialog);
-    h.pump_until_values("the credential chip to disappear", |values| {
-        !values.iter().any(|v| v == "credential saved")
+    h.pump_until_shown("the credential chip to disappear", |h| {
+        chip_count(h, CREDENTIAL_CHIP) == 0
     });
+    h.flush();
+    assert_eq!(h.depth(), 1, "the sheet closed once the delete landed");
 
     assert_eq!(
         credentials.stored(CRED_ENDPOINT),
@@ -1496,44 +1747,111 @@ fn deleting_a_credential_confirms_first_then_clears_the_row_and_revokes_its_toke
         !prompts.is_empty() && prompts.iter().all(|reason| reason.starts_with("Unlock ")),
         "…and the only prompt raised was the keyring unlock: {prompts:?}"
     );
-    let values = node_values(&h.root);
     assert!(
-        values.iter().any(|v| v == CRED_LABEL),
-        "the saved server itself is kept: {values:?}"
+        node_values(&h.root).iter().any(|v| v == CRED_LABEL),
+        "the saved server itself is kept"
     );
     assert!(
-        !values.iter().any(|v| v == CRED_TOKEN_NAME),
-        "…and the server-side token behind it was revoked: {values:?}"
+        recording.revoked().is_empty(),
+        "the live session is another server's: {:?}",
+        recording.revoked()
     );
 }
 
 #[test]
-fn forgetting_a_saved_server_removes_the_row_and_its_credential() {
+fn forgetting_from_the_sheet_removes_the_row_and_its_credential_without_revoking_elsewhere() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_saved_credential(true);
+    let (mut h, recording) = with_saved_credential(true);
     let credentials = mock_credentials().expect("the mock service is published");
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    let dialog = open_dialog_by_label(&mut h, "forget");
+    let dialog = open_dialog_by_value(&mut h, FORGET_SERVER_LABEL);
+    assert!(
+        dialog_says(&h, DEVICE_ONLY_COPY),
+        "{:?}",
+        node_values(&h.root)
+    );
     confirm(&mut h, &dialog);
-    h.pump_until_values("the row to disappear", |values| {
-        !values.iter().any(|v| v == CRED_LABEL)
+    h.pump_until_shown("the row to disappear", |h| {
+        !node_values(&h.root).iter().any(|v| v == CRED_LABEL)
     });
+    h.flush();
+    assert_eq!(h.depth(), 1, "the sheet closed once the forget landed");
 
     assert_eq!(
         credentials.stored(CRED_ENDPOINT),
         None,
         "a secret filed under a forgotten endpoint would be unreachable forever"
     );
-    assert_eq!(
-        node_centers_by_label(&h.root, "forget").len(),
-        3,
+    assert!(
+        node_values(&h.root).iter().any(|v| v == "Home rig"),
         "…and only that row went"
     );
+    assert!(recording.revoked().is_empty(), "{:?}", recording.revoked());
 }
 
-fn with_vault_credential(unlocked: bool, pro: bool) -> Harness {
-    let mut harness = Harness::mount_seeded(|| {
+fn connected_to_cred() -> ConnectTarget {
+    ConnectTarget {
+        host: "cred.example".to_string(),
+        port: 50051,
+        label: CRED_LABEL.to_string(),
+        ..mock_target(TrustMode::System)
+    }
+}
+
+fn run_to_end<T: 'static>(h: &mut Harness, future: impl Future<Output = T> + 'static) -> T {
+    let out = Rc::new(std::cell::RefCell::new(None));
+    let slot = Rc::clone(&out);
+    spawn_local(async move { *slot.borrow_mut() = Some(future.await) });
+    pump_until(h, "the action to settle", || out.borrow().is_some());
+    out.borrow_mut().take().expect("settled")
+}
+
+fn servers_controller(tokens: SharedAuthTokensRepository) -> Arc<SavedServersController> {
+    Arc::new(SavedServersController::new(
+        tokens,
+        expect_saved_servers(),
+        mock_credentials().expect("the mock service is published"),
+        expect_keyring(),
+        expect_connection_controller(),
+    ))
+}
+
+#[test]
+fn deleting_or_forgetting_on_the_connected_endpoint_revokes_its_token() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mut h, recording) = with_saved_credential(true);
+    let connection = expect_connection_controller();
+    connection.switch_to(connected_to_cred(), |_| {});
+    pump_until(&mut h, "the switch to land", || {
+        connected_endpoint().as_deref() == Some(CRED_ENDPOINT)
+    });
+    let servers = servers_controller(recording.clone());
+    assert!(servers.is_connected_endpoint(CRED_ENDPOINT));
+
+    let deleting = Arc::clone(&servers);
+    assert!(run_to_end(&mut h, async move {
+        deleting.delete_credential(CRED_ENDPOINT.to_string()).await
+    }));
+    assert_eq!(recording.revoked(), vec![CRED_TOKEN_NAME.to_string()]);
+
+    expect_saved_servers()
+        .save(credential_row(true))
+        .expect("the mock store never fails");
+    mock_credentials()
+        .expect("the mock service is published")
+        .seed(CRED_ENDPOINT, CRED_TOKEN);
+    let forgetting = Arc::clone(&servers);
+    assert!(run_to_end(&mut h, async move {
+        forgetting.forget_server(CRED_ENDPOINT.to_string()).await
+    }));
+    assert_eq!(recording.revoked().len(), 2, "{:?}", recording.revoked());
+}
+
+fn with_vault_credential(page: Page, unlocked: bool, pro: bool) -> Harness {
+    let mut harness = Harness::mount_page(page, || {
         expect_saved_servers()
             .save(credential_row(true))
             .expect("the mock store never fails");
@@ -1555,10 +1873,10 @@ fn with_vault_credential(unlocked: bool, pro: bool) -> Harness {
         }
     });
     expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
-    harness.await_tokens();
-    harness.pump_until_values("the saved-server rows", |values| {
-        values.iter().any(|v| v == CRED_LABEL)
-    });
+    match page {
+        Page::Server => harness.await_tokens(),
+        Page::App => await_label(&mut harness, CRED_LABEL),
+    }
     if pro {
         pump_until(
             &mut harness,
@@ -1576,40 +1894,88 @@ fn connected_endpoint() -> Option<String> {
         .map(|info| info.endpoint)
 }
 
+fn tap_switch(h: &mut Harness) {
+    h.tap_label(SWITCH_LABEL);
+    h.pump_once();
+}
+
 #[test]
-fn tapping_a_saved_row_with_the_keyring_unlocked_switches_to_it_without_a_prompt() {
+fn switching_from_the_sheet_with_the_keyring_unlocked_needs_no_prompt_and_closes_it() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, true);
+    let mut h = with_vault_credential(Page::App, true, true);
     let credentials = mock_credentials().expect("the mock service is published");
     assert_eq!(connected_endpoint().as_deref(), Some("mock.example:7777"));
-    assert!(
-        !node_values(&h.root).iter().any(|v| v == CONNECTED_CHIP),
-        "no saved row is the connected one yet"
+    assert_eq!(
+        chip_count(&h, THIS_SERVER_CHIP),
+        0,
+        "no saved row is live yet"
     );
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    h.tap_value(CRED_LABEL);
-    h.pump_once();
+    tap_switch(&mut h);
 
     assert_eq!(
         connected_endpoint().as_deref(),
         Some(CRED_ENDPOINT),
         "the connection moved to the tapped row"
     );
-    assert!(
-        expect_connection_controller().connected.get_untracked(),
-        "…and it is up"
-    );
+    assert!(expect_connection_controller().connected.get_untracked());
     assert!(
         credentials.prompts().is_empty(),
         "the token came straight off the unlocked keyring"
     );
-    h.frame();
+    h.flush();
+    assert_eq!(h.depth(), 1, "the sheet closed once the switch landed");
+    h.pump_until_shown("the live row", |h| chip_count(h, THIS_SERVER_CHIP) == 1);
+}
+
+#[test]
+fn the_list_rereads_the_store_after_a_switch() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(Page::App, true, true);
+    open_server_sheet(&mut h, CRED_LABEL);
+    let mut late = mock_row_without_credential();
+    late.host = "late.example".to_string();
+    late.label = "Late rig".to_string();
+    expect_saved_servers()
+        .save(late)
+        .expect("the mock store never fails");
+
+    tap_switch(&mut h);
+    h.pump_until_shown("the switched list", |h| {
+        node_values(&h.root).iter().any(|v| v == "Late rig")
+    });
+    assert_eq!(connected_endpoint().as_deref(), Some(CRED_ENDPOINT));
+}
+
+#[test]
+fn the_list_rereads_the_store_after_add_server() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = with_vault_credential(Page::App, true, true);
+
+    h.tap_value(ADD_SERVER_ROW);
+    h.settle();
+    assert_eq!(h.depth(), 2, "the add-server page is pushed");
     assert!(
-        node_values(&h.root).iter().any(|v| v == CONNECTED_CHIP),
-        "the switched-to row now wears the connected chip: {:?}",
+        node_values(&h.root).iter().any(|v| v == ADD_SERVER_HEADING),
+        "{:?}",
         node_values(&h.root)
     );
+    let mut added = mock_row_without_credential();
+    added.host = "added.example".to_string();
+    added.label = "Added rig".to_string();
+    expect_saved_servers()
+        .save(added)
+        .expect("the mock store never fails");
+
+    h.nav.pop();
+    h.settle();
+    h.pump_until_shown("the added row", |h| {
+        node_values(&h.root).iter().any(|v| v == "Added rig")
+    });
 }
 
 fn make_credential_row_unverified() {
@@ -1626,12 +1992,12 @@ const RETIRED_UNVERIFIED_TITLE: &str = "Connect without verification?";
 fn a_saved_unverified_row_switches_unlocked_with_no_confirm_and_no_prompt() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, true);
+    let mut h = with_vault_credential(Page::App, true, true);
     make_credential_row_unverified();
     let credentials = mock_credentials().expect("the mock service is published");
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    h.tap_value(CRED_LABEL);
-    h.pump_once();
+    tap_switch(&mut h);
 
     assert_eq!(connected_endpoint().as_deref(), Some(CRED_ENDPOINT));
     assert!(credentials.prompts().is_empty(), "no biometric prompt");
@@ -1647,11 +2013,12 @@ fn a_saved_unverified_row_switches_unlocked_with_no_confirm_and_no_prompt() {
 fn a_saved_unverified_row_switches_locked_with_exactly_one_prompt_and_no_confirm() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(false, true);
+    let mut h = with_vault_credential(Page::App, false, true);
     make_credential_row_unverified();
     let credentials = mock_credentials().expect("the mock service is published");
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    h.tap_value(CRED_LABEL);
+    tap_switch(&mut h);
     pump_until(&mut h, "the switch to land", || {
         connected_endpoint().as_deref() == Some(CRED_ENDPOINT)
     });
@@ -1689,16 +2056,16 @@ fn saved_endpoints() -> Vec<String> {
 }
 
 #[test]
-fn switching_away_from_a_credentialless_server_via_a_settings_row_forgets_it() {
+fn switching_away_from_a_credentialless_server_via_the_sheet_forgets_it() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, true);
+    let mut h = with_vault_credential(Page::App, true, true);
     expect_saved_servers()
         .save(mock_row_without_credential())
         .expect("the mock store never fails");
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    h.tap_value(CRED_LABEL);
-    h.pump_once();
+    tap_switch(&mut h);
 
     assert_eq!(connected_endpoint().as_deref(), Some(CRED_ENDPOINT));
     let saved = saved_endpoints();
@@ -1713,7 +2080,7 @@ fn switching_away_from_a_credentialless_server_via_a_settings_row_forgets_it() {
 fn lock_and_disconnect_from_a_credentialless_server_keeps_its_row() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, false);
+    let mut h = with_vault_credential(Page::Server, true, false);
     expect_saved_servers()
         .save(mock_row_without_credential())
         .expect("the mock store never fails");
@@ -1729,13 +2096,14 @@ fn lock_and_disconnect_from_a_credentialless_server_keeps_its_row() {
 }
 
 #[test]
-fn tapping_a_saved_row_with_the_keyring_locked_prompts_once_then_switches() {
+fn switching_from_the_sheet_with_the_keyring_locked_prompts_once_then_switches() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(false, true);
+    let mut h = with_vault_credential(Page::App, false, true);
     let credentials = mock_credentials().expect("the mock service is published");
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    h.tap_value(CRED_LABEL);
+    tap_switch(&mut h);
     pump_until(&mut h, "the switch to land", || {
         connected_endpoint().as_deref() == Some(CRED_ENDPOINT)
     });
@@ -1753,16 +2121,17 @@ fn tapping_a_saved_row_with_the_keyring_locked_prompts_once_then_switches() {
 }
 
 #[test]
-fn a_blocked_switch_raises_the_paywall_and_dials_nothing() {
+fn a_blocked_switch_from_the_sheet_raises_the_paywall_and_dials_nothing() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, false);
+    let mut h = with_vault_credential(Page::App, true, false);
     let credentials = mock_credentials().expect("the mock service is published");
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    h.tap_value(CRED_LABEL);
+    h.tap_label(SWITCH_LABEL);
     h.settle();
 
-    assert_eq!(h.depth(), 2, "the paywall is up");
+    assert_eq!(h.depth(), 3, "the paywall is up over the sheet");
     assert!(
         node_center_by_label(&h.root, NOT_NOW_LABEL).is_some(),
         "{:?}",
@@ -1780,7 +2149,7 @@ fn a_blocked_switch_raises_the_paywall_and_dials_nothing() {
 fn lock_and_disconnect_locks_the_keyring_and_returns_to_connect() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, false);
+    let mut h = with_vault_credential(Page::Server, true, false);
     let keyring = expect_keyring();
     assert!(keyring.is_unlocked());
 
@@ -1798,11 +2167,7 @@ fn lock_and_disconnect_locks_the_keyring_and_returns_to_connect() {
     assert!(keyring.endpoints().is_empty(), "…and holds no token");
     assert!(!expect_connection_controller().connected.get_untracked());
     assert_eq!(
-        h.nav
-            .route_stack()
-            .current_route()
-            .map(|location| location.path.clone())
-            .as_deref(),
+        current_path(&h).as_deref(),
         Some("/"),
         "…and the stack went to Connect"
     );
@@ -1812,14 +2177,15 @@ fn lock_and_disconnect_locks_the_keyring_and_returns_to_connect() {
 fn forgetting_with_the_keyring_unlocked_evicts_its_entry() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, false);
+    let mut h = with_vault_credential(Page::App, true, false);
     let credentials = mock_credentials().expect("the mock service is published");
     let keyring = expect_keyring();
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    let dialog = open_dialog_by_label(&mut h, "forget");
+    let dialog = open_dialog_by_value(&mut h, FORGET_SERVER_LABEL);
     confirm(&mut h, &dialog);
-    h.pump_until_values("the row to disappear", |values| {
-        !values.iter().any(|v| v == CRED_LABEL)
+    h.pump_until_shown("the row to disappear", |h| {
+        !node_values(&h.root).iter().any(|v| v == CRED_LABEL)
     });
 
     assert!(
@@ -1838,14 +2204,15 @@ fn forgetting_with_the_keyring_unlocked_evicts_its_entry() {
 fn deleting_a_credential_with_the_keyring_unlocked_rewrites_the_vault_once() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, false);
+    let mut h = with_vault_credential(Page::App, true, false);
     let credentials = mock_credentials().expect("the mock service is published");
     let keyring = expect_keyring();
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    let dialog = open_dialog_by_label(&mut h, "delete credential");
+    let dialog = open_dialog_by_label(&mut h, DELETE_LABEL);
     confirm(&mut h, &dialog);
-    h.pump_until_values("the credential chip to disappear", |values| {
-        !values.iter().any(|v| v == "credential saved")
+    h.pump_until_shown("the credential chip to disappear", |h| {
+        chip_count(h, CREDENTIAL_CHIP) == 0
     });
 
     assert!(
@@ -1871,15 +2238,16 @@ fn deleting_a_credential_with_the_keyring_unlocked_rewrites_the_vault_once() {
 fn forgetting_while_unlocked_drops_the_handles_token_even_when_the_vault_rewrite_is_refused() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, false);
+    let mut h = with_vault_credential(Page::App, true, false);
     let credentials = mock_credentials().expect("the mock service is published");
     credentials.set_gate(CredentialStatus::Canceled);
     let keyring = expect_keyring();
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    let dialog = open_dialog_by_label(&mut h, "forget");
+    let dialog = open_dialog_by_value(&mut h, FORGET_SERVER_LABEL);
     confirm(&mut h, &dialog);
-    h.pump_until_values("the row to disappear", |values| {
-        !values.iter().any(|v| v == CRED_LABEL)
+    h.pump_until_shown("the row to disappear", |h| {
+        !node_values(&h.root).iter().any(|v| v == CRED_LABEL)
     });
 
     assert!(
@@ -1895,10 +2263,10 @@ fn forgetting_while_unlocked_drops_the_handles_token_even_when_the_vault_rewrite
 }
 
 #[test]
-fn tapping_a_row_without_a_credential_opens_the_add_page_and_never_spends_a_keyring_token() {
+fn switching_to_a_row_without_a_credential_opens_the_add_page_and_never_spends_a_keyring_token() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = Harness::mount_seeded(|| {
+    let mut h = Harness::app_seeded(|| {
         expect_saved_servers()
             .save(credential_row(false))
             .expect("the mock store never fails");
@@ -1913,19 +2281,21 @@ fn tapping_a_row_without_a_credential_opens_the_add_page_and_never_spends_a_keyr
             .set_entitlement(Entitlement::Pro);
     });
     expect_connection_controller().connect(mock_target(TrustMode::NoVerification));
-    h.await_tokens();
-    h.pump_until_values("the saved-server rows", |values| {
-        values.iter().any(|v| v == CRED_LABEL)
-    });
+    await_label(&mut h, CRED_LABEL);
+    open_server_sheet(&mut h, CRED_LABEL);
 
-    h.tap_value(CRED_LABEL);
+    h.tap_label(SWITCH_LABEL);
+    h.settle();
     h.settle();
 
-    assert_eq!(h.depth(), 2, "the add-server page is pushed");
     assert!(
         node_values(&h.root).iter().any(|v| v == ADD_SERVER_HEADING),
         "{:?}",
         node_values(&h.root)
+    );
+    assert!(
+        !node_labels(&h.root).iter().any(|l| l == SWITCH_LABEL),
+        "the sheet closed onto the add page"
     );
     assert_eq!(connected_endpoint().as_deref(), Some("mock.example:7777"));
 }
@@ -1934,13 +2304,13 @@ fn tapping_a_row_without_a_credential_opens_the_add_page_and_never_spends_a_keyr
 fn a_row_that_lost_its_credential_behind_the_screens_back_is_never_dialed_with_a_keyring_token() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, true);
+    let mut h = with_vault_credential(Page::App, true, true);
+    open_server_sheet(&mut h, CRED_LABEL);
     expect_saved_servers()
         .save(credential_row(false))
         .expect("the mock store never fails");
 
-    h.tap_value(CRED_LABEL);
-    h.pump_once();
+    tap_switch(&mut h);
     h.settle();
 
     assert_eq!(
@@ -1958,8 +2328,14 @@ fn a_row_that_lost_its_credential_behind_the_screens_back_is_never_dialed_with_a
 fn the_add_server_row_closes_the_group_and_pushes_the_add_page() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_vault_credential(true, true);
+    let mut h = with_vault_credential(Page::App, true, true);
     assert_eq!(h.depth(), 1);
+    let values = node_values(&h.root);
+    let at = |needle: &str| values.iter().position(|v| v == needle);
+    assert!(
+        at(CRED_LABEL) < at(ADD_SERVER_ROW) && at(ADD_SERVER_ROW) < at("ABOUT"),
+        "{values:?}"
+    );
 
     h.tap_value(ADD_SERVER_ROW);
     h.settle();
@@ -3063,12 +3439,10 @@ fn a_full_band_tablet_packs_the_cards_into_two_columns() {
         "the first pair shares a top edge: {connection:?} vs {tokens:?}"
     );
     assert!(tokens.x > connection.x + 100.0, "side by side: {tokens:?}");
-    let saved = value_center(&h, "SAVED SERVERS");
-    assert!(saved.y > connection.y, "the left column stacks downward");
     let app = value_center(&h, "APP");
     assert!(
-        app.x > connection.x + 100.0 && app.y > tokens.y,
-        "the app group packs under the tokens: app {app:?} vs tokens {tokens:?}"
+        app.x < tokens.x - 100.0 && app.y > connection.y,
+        "the app group packs under the connection: app {app:?} vs {connection:?}"
     );
     assert!(
         node_labels(&h.root)
@@ -3291,10 +3665,18 @@ fn a_purchase_side_busy_never_switches_the_restore_row_to_restoring() {
 const NARROW_SURFACE: Size = Size::new(360.0, 3000.0);
 
 #[test]
-fn the_saved_server_cards_forget_button_never_clips_off_the_narrow_frame() {
+fn a_server_rows_chip_never_clips_off_the_narrow_frame() {
     let _g = serial();
     let _ambient = setup();
-    let mut h = with_saved_credential(true);
+    let (mut h, _) = with_saved_credential(true);
+    let mut long = credential_row(true);
+    long.label = "a saved server with a label far too long for a phone".to_string();
+    expect_saved_servers()
+        .save(long)
+        .expect("the mock store never fails");
+    h.push_route_floor();
+    h.nav.pop();
+    h.settle();
 
     frame_sized(
         &mut h.root,
@@ -3304,17 +3686,12 @@ fn the_saved_server_cards_forget_button_never_clips_off_the_narrow_frame() {
         NARROW_SURFACE,
     );
 
-    let forgets = all_bounds_by_label(&h.root, "forget");
-    assert!(
-        !forgets.is_empty(),
-        "the saved-server group must still render its forget rows at this width"
-    );
-    for rect in &forgets {
+    let chips = all_bounds_by_label(&h.root, CREDENTIAL_CHIP);
+    assert!(!chips.is_empty(), "the credentialed row renders its chip");
+    for rect in &chips {
         assert!(
             rect.x1 <= NARROW_SURFACE.width + EPSILON,
-            "forget's right edge ({:.1}) must stay inside the {:.0}px frame — the \
-             old all-inflexible-but-for-one-spacer meta row clipped it off-screen \
-             instead of ever wrapping or shrinking: {rect:?}",
+            "the chip's right edge ({:.1}) stays inside the {:.0}px frame: {rect:?}",
             rect.x1,
             NARROW_SURFACE.width,
         );
@@ -3399,7 +3776,7 @@ impl CredentialService for HeldUnlockVault {
 }
 
 fn held_switch_rig() -> (
-    Arc<SettingsController>,
+    Arc<SavedServersController>,
     KeyringHandle,
     Arc<MockCredentialService>,
     Arc<HeldUnlockPrompt>,
@@ -3413,7 +3790,7 @@ fn held_switch_rig() -> (
         prompt: Arc::clone(&prompt),
     });
     let keyring = KeyringHandle::new();
-    let controller = Arc::new(SettingsController::new(
+    let controller = Arc::new(SavedServersController::new(
         Arc::new(MockAuthTokensRepository::seeded()),
         Arc::new(MockSavedServersRepository::with_servers(vec![
             credential_row(true),

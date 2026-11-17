@@ -1,6 +1,6 @@
 //! The `/settings/app` route: device-wide settings that open with or without a server. Like
 //! `pages`, its gestures take `&mut AppSettingsState` and the sheets it pushes see
-//! `&mut AppState`, so [`AppActions`] is a clonable bundle serving both sides.
+//! `&mut AppState`, so [`AppActions`] and [`ServerActions`] are clonable bundles serving both.
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -11,25 +11,37 @@ use frust::{
 };
 
 use crate::AppState;
+use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
+use crate::features::connect::di::{
+    expect_credential_service, expect_keyring, expect_saved_servers,
+};
+use crate::features::connect::domain::entities::SavedServer;
+use crate::features::connect::presentation::controller::SESSIONS_LOCATION;
 use crate::features::connect::presentation::widgets::getting_started::open_getting_started;
 use crate::features::pro::di::expect_pro_controller;
+use crate::features::pro::domain::entities::ServerLimitVerdict;
 use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
 use crate::features::pro::presentation::{
     NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, UNAVAILABLE_COPY, UpgradeContext, show_upgrade_sheet,
 };
-use crate::features::settings::di::expect_preferences_repository;
+use crate::features::settings::di::{expect_auth_tokens_repository, expect_preferences_repository};
 use crate::features::settings::domain::entities::{
     AppearancePrefs, CursorStyle, PollPrefs, font_size_label, refresh_label,
 };
 use crate::responsive::Responsive;
+use crate::routes::{
+    CONNECT_LOCATION, Nav, PageMark, SETTINGS_ROUTE, add_server_location, app_nav,
+};
+use crate::ui::dialogs::confirm_dialog;
 use crate::ui::palette::{Palette, active_theme};
-use crate::ui::sheet::show_sheet;
+use crate::ui::sheet::{SheetHandle, show_sheet};
 use crate::ui::toasts::app_toasts;
 
-use super::controller::AppSettingsController;
+use super::controller::{AppSettingsController, SavedServersController, saved_server_rows};
 use super::widgets::{
     self, CardColumn, FontPicker, FontRow, Picker, PickerKind, RowAction, RowHost,
+    ServerSheetActions,
 };
 
 const STORE_BUSY_TOAST: &str = "A store operation is already running";
@@ -58,14 +70,29 @@ pub struct AppSettingsScreen {
     overlays: NavigatorController<AppState>,
 }
 
+/// The navigation and connection the saved list was last read under; a change re-reads it.
+type ServersSeen = (PageMark, Option<String>);
+
 pub struct AppSettingsState {
     pub actions: AppActions,
+    servers_seen: Option<ServersSeen>,
 }
 
 #[derive(Clone)]
 pub struct AppActions {
     pub overlays: NavigatorController<AppState>,
     pub controller: Arc<AppSettingsController>,
+    pub pro: Arc<ProController>,
+    pub servers: ServerActions,
+}
+
+/// Saved-server actions, needing the device's store and keyring but no connection.
+#[derive(Clone)]
+pub struct ServerActions {
+    pub overlays: NavigatorController<AppState>,
+    pub app_nav: Nav,
+    pub controller: Arc<SavedServersController>,
+    pub connection: Arc<ConnectionController>,
     pub pro: Arc<ProController>,
 }
 
@@ -89,12 +116,38 @@ impl Component for AppSettingsScreen {
         let pro_refresh = Arc::clone(&pro);
         spawn_local(async move { pro_refresh.refresh().await });
 
+        let connection = expect_connection_controller();
+        let servers = use_controller::<SavedServersController, AppFailure>({
+            let connection = Arc::clone(&connection);
+            move || {
+                SavedServersController::new(
+                    expect_auth_tokens_repository(),
+                    expect_saved_servers(),
+                    expect_credential_service(),
+                    expect_keyring(),
+                    connection,
+                )
+            }
+        });
+        use_failure_listener(servers.core().failures(), |failure: AppFailure| {
+            app_toasts().raise(&failure);
+        });
+        servers.refresh_saved_servers();
+
         AppSettingsState {
             actions: AppActions {
                 overlays: self.overlays.clone(),
                 controller,
-                pro,
+                pro: Arc::clone(&pro),
+                servers: ServerActions {
+                    overlays: self.overlays.clone(),
+                    app_nav: app_nav(),
+                    controller: servers,
+                    connection,
+                    pro,
+                },
             },
+            servers_seen: None,
         }
     }
 
@@ -103,6 +156,9 @@ impl Component for AppSettingsScreen {
         let poll = state.actions.controller.poll.get();
         let restoring = state.actions.controller.restoring.get();
         let entitlement = state.actions.pro.entitlement.get();
+        let saved = state.actions.servers.controller.saved.get();
+        let connected = state.actions.servers.connected_endpoint();
+        state.reread_servers_on_change(connected.clone());
 
         let theme = active_theme();
         let colors = Palette::from_theme(&theme);
@@ -125,7 +181,7 @@ impl Component for AppSettingsScreen {
                 widgets::pro_rows(entitlement, restoring, &colors),
             ),
         ];
-        groups.extend(servers_group());
+        groups.push(servers_group(&saved, connected.as_deref(), &colors));
         groups.push((CardColumn::Left, "about", widgets::about_rows(&colors)));
 
         if responsive.is_tablet() {
@@ -152,10 +208,32 @@ impl Component for AppSettingsScreen {
     }
 }
 
-/// The seam for the device's saved servers, between `muxr pro` and `about` (the right column on
-/// a Full tablet). It renders nothing yet.
-fn servers_group() -> Option<Group> {
-    None
+/// Between `muxr pro` and `about`, under `muxr pro` in a Full tablet's right column.
+fn servers_group(saved: &[SavedServer], connected: Option<&str>, colors: &Palette) -> Group {
+    let mut rows = Vec::new(); // erasure: keep accumulator into Vec<AnyView>
+    if saved.is_empty() {
+        rows.push(widgets::no_saved_servers_row(colors));
+    }
+    rows.extend(
+        saved_server_rows(saved, connected)
+            .iter()
+            .map(|row| widgets::saved_server_item(row, colors)),
+    );
+    (CardColumn::Right, widgets::SERVERS_GROUP_LABEL, rows)
+}
+
+impl AppSettingsState {
+    /// A return to this page (a pop above it, a pushed add page closing) or a server switch
+    /// re-reads the store, which another screen may have written; read off this build.
+    fn reread_servers_on_change(&mut self, connected: Option<String>) {
+        let seen = (self.actions.servers.app_nav.mark_top(), connected);
+        if self.servers_seen.as_ref() == Some(&seen) {
+            return;
+        }
+        self.servers_seen = Some(seen);
+        let servers = Arc::clone(&self.actions.servers.controller);
+        spawn_local(async move { servers.refresh_saved_servers() });
+    }
 }
 
 impl RowHost for AppSettingsState {
@@ -444,6 +522,231 @@ impl AppActions {
 
 pub(super) fn restore_purchases(state: &mut AppSettingsState) {
     state.actions.restore_purchases();
+}
+
+pub(super) fn open_saved_server(state: &mut AppSettingsState, endpoint: &str) {
+    state.actions.servers.open_server(endpoint);
+}
+
+pub(super) fn open_add_server(state: &mut AppSettingsState) {
+    state.actions.servers.open_add_server(None);
+}
+
+/// Where a settled switch lands, read when it starts: the Sessions screen of the new server. The
+/// mark keeps a settle that arrives after the user left this page from navigating at all.
+#[derive(Clone)]
+struct SwitchLanding {
+    nav: Nav,
+    mark: PageMark,
+    /// The shell's landing route; `None` with no shell placed, where there is no Sessions to show.
+    shell_root: Option<String>,
+}
+
+impl SwitchLanding {
+    fn take(nav: &Nav) -> Self {
+        SwitchLanding {
+            nav: nav.clone(),
+            mark: nav.mark_top(),
+            shell_root: nav.landing_route().map(|location| location.path),
+        }
+    }
+
+    /// Over Sessions the stack is Sessions, server settings, app settings (only server settings
+    /// links here inside a Sessions shell), so both pages come off. Opened from Connect, the
+    /// shell holds app settings alone: it is replaced by a Sessions shell placed as a connect
+    /// places it, so Back there asks to disconnect.
+    fn land(&self) {
+        if self.nav.mark_top() != self.mark {
+            return;
+        }
+        match self.shell_root.as_deref() {
+            Some(SESSIONS_LOCATION) => {
+                self.nav.pop_marked(&self.mark);
+                self.nav.pop();
+            }
+            Some(_) => {
+                self.nav.go(CONNECT_LOCATION);
+                self.nav.push(SESSIONS_LOCATION);
+            }
+            None => {}
+        }
+    }
+}
+
+impl ServerActions {
+    /// Tracked: a connect, switch or teardown re-renders the rows.
+    pub fn connected_endpoint(&self) -> Option<String> {
+        if !self.connection.connected.get() {
+            return None;
+        }
+        self.connection.server_info.get().map(|info| info.endpoint)
+    }
+
+    pub fn open_server(&self, endpoint: &str) {
+        if self.controller.is_connected_endpoint(endpoint) {
+            self.app_nav.push(SETTINGS_ROUTE);
+        } else {
+            self.open_sheet(endpoint);
+        }
+    }
+
+    pub fn open_add_server(&self, endpoint: Option<&str>) {
+        self.app_nav.push(&add_server_location(endpoint));
+    }
+
+    /// The body re-reads the store's row on every navigator rebuild.
+    fn open_sheet(&self, endpoint: &str) {
+        let actions = self.clone();
+        let endpoint = endpoint.to_string();
+        show_sheet(&self.overlays, move |sheet| {
+            let theme = active_theme();
+            let colors = Palette::from_theme(&theme);
+            let saved = actions.controller.saved.get();
+            let server = saved.iter().find(|server| server.endpoint() == endpoint);
+            let on = |run: fn(&ServerActions, &str, &SheetHandle)| {
+                let actions = actions.clone();
+                let endpoint = endpoint.clone();
+                let sheet = sheet.clone();
+                Rc::new(move |_app: &mut AppState| run(&actions, &endpoint, &sheet))
+                    as widgets::SheetAction
+            };
+            let sheet_actions = ServerSheetActions {
+                on_switch: on(ServerActions::switch_server),
+                on_delete_credential: on(ServerActions::open_delete_credential_dialog),
+                on_forget: on(ServerActions::open_forget_server_dialog),
+            };
+            widgets::server_sheet(server, &colors, &sheet_actions)
+        });
+    }
+
+    /// The verdict comes first, so a blocked row raises the paywall and no unlock prompt; a row
+    /// with no credential closes the sheet onto the add page, prefilled.
+    pub fn switch_server(&self, endpoint: &str, sheet: &SheetHandle) {
+        if self.controller.is_connected_endpoint(endpoint)
+            || self.controller.switching.get_untracked()
+            || self.connection.connecting.get_untracked()
+        {
+            return;
+        }
+        let saved = self.controller.saved.get_untracked();
+        let Some(server) = saved.iter().find(|server| server.endpoint() == endpoint) else {
+            return;
+        };
+        if !server.has_credential {
+            let actions = self.clone();
+            let endpoint = endpoint.to_string();
+            sheet.close_then(move || actions.open_add_server(Some(&endpoint)));
+            return;
+        }
+        if let ServerLimitVerdict::Blocked { .. } = self.pro.verdict_for(&saved, endpoint) {
+            let retry = self.clone();
+            let endpoint = endpoint.to_string();
+            let sheet = sheet.clone();
+            show_upgrade_sheet(
+                &self.overlays,
+                Arc::clone(&self.pro),
+                UpgradeContext {
+                    on_unlocked: Rc::new(move || retry.switch_server(&endpoint, &sheet)),
+                    server_limit: None,
+                },
+            );
+            return;
+        }
+        let controller = Arc::clone(&self.controller);
+        let sheet = sheet.clone();
+        let landing = SwitchLanding::take(&self.app_nav);
+        self.controller.switch_server(
+            endpoint.to_string(),
+            Box::new(move || {
+                controller.refresh_saved_servers();
+                // After the exit: the sheet's body reads this page's signals, which a pop disposes.
+                let later = landing.clone();
+                if !sheet.close_then(move || later.land()) {
+                    landing.land();
+                }
+            }),
+        );
+    }
+
+    /// No read-only guard: deleting a device-local credential is not a server mutation.
+    pub fn open_delete_credential_dialog(&self, endpoint: &str, sheet: &SheetHandle) {
+        let revokes = self.controller.is_connected_endpoint(endpoint);
+        let token_clause = if revokes {
+            " and its token revoked on the server"
+        } else {
+            ". Its token stays valid on that server until revoked there"
+        };
+        let message = format!(
+            "The credential saved for {endpoint} is removed from this device{token_clause}. \
+             The saved server itself is kept."
+        );
+        let controller = Arc::clone(&self.controller);
+        let endpoint = endpoint.to_string();
+        let sheet = sheet.clone();
+        confirm_dialog(
+            &self.overlays,
+            "Delete credential?",
+            message,
+            "Delete",
+            move |_app: &mut AppState| {
+                let handle = Arc::clone(&controller);
+                let endpoint = endpoint.clone();
+                let sheet = sheet.clone();
+                let confirmation = format!("Deleted the credential for {endpoint}");
+                spawn_local(async move {
+                    if handle.delete_credential(endpoint).await {
+                        sheet.close();
+                        app_toasts().show(confirmation);
+                    }
+                });
+            },
+        );
+    }
+
+    pub fn open_forget_server_dialog(&self, endpoint: &str, sheet: &SheetHandle) {
+        let has_credential = self
+            .controller
+            .saved
+            .get_untracked()
+            .iter()
+            .any(|server| server.endpoint() == endpoint && server.has_credential);
+        let credential_clause = match (
+            has_credential,
+            self.controller.is_connected_endpoint(endpoint),
+        ) {
+            (false, _) => "",
+            (true, true) => ", along with its saved credential",
+            (true, false) => {
+                ", along with its saved credential. Its token stays valid on that server until \
+                 revoked there"
+            }
+        };
+        let message = format!(
+            "The saved profile for {endpoint} is deleted{credential_clause}. You will need its \
+             address and a token to connect again."
+        );
+        let controller = Arc::clone(&self.controller);
+        let endpoint = endpoint.to_string();
+        let sheet = sheet.clone();
+        confirm_dialog(
+            &self.overlays,
+            "Forget server?",
+            message,
+            "Forget",
+            move |_app: &mut AppState| {
+                let handle = Arc::clone(&controller);
+                let endpoint = endpoint.clone();
+                let sheet = sheet.clone();
+                let confirmation = format!("Forgot {endpoint}");
+                spawn_local(async move {
+                    if handle.forget_server(endpoint).await {
+                        sheet.close();
+                        app_toasts().show(confirmation);
+                    }
+                });
+            },
+        );
+    }
 }
 
 #[cfg(test)]

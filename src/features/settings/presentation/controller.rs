@@ -1,6 +1,6 @@
-//! The settings view models: [`SettingsController`] for the connected server, and
-//! [`AppSettingsController`] for device-wide preferences, which needs no server. A token mutation
-//! re-reads the list; a preference save publishes the record the repository returns.
+//! The settings view models: [`SettingsController`] for the connected server's tokens,
+//! [`SavedServersController`] for the device's saved servers, and [`AppSettingsController`] for
+//! device-wide preferences. Only the last two serve with no server connected.
 
 use std::sync::Arc;
 
@@ -31,6 +31,7 @@ pub enum SavedServerRow {
     AddServer,
 }
 
+/// `active` marks the connected endpoint; `None` marks no row.
 pub fn saved_server_rows(saved: &[SavedServer], active: Option<&str>) -> Vec<SavedServerRow> {
     saved
         .iter()
@@ -53,45 +54,22 @@ pub struct SettingsController {
     list_tokens: ListTokens,
     create_token: CreateToken,
     revoke_token: RevokeToken,
-    saved_servers: SavedServers,
-    credentials: Credentials,
-    keyring_unlock: KeyringUnlock,
-    /// The single-flight claim of a switch's keyring unlock; the dial has the connection's own.
-    pub switching: RwSignal<bool>,
     pub tokens: RwSignal<Vec<AuthToken>>,
     pub loaded: RwSignal<bool>,
     /// A minted secret stays here until the next mint or an explicit dismissal clears it.
     pub pending_token_secret: RwSignal<Option<MintedToken>>,
-    pub saved: RwSignal<Vec<SavedServer>>,
 }
 
 impl SettingsController {
-    pub fn new(
-        tokens: Arc<dyn AuthTokensRepository + Send + Sync>,
-        saved_servers: SavedServers,
-        credentials: Credentials,
-        keyring: KeyringHandle,
-        connection: Arc<ConnectionController>,
-    ) -> Self {
-        let keyring_unlock = KeyringUnlock::new(
-            Arc::clone(&saved_servers),
-            Arc::clone(&credentials),
-            connection,
-            keyring,
-        );
+    pub fn new(tokens: Arc<dyn AuthTokensRepository + Send + Sync>) -> Self {
         Self {
-            keyring_unlock,
-            switching: RwSignal::new(false),
             core: ControllerCore::new(),
             list_tokens: ListTokens::new(Arc::clone(&tokens)),
             create_token: CreateToken::new(Arc::clone(&tokens)),
             revoke_token: RevokeToken::new(tokens),
-            saved_servers,
-            credentials,
             tokens: RwSignal::new(Vec::new()),
             loaded: RwSignal::new(false),
             pending_token_secret: RwSignal::new(None),
-            saved: RwSignal::new(Vec::new()),
         }
     }
 
@@ -102,8 +80,100 @@ impl SettingsController {
 
     pub async fn refresh(&self) {
         self.refresh_tokens().await;
-        self.refresh_saved_servers();
         self.loaded.set(true);
+    }
+
+    pub async fn refresh_tokens(&self) {
+        if let Ok(tokens) = self
+            .core
+            .run(&self.list_tokens, NoParams, RunOptions::default())
+            .await
+        {
+            self.tokens.set(tokens);
+        }
+    }
+
+    pub async fn create_token(&self, name: String, read_only: bool) -> bool {
+        let request = CreateTokenRequest { name, read_only };
+        let Ok(minted) = self
+            .core
+            .run(&self.create_token, request, RunOptions::default())
+            .await
+        else {
+            return false;
+        };
+        self.pending_token_secret.set(Some(minted));
+        self.refresh_tokens().await;
+        true
+    }
+
+    pub fn clear_pending_secret(&self) {
+        self.pending_token_secret.set(None);
+    }
+
+    pub async fn revoke_token(&self, name: String) -> bool {
+        let revoked = self
+            .core
+            .run(&self.revoke_token, name, RunOptions::default())
+            .await
+            .is_ok();
+        if revoked {
+            self.refresh_tokens().await;
+        }
+        revoked
+    }
+}
+
+impl AsRef<ControllerCore<AppFailure>> for SettingsController {
+    fn as_ref(&self) -> &ControllerCore<AppFailure> {
+        &self.core
+    }
+}
+
+/// The device's saved servers: switch, delete credential and forget, none of which needs a
+/// connection. A row's token is revoked only over a live session to that same endpoint, since
+/// the live session is the only one a revoke can reach.
+pub struct SavedServersController {
+    core: ControllerCore<AppFailure>,
+    revoke_token: RevokeToken,
+    saved_servers: SavedServers,
+    credentials: Credentials,
+    keyring_unlock: KeyringUnlock,
+    connection: Arc<ConnectionController>,
+    /// The single-flight claim of a switch's keyring unlock; the dial has the connection's own.
+    pub switching: RwSignal<bool>,
+    pub saved: RwSignal<Vec<SavedServer>>,
+}
+
+impl SavedServersController {
+    pub fn new(
+        tokens: Arc<dyn AuthTokensRepository + Send + Sync>,
+        saved_servers: SavedServers,
+        credentials: Credentials,
+        keyring: KeyringHandle,
+        connection: Arc<ConnectionController>,
+    ) -> Self {
+        let keyring_unlock = KeyringUnlock::new(
+            Arc::clone(&saved_servers),
+            Arc::clone(&credentials),
+            Arc::clone(&connection),
+            keyring,
+        );
+        Self {
+            core: ControllerCore::new(),
+            revoke_token: RevokeToken::new(tokens),
+            saved_servers,
+            credentials,
+            keyring_unlock,
+            connection,
+            switching: RwSignal::new(false),
+            saved: RwSignal::new(Vec::new()),
+        }
+    }
+
+    /// Named rather than [`AsRef`], which `Arc<Self>`'s inherent `as_ref` makes ambiguous.
+    pub fn core(&self) -> &ControllerCore<AppFailure> {
+        &self.core
     }
 
     /// A failure keeps the previous list and raises nothing.
@@ -111,6 +181,16 @@ impl SettingsController {
         if let Ok(servers) = self.saved_servers.list() {
             self.saved.set(servers);
         }
+    }
+
+    /// Untracked: decides a revoke or a confirm's copy, never a build.
+    pub fn is_connected_endpoint(&self, endpoint: &str) -> bool {
+        self.connection.connected.get_untracked()
+            && self
+                .connection
+                .server_info
+                .get_untracked()
+                .is_some_and(|info| info.endpoint == endpoint)
     }
 
     /// A locked keyring unlocks first, and a refusal deletes nothing. The token revoke and the
@@ -143,9 +223,7 @@ impl SettingsController {
             self.core.failures().emit(&failure);
             return false;
         }
-        if let Some(name) = server.token_name.clone() {
-            self.revoke_quietly(name).await;
-        }
+        self.revoke_if_connected(&server).await;
         self.clear_credential_fields(server);
         true
     }
@@ -157,9 +235,7 @@ impl SettingsController {
             return false;
         };
         if server.has_credential || self.keyring().token_for(&endpoint).is_some() {
-            if let Some(name) = server.token_name.clone() {
-                self.revoke_quietly(name).await;
-            }
+            self.revoke_if_connected(&server).await;
             let evicted = if self.keyring().is_unlocked() {
                 let evicted = self.evict_unlocked(&endpoint).await;
                 self.keyring().remove(&endpoint);
@@ -284,7 +360,13 @@ impl SettingsController {
     }
 
     /// A revoke needs a live read-write session; the delete it accompanies must not depend on one.
-    async fn revoke_quietly(&self, name: String) {
+    async fn revoke_if_connected(&self, server: &SavedServer) {
+        let Some(name) = server.token_name.clone() else {
+            return;
+        };
+        if !self.is_connected_endpoint(&server.endpoint()) {
+            return;
+        }
         let _ = self
             .core
             .run(
@@ -296,51 +378,10 @@ impl SettingsController {
                 },
             )
             .await;
-        self.refresh_tokens().await;
-    }
-
-    pub async fn refresh_tokens(&self) {
-        if let Ok(tokens) = self
-            .core
-            .run(&self.list_tokens, NoParams, RunOptions::default())
-            .await
-        {
-            self.tokens.set(tokens);
-        }
-    }
-
-    pub async fn create_token(&self, name: String, read_only: bool) -> bool {
-        let request = CreateTokenRequest { name, read_only };
-        let Ok(minted) = self
-            .core
-            .run(&self.create_token, request, RunOptions::default())
-            .await
-        else {
-            return false;
-        };
-        self.pending_token_secret.set(Some(minted));
-        self.refresh_tokens().await;
-        true
-    }
-
-    pub fn clear_pending_secret(&self) {
-        self.pending_token_secret.set(None);
-    }
-
-    pub async fn revoke_token(&self, name: String) -> bool {
-        let revoked = self
-            .core
-            .run(&self.revoke_token, name, RunOptions::default())
-            .await
-            .is_ok();
-        if revoked {
-            self.refresh_tokens().await;
-        }
-        revoked
     }
 }
 
-impl AsRef<ControllerCore<AppFailure>> for SettingsController {
+impl AsRef<ControllerCore<AppFailure>> for SavedServersController {
     fn as_ref(&self) -> &ControllerCore<AppFailure> {
         &self.core
     }
@@ -430,6 +471,7 @@ impl AsRef<ControllerCore<AppFailure>> for AppSettingsController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::ConnectTarget;
     use crate::features::connect::data::repositories::{
         MockCredentialService, MockSavedServersRepository,
     };
@@ -445,28 +487,59 @@ mod tests {
     const SAVED_ENDPOINT: &str = "rig.example:50051";
 
     fn controller() -> SettingsController {
-        controller_over(MockSavedServersRepository::with_servers(Vec::new()), None)
+        SettingsController::new(Arc::new(MockAuthTokensRepository::seeded()))
     }
 
-    fn controller_over(
-        servers: MockSavedServersRepository,
+    struct ServersRig {
+        servers: SavedServersController,
+        tokens: Arc<MockAuthTokensRepository>,
+    }
+
+    fn servers_over(
+        rows: Vec<SavedServer>,
         credentials: Option<Arc<MockCredentialService>>,
-    ) -> SettingsController {
-        controller_with_keyring(servers, credentials, KeyringHandle::new())
+    ) -> ServersRig {
+        servers_with(rows, credentials, KeyringHandle::new(), None)
     }
 
-    fn controller_with_keyring(
-        servers: MockSavedServersRepository,
+    /// `connected_to` dials the mock connection first, so its endpoint is the live one.
+    fn servers_with(
+        rows: Vec<SavedServer>,
         credentials: Option<Arc<MockCredentialService>>,
         keyring: KeyringHandle,
-    ) -> SettingsController {
-        SettingsController::new(
-            Arc::new(MockAuthTokensRepository::seeded()),
-            Arc::new(servers),
-            credentials.unwrap_or_else(|| Arc::new(MockCredentialService::new())),
-            keyring,
-            Arc::new(ConnectionController::detached()),
-        )
+        connected_to: Option<(&str, u16)>,
+    ) -> ServersRig {
+        let connection = Arc::new(ConnectionController::detached());
+        if let Some((host, port)) = connected_to {
+            connection.connect(ConnectTarget {
+                host: host.to_string(),
+                port,
+                trust_mode: TrustMode::System,
+                label: host.to_string(),
+                offer_credential: false,
+                token: Zeroizing::new(String::new()),
+                remember: false,
+                fingerprint: None,
+            });
+        }
+        let tokens = Arc::new(MockAuthTokensRepository::seeded());
+        ServersRig {
+            servers: SavedServersController::new(
+                Arc::clone(&tokens) as _,
+                Arc::new(MockSavedServersRepository::with_servers(rows)),
+                credentials.unwrap_or_else(|| Arc::new(MockCredentialService::new())),
+                keyring,
+                connection,
+            ),
+            tokens,
+        }
+    }
+
+    fn token_kept(rig: &ServersRig) -> bool {
+        rig.tokens
+            .snapshot()
+            .iter()
+            .any(|token| token.name == "token_2")
     }
 
     fn unlocked_keyring(entries: &[(&str, &str)]) -> KeyringHandle {
@@ -645,14 +718,12 @@ mod tests {
     }
 
     #[test]
-    fn refresh_loads_the_saved_servers_beside_everything_else() {
-        let c = controller_over(
-            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
-            None,
-        );
+    fn refresh_loads_the_saved_servers() {
+        let rig = servers_over(vec![saved_row(true)], None);
+        let c = &rig.servers;
         assert!(c.saved.get_untracked().is_empty(), "nothing before a load");
 
-        block_on(c.refresh());
+        c.refresh_saved_servers();
 
         let saved = c.saved.get_untracked();
         assert_eq!(saved.len(), 1);
@@ -660,14 +731,12 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_credential_drops_the_secret_revokes_the_token_and_clears_the_row() {
+    fn deleting_a_credential_drops_the_secret_and_clears_the_row() {
         let credentials = Arc::new(MockCredentialService::new());
         credentials.seed(SAVED_ENDPOINT, "s3cr3t");
-        let c = controller_over(
-            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
-            Some(Arc::clone(&credentials)),
-        );
-        block_on(c.refresh());
+        let rig = servers_over(vec![saved_row(true)], Some(Arc::clone(&credentials)));
+        let c = &rig.servers;
+        c.refresh_saved_servers();
 
         assert!(block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
 
@@ -685,13 +754,6 @@ mod tests {
         let row = &c.saved.get_untracked()[0];
         assert!(!row.has_credential, "…and the row stops claiming one");
         assert_eq!(row.token_name, None);
-        assert!(
-            !c.tokens
-                .get_untracked()
-                .iter()
-                .any(|token| token.name == "token_2"),
-            "the server-side token was revoked with it"
-        );
         assert_eq!(
             c.saved.get_untracked().len(),
             1,
@@ -700,15 +762,81 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_or_forget_for_another_endpoint_never_revokes_over_the_live_session() {
+        let credentials = Arc::new(MockCredentialService::new());
+        credentials.seed(SAVED_ENDPOINT, "s3cr3t");
+        let rig = servers_with(
+            vec![saved_row(true)],
+            Some(Arc::clone(&credentials)),
+            KeyringHandle::new(),
+            Some(("elsewhere.example", 7777)),
+        );
+        assert!(!rig.servers.is_connected_endpoint(SAVED_ENDPOINT));
+
+        assert!(block_on(
+            rig.servers.delete_credential(SAVED_ENDPOINT.to_string())
+        ));
+        assert!(
+            token_kept(&rig),
+            "the live server's token_2 is not this row's"
+        );
+
+        let rig = servers_with(
+            vec![saved_row(true)],
+            Some(credentials),
+            KeyringHandle::new(),
+            None,
+        );
+        assert!(block_on(
+            rig.servers.forget_server(SAVED_ENDPOINT.to_string())
+        ));
+        assert!(
+            token_kept(&rig),
+            "nothing is connected, so nothing is revoked"
+        );
+    }
+
+    #[test]
+    fn a_delete_or_forget_on_the_connected_endpoint_revokes_its_token() {
+        let credentials = Arc::new(MockCredentialService::new());
+        credentials.seed(SAVED_ENDPOINT, "s3cr3t");
+        let rig = servers_with(
+            vec![saved_row(true)],
+            Some(Arc::clone(&credentials)),
+            KeyringHandle::new(),
+            Some(("rig.example", 50051)),
+        );
+        assert!(rig.servers.is_connected_endpoint(SAVED_ENDPOINT));
+
+        assert!(block_on(
+            rig.servers.delete_credential(SAVED_ENDPOINT.to_string())
+        ));
+        assert!(
+            !token_kept(&rig),
+            "the server-side token was revoked with it"
+        );
+
+        credentials.seed(SAVED_ENDPOINT, "s3cr3t");
+        let rig = servers_with(
+            vec![saved_row(true)],
+            Some(credentials),
+            KeyringHandle::new(),
+            Some(("rig.example", 50051)),
+        );
+        assert!(block_on(
+            rig.servers.forget_server(SAVED_ENDPOINT.to_string())
+        ));
+        assert!(!token_kept(&rig));
+    }
+
+    #[test]
     fn a_refused_eviction_leaves_the_rows_credential_claim_as_it_was() {
         // A row that stops claiming a held credential would hide a secret the user cannot delete.
         let credentials = Arc::new(MockCredentialService::new());
         credentials.set_delete_failure(true);
-        let c = controller_over(
-            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
-            Some(credentials),
-        );
-        block_on(c.refresh());
+        let rig = servers_over(vec![saved_row(true)], Some(credentials));
+        let c = &rig.servers;
+        c.refresh_saved_servers();
 
         assert!(!block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
 
@@ -720,12 +848,14 @@ mod tests {
         let credentials = Arc::new(MockCredentialService::new());
         credentials.seed_vault(&[(SAVED_ENDPOINT, "s3cr3t"), ("other.example:1", "keep")]);
         let keyring = unlocked_keyring(&[(SAVED_ENDPOINT, "s3cr3t"), ("other.example:1", "keep")]);
-        let c = controller_with_keyring(
-            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
+        let rig = servers_with(
+            vec![saved_row(true)],
             Some(Arc::clone(&credentials)),
             keyring.clone(),
+            None,
         );
-        block_on(c.refresh());
+        let c = &rig.servers;
+        c.refresh_saved_servers();
 
         assert!(block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
 
@@ -746,12 +876,14 @@ mod tests {
         credentials.seed_vault(&[(SAVED_ENDPOINT, "s3cr3t")]);
         credentials.set_gate(CredentialStatus::Canceled);
         let keyring = unlocked_keyring(&[(SAVED_ENDPOINT, "s3cr3t")]);
-        let c = controller_with_keyring(
-            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
+        let rig = servers_with(
+            vec![saved_row(true)],
             Some(Arc::clone(&credentials)),
             keyring.clone(),
+            None,
         );
-        block_on(c.refresh());
+        let c = &rig.servers;
+        c.refresh_saved_servers();
 
         assert!(!block_on(c.delete_credential(SAVED_ENDPOINT.to_string())));
 
@@ -767,13 +899,11 @@ mod tests {
     fn a_locked_forget_takes_the_ungated_delete_and_prompts_nothing() {
         let credentials = Arc::new(MockCredentialService::new());
         credentials.seed(SAVED_ENDPOINT, "s3cr3t");
-        let c = controller_over(
-            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
-            Some(Arc::clone(&credentials)),
-        );
-        block_on(c.refresh());
+        let rig = servers_over(vec![saved_row(true)], Some(Arc::clone(&credentials)));
 
-        assert!(block_on(c.forget_server(SAVED_ENDPOINT.to_string())));
+        assert!(block_on(
+            rig.servers.forget_server(SAVED_ENDPOINT.to_string())
+        ));
 
         assert!(credentials.prompts().is_empty());
         assert_eq!(credentials.writes(), 0);
@@ -801,17 +931,19 @@ mod tests {
             saved_server_rows(&[saved_row(false)], Some("elsewhere:1"))[0],
             SavedServerRow::Server { active: false, .. }
         ));
+        assert!(matches!(
+            saved_server_rows(&[saved_row(true)], None)[0],
+            SavedServerRow::Server { active: false, .. }
+        ));
     }
 
     #[test]
     fn forgetting_a_server_takes_its_credential_with_it() {
         let credentials = Arc::new(MockCredentialService::new());
         credentials.seed(SAVED_ENDPOINT, "s3cr3t");
-        let c = controller_over(
-            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
-            Some(Arc::clone(&credentials)),
-        );
-        block_on(c.refresh());
+        let rig = servers_over(vec![saved_row(true)], Some(Arc::clone(&credentials)));
+        let c = &rig.servers;
+        c.refresh_saved_servers();
 
         assert!(block_on(c.forget_server(SAVED_ENDPOINT.to_string())));
 
@@ -827,11 +959,9 @@ mod tests {
     fn forgetting_a_server_with_no_credential_touches_no_credential_store() {
         let credentials = Arc::new(MockCredentialService::new());
         credentials.seed("someone.else:1", "not-this-one");
-        let c = controller_over(
-            MockSavedServersRepository::with_servers(vec![saved_row(false)]),
-            Some(Arc::clone(&credentials)),
-        );
-        block_on(c.refresh());
+        let rig = servers_over(vec![saved_row(false)], Some(Arc::clone(&credentials)));
+        let c = &rig.servers;
+        c.refresh_saved_servers();
 
         assert!(block_on(c.forget_server(SAVED_ENDPOINT.to_string())));
 
@@ -844,11 +974,9 @@ mod tests {
 
     #[test]
     fn deleting_or_forgetting_an_unknown_endpoint_is_a_no_op() {
-        let c = controller_over(
-            MockSavedServersRepository::with_servers(vec![saved_row(true)]),
-            None,
-        );
-        block_on(c.refresh());
+        let rig = servers_over(vec![saved_row(true)], None);
+        let c = &rig.servers;
+        c.refresh_saved_servers();
 
         assert!(!block_on(c.delete_credential("nope:1".to_string())));
         assert!(!block_on(c.forget_server("nope:1".to_string())));

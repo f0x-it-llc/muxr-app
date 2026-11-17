@@ -10,6 +10,7 @@ mod pickers;
 mod pro;
 mod rows;
 mod saved_servers;
+mod server_sheet;
 mod tokens;
 
 pub(super) use cards::{CardColumn, card_grid, tablet_scroller};
@@ -24,5 +25,10 @@ pub(super) use pickers::{Picker, PickerKind, picker_sheet};
 pub(super) use pro::pro_rows;
 pub use pro::{PLAN_LABEL, PRO_GROUP_LABEL};
 pub(super) use rows::{RowAction, RowHost, group_label, page_tone, phone_scroller};
+pub use saved_servers::{CONNECTED_META, CREDENTIAL_CHIP, SERVERS_GROUP_LABEL, THIS_SERVER_CHIP};
 pub(super) use saved_servers::{no_saved_servers_row, saved_server_item};
+pub use server_sheet::{
+    DELETE_LABEL, FORGET_SERVER_LABEL, SAVED_CREDENTIAL_LABEL, SHEET_FOOTNOTE, SWITCH_LABEL,
+};
+pub(super) use server_sheet::{ServerSheetActions, SheetAction, server_sheet};
 pub(super) use tokens::{create_token_row, open_create_token_dialog, secret_reveal_sheet};
