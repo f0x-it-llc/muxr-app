@@ -2376,6 +2376,31 @@ fn a_tablet_pane_tap_commits_and_the_rail_stays_resting_on_it() {
 }
 
 #[test]
+fn a_tablet_pane_card_commits_from_its_padding_not_only_its_text() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = mount_tablet(SESSION_ID, TABLET_FULL);
+
+    h.tap(h.value_point("btop"));
+    h.settle_motion(0.0);
+    let browsed = h.frame_at(0.0);
+    let (origin, size) = tree_pane_rows(&browsed)[0];
+    // Inside the card's left padding, clear of the mark, the label and the overflow button.
+    h.tap(Point::new(origin.x + 1.5, origin.y + size.height / 2.0));
+    h.pump_until_values("the btop tab", |values| {
+        values.iter().any(|v| v == BTOP_TITLE)
+    });
+    h.pump_for(2 * CLOSE_DELAY);
+
+    assert!(h.shows(BTOP_TITLE), "the card followed the pane");
+    assert_eq!(
+        h.depth(),
+        REST_DEPTH,
+        "docked: nothing closed, nothing opened"
+    );
+}
+
+#[test]
 fn the_rails_rows_carry_the_float_tag_the_exited_mark_and_the_bell() {
     let _g = serial();
     let _ambient = setup();
