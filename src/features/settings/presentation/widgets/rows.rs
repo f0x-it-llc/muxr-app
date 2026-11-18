@@ -1,19 +1,21 @@
-//! The `.set-row` primitive, the shared layout helpers and the page tone. A text mark stays in
-//! ASCII or Geometric Shapes, never an emoji, which resolves through platform font fallback.
+//! The `.set-row` primitive, the shared layout helpers and the page tone, over any [`RowHost`]
+//! screen. A text mark stays in ASCII or Geometric Shapes, never an emoji, which resolves through
+//! platform font fallback.
+
+use std::rc::Rc;
 
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Color, EventCtx, EventResult, InputEvent,
     LayoutCtx, PaintCtx, PaintScene, Point, SemanticsCtx, Size, View, Widget, build_child,
     rebuild_child, route_event_single, teardown_child,
 };
-use frust::icons::{CHEVRON_RIGHT, FORMAT_SIZE, LINK, LOCK, NOTIFICATIONS, REFRESH, SCHEDULE};
+use frust::icons::{CHEVRON_RIGHT, CLOSE, FORMAT_SIZE, LOCK, NOTIFICATIONS, REFRESH, SETTINGS};
 use frust::{
-    AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either, FlexChild, FlexView,
-    GestureDetector, IconSource, Padding, SizedBox, ViewSeq, any, button, column, container,
-    divider, flexible, icon, inflexible, text,
+    Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either,
+    FlexChild, FlexView, GestureDetector, IconSource, Padding, SizedBox, ViewSeq, any, button,
+    column, container, divider, flexible, icon, inflexible, safe_area, scroll_view, text,
 };
 
-use crate::features::settings::presentation::pages::{self, SettingsState};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 
@@ -38,13 +40,10 @@ const MARK_ICON: f64 = spacing::LG;
 pub(super) const ROW_LINE_GAP: f64 = spacing::MICRO;
 /// `.set-chev{font-size:13px}`.
 const CHEVRON: f64 = 13.0;
+pub(super) const SETTINGS_CLAMP_WIDTH: f64 = 640.0;
 
 pub(super) fn h_gap<S: 'static>(gap: f64) -> FlexChild<S> {
     inflexible(SizedBox::<S>(Some(gap), None))
-}
-
-pub(super) fn spacer<S: 'static>() -> FlexChild<S> {
-    flexible(1, SizedBox::<S>(None, None))
 }
 
 pub(super) fn centered_row<S: 'static>(children: Vec<FlexChild<S>>) -> FlexView<S> {
@@ -58,11 +57,37 @@ pub(super) fn stretch_column<S: 'static, M>(children: impl ViewSeq<S, M>) -> Fle
 }
 
 /// `--bg-base`, which the shell's clear colour is not; zero radius keeps it a plain rect.
-pub(in super::super) fn page_tone<B: View<SettingsState>>(
+pub(in super::super) fn page_tone<S: 'static, B: View<S>>(
     body: B,
     colors: &Palette,
-) -> impl View<SettingsState> + use<B> {
+) -> impl View<S> + use<S, B> {
     rounded_fill(body, colors.base, 0.0)
+}
+
+/// The phone column. The shell's bar consumes the top inset, so the safe area skips its top edge.
+pub(in super::super) fn phone_scroller<S: 'static>(
+    body: Vec<AnyView<S>>,
+    wide_clamp: bool,
+) -> impl View<S> + use<S> {
+    let scroller = safe_area(scroll_view(Padding(
+        EdgeInsets {
+            left: 0.0,
+            top: SCROLL_PAD_TOP,
+            right: 0.0,
+            bottom: SCROLL_PAD_BOTTOM,
+        },
+        FlexView::new(Axis::Vertical, body.into_iter().map(inflexible).collect())
+            .cross_axis(CrossAxisAlignment::Stretch),
+    )))
+    .top(false);
+    if wide_clamp {
+        Either::Left(Align(
+            Alignment::CENTER,
+            SizedBox::<S>(Some(SETTINGS_CLAMP_WIDTH), None).child(scroller),
+        ))
+    } else {
+        Either::Right(scroller)
+    }
 }
 
 /// `bleed` widens only the painted fill (frust's `Padding` clamps a negative inset). Radius 0
@@ -186,7 +211,7 @@ impl Widget for RoundedFillWidget {
     }
 }
 
-pub(in super::super) fn group_label(label: &str, colors: &Palette) -> impl View<SettingsState> {
+pub(in super::super) fn group_label<S: 'static>(label: &str, colors: &Palette) -> impl View<S> {
     let theme = active_theme();
     Padding(
         EdgeInsets {
@@ -217,17 +242,26 @@ pub(in super::super) enum RowAction {
     Static,
     Picker(PickerKind),
     UpgradeSheet,
+    AppSettings,
+    GettingStarted,
+    /// Server settings' `auth tokens` row, which pushes the tokens page.
+    AuthTokens,
+}
+
+/// A settings screen whose rows answer a tap; each matches every [`RowAction`] it can host.
+pub(in super::super) trait RowHost: 'static {
+    fn row_tapped(&mut self, action: RowAction);
 }
 
 /// The whole row is the tap target: a 28px chevron alone is unreachable on a phone.
-pub(super) fn settings_row(
+pub(super) fn settings_row<S: RowHost>(
     mark: RowMark,
     label: &'static str,
     value: impl Into<String>,
     tone: ValueTone,
     action: RowAction,
     colors: &Palette,
-) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+) -> AnyView<S> // erasure: keep accumulator into Vec<AnyView>
 {
     let theme = active_theme();
     let value_ink = match tone {
@@ -256,19 +290,65 @@ pub(super) fn settings_row(
 
     match action {
         RowAction::Static => any(box_),
-        RowAction::Picker(_) | RowAction::UpgradeSheet => any(GestureDetector(box_)
-            .on_tap(move |state: &mut SettingsState| pages::row_tapped(state, action))),
+        _ => any(GestureDetector(box_).on_tap(move |state: &mut S| state.row_tapped(action))),
     }
 }
 
-pub(super) fn button_row(
+pub(super) type TapAction<S> = Rc<dyn Fn(&mut S)>;
+
+/// A row whose trailing control is its own (a button, a chevron). `on_tap` makes the whole row
+/// the press target; a trailing button keeps its own tap, so give that row no `on_tap`.
+pub(super) fn action_row<S: 'static>(
+    mark: RowMark,
+    label: &'static str,
+    value: &'static str,
+    danger: bool,
+    trailing: AnyView<S>,
+    on_tap: Option<TapAction<S>>,
+    colors: &Palette,
+) -> AnyView<S> // erasure: keep accumulator into Vec<AnyView>
+{
+    let theme = active_theme();
+    let (mark_ink, label_ink) = if danger {
+        (colors.error, colors.error)
+    } else {
+        (colors.fg_muted, colors.fg)
+    };
+    let body = stretch_column((
+        text(label).style(inked(&theme.type_scale.label_large, label_ink)),
+        text(value).style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+    ))
+    .gap(ROW_LINE_GAP);
+    let box_ = stretch_column((
+        Padding(
+            EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
+            centered_row(vec![
+                inflexible(toned_mark_tile(mark, mark_ink, colors)),
+                flexible(1, body),
+                inflexible(trailing),
+            ])
+            .gap(ROW_GAP),
+        ),
+        divider(colors.rule),
+    ));
+    match on_tap {
+        Some(on_tap) => any(GestureDetector(box_).on_tap(move |state: &mut S| on_tap(state))),
+        None => any(box_),
+    }
+}
+
+pub(super) fn chevron<S: 'static>(colors: &Palette) -> AnyView<S> {
+    any(icon(CHEVRON_RIGHT).size(CHEVRON).color(colors.fg_faintest))
+}
+
+pub(super) fn button_row<S: 'static>(
     mark: RowMark,
     label: &'static str,
     subtitle: &'static str,
     action_label: &'static str,
-    on_tap: impl Fn(&mut SettingsState) + 'static,
+    on_tap: impl Fn(&mut S) + 'static,
     colors: &Palette,
-) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+) -> AnyView<S> // erasure: keep accumulator into Vec<AnyView>
 {
     let theme = active_theme();
     let body = stretch_column((
@@ -290,14 +370,20 @@ pub(super) fn button_row(
     )))
 }
 
-pub(super) fn mark_tile(mark: RowMark, colors: &Palette) -> impl View<SettingsState> {
+pub(super) fn mark_tile<S: 'static>(mark: RowMark, colors: &Palette) -> impl View<S> {
+    toned_mark_tile(mark, colors.fg_muted, colors)
+}
+
+pub(super) fn toned_mark_tile<S: 'static>(
+    mark: RowMark,
+    ink: Color,
+    colors: &Palette,
+) -> impl View<S> {
     let theme = active_theme();
     let content = match mark {
-        RowMark::Vector(source) => {
-            Either::Left(icon(source).size(MARK_ICON).color(colors.fg_muted))
-        }
+        RowMark::Vector(source) => Either::Left(icon(source).size(MARK_ICON).color(ink)),
         RowMark::Text(glyph) => {
-            Either::Right(text(glyph).style(inked(&theme.type_scale.label_small, colors.fg_muted)))
+            Either::Right(text(glyph).style(inked(&theme.type_scale.label_small, ink)))
         }
     };
     container(content)
@@ -306,27 +392,26 @@ pub(super) fn mark_tile(mark: RowMark, colors: &Palette) -> impl View<SettingsSt
         .size_centered(MARK_BOX, MARK_BOX)
 }
 
-fn trailing_slot(action: RowAction, colors: &Palette) -> Option<impl View<SettingsState>> {
+fn trailing_slot<S: 'static>(action: RowAction, colors: &Palette) -> Option<impl View<S>> {
     match action {
         RowAction::Static => None,
-        RowAction::Picker(_) | RowAction::UpgradeSheet => {
-            Some(icon(CHEVRON_RIGHT).size(CHEVRON).color(colors.fg_faintest))
-        }
+        _ => Some(icon(CHEVRON_RIGHT).size(CHEVRON).color(colors.fg_faintest)),
     }
 }
 
-pub(super) const MARK_SERVER_URL: RowMark = RowMark::Vector(LINK);
 /// The row's value carries the TLS posture, so the tile is not state-dependent.
-pub(super) const MARK_TLS: RowMark = RowMark::Vector(LOCK);
-pub(super) const MARK_ZELLIJ: RowMark = RowMark::Text("z");
-pub(super) const MARK_HERDR: RowMark = RowMark::Text("h");
+pub(super) const MARK_TOKENS: RowMark = RowMark::Text("#");
+pub(super) const MARK_CREDENTIAL: RowMark = RowMark::Vector(LOCK);
+pub(super) const MARK_FORGET: RowMark = RowMark::Vector(CLOSE);
 pub(super) const MARK_FONT_FAMILY: RowMark = RowMark::Text("abc");
 /// Not the mock's literal `12`, which would go stale when the size changes.
 pub(super) const MARK_FONT_SIZE: RowMark = RowMark::Vector(FORMAT_SIZE);
 pub(super) const MARK_CURSOR: RowMark = RowMark::Text("\u{25ae}");
 pub(super) const MARK_REFRESH: RowMark = RowMark::Vector(REFRESH);
-pub(super) const MARK_LATENCY: RowMark = RowMark::Vector(SCHEDULE);
 pub(super) const MARK_BELL: RowMark = RowMark::Vector(NOTIFICATIONS);
+pub(super) const MARK_APP_SETTINGS: RowMark = RowMark::Vector(SETTINGS);
+pub(super) const MARK_VERSION: RowMark = RowMark::Text("i");
+pub(super) const MARK_GETTING_STARTED: RowMark = RowMark::Text("?");
 
 #[cfg(test)]
 mod tests {
@@ -437,16 +522,15 @@ mod tests {
     #[test]
     fn no_mark_is_an_emoji() {
         for mark in [
-            MARK_SERVER_URL,
-            MARK_TLS,
-            MARK_ZELLIJ,
-            MARK_HERDR,
+            MARK_TOKENS,
             MARK_FONT_FAMILY,
             MARK_FONT_SIZE,
             MARK_CURSOR,
             MARK_REFRESH,
-            MARK_LATENCY,
             MARK_BELL,
+            MARK_APP_SETTINGS,
+            MARK_VERSION,
+            MARK_GETTING_STARTED,
         ] {
             let RowMark::Text(glyph) = mark else {
                 continue;

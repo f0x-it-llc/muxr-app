@@ -1,21 +1,25 @@
-//! The getting-started info mark and its orientation dialog. Screen chrome, never a
-//! staggered piece; on Tablet the paragraph sits inline in the left panel instead.
+//! The getting-started info mark and its orientation dialog, and the app-settings gear beside
+//! it. Screen chrome, never a staggered piece; on a Full tablet the paragraph sits inline in the
+//! left panel instead, and the gear alone holds the corner.
 
 use frust::authoring::Size;
 use frust::{
     Align, Alignment, ButtonStyle, EdgeInsets, IconSource, Padding, PopResult, Theme, View,
-    WindowMetrics, button, inflexible, safe_area, text, use_context,
+    WindowMetrics, button, icons, inflexible, safe_area, text, use_context,
 };
 use frust_glyph::{glyph_card, glyph_dialog, show_glyph_dialog};
 
 use super::{block_column, centered_row};
 use crate::AppState;
 use crate::links::open_external;
+use crate::routes::{APP_SETTINGS_ROUTE, Nav};
 use crate::ui::palette::{Palette, active_theme, inked};
-use crate::ui::topbar::icon_button;
+use crate::ui::spacing;
+use crate::ui::topbar::{IconButtonView, icon_button};
 
 /// Also what `tests/connect.rs` addresses the button by.
 pub const INFO_LABEL: &str = "Getting started";
+pub const APP_SETTINGS_LABEL: &str = "App settings";
 /// Also how the tests tell the pushed page apart from the button that raised it.
 pub const GETTING_STARTED_TITLE: &str = "Getting started with Muxr";
 pub const GETTING_STARTED_BODY: &str = concat!(
@@ -38,11 +42,37 @@ const INFO_MARK: IconSource = IconSource {
 const MARGIN: f64 = 20.0;
 const BOX: f64 = 46.0;
 const MARK: f64 = 22.0;
+const PAIR_GAP: f64 = spacing::TIGHT;
 
 pub(crate) fn info_affordance<S: 'static>(
     overlays: &frust::NavigatorController<AppState>,
 ) -> impl View<S> {
     let overlays = overlays.clone();
+    corner_mark(
+        icon_button(INFO_MARK, INFO_LABEL, move |_state: &mut S| {
+            open_getting_started(&overlays);
+        }),
+        0.0,
+    )
+}
+
+/// `beside_info` steps the gear left of the info mark; without it the gear takes the corner.
+pub(crate) fn app_settings_affordance<S: 'static>(nav: &Nav, beside_info: bool) -> impl View<S> {
+    let nav = nav.clone();
+    let inset = if beside_info { BOX + PAIR_GAP } else { 0.0 };
+    corner_mark(
+        icon_button(
+            icons::SETTINGS,
+            APP_SETTINGS_LABEL,
+            move |_state: &mut S| {
+                nav.push(APP_SETTINGS_ROUTE);
+            },
+        ),
+        inset,
+    )
+}
+
+fn corner_mark<S: 'static>(mark: IconButtonView<S>, inset: f64) -> impl View<S> {
     let colors = Palette::from_theme(&active_theme());
     // The window-control corner (iPadOS 26+ windowed), zero elsewhere. Read live: the
     // builder re-runs on every resize.
@@ -55,17 +85,14 @@ pub(crate) fn info_affordance<S: 'static>(
         Padding(
             EdgeInsets {
                 top: MARGIN + top,
-                right: MARGIN + right,
+                right: MARGIN + right + inset,
                 bottom: MARGIN,
                 left: MARGIN,
             },
-            icon_button(INFO_MARK, INFO_LABEL, move |_state: &mut S| {
-                open_getting_started(&overlays);
-            })
-            .ink(colors.fg_muted)
-            .icon_size(MARK)
-            .box_size(Size::new(BOX, BOX))
-            .radius(BOX / 2.0),
+            mark.ink(colors.fg_muted)
+                .icon_size(MARK)
+                .box_size(Size::new(BOX, BOX))
+                .radius(BOX / 2.0),
         ),
     ))
 }
@@ -99,7 +126,7 @@ pub(crate) fn getting_started_card<S: 'static>(theme: &Theme, colors: &Palette) 
         ))
 }
 
-pub(crate) fn open_getting_started(overlays: &frust::NavigatorController<AppState>) {
+pub fn open_getting_started(overlays: &frust::NavigatorController<AppState>) {
     let page_nav = overlays.clone();
     show_glyph_dialog(
         overlays,

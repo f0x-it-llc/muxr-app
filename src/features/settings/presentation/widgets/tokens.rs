@@ -1,46 +1,64 @@
-//! A minted token's secret is shown once, through [`secret_reveal_sheet`], and never persisted.
-//! On a read-only session the mint and revoke controls stay reachable but styled down (frust's
-//! `Button` has no disabled state); the caller's own guard blocks the action and toasts.
+//! The token list — filter, scope segments, 52px rows with a ⋯ menu — shared by the tokens page
+//! and the Tablet card. A minted token's secret is shown once, through [`secret_reveal_sheet`],
+//! and never persisted. A read-only session's guard toasts rather than mints or revokes.
 
-use frust::authoring::DashPattern;
-use frust::{
-    Align, Alignment, AnyView, BorderStyle, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either,
-    GestureDetector, Get, GetUntracked, NavigatorController, Padding, PopResult, RwSignal, Set,
-    SizedBox, View, any, button, column, container, divider, flexible, inflexible, text,
-    text_input,
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use frust::authoring::{
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
+    PaintCtx, PaintScene, Point, Rect, SemanticsCtx, Size, Widget, build_child, rebuild_child,
+    route_event_single, teardown_child,
 };
-use frust_glyph::{glyph_dialog, show_glyph_dialog, toggle};
+use frust::{
+    Align, Alignment, AnyView, Axis, ButtonStyle, CrossAxisAlignment, EdgeInsets, Either, FlexView,
+    GestureDetector, Get, GetUntracked, NavigatorController, Padding, PopResult, RwSignal, Set,
+    SizedBox, View, any, button, column, container, divider, flexible, icons, inflexible,
+    safe_area, scroll_view, text, text_input,
+};
+use frust_glyph::{
+    MenuEntry, glyph_card, glyph_dialog, menu_item, menu_item_danger, menu_separator,
+    segmented_control, show_glyph_dialog, toggle,
+};
 
 use crate::AppState;
 use crate::features::settings::domain::entities::{AuthToken, MintedToken, TokenScope};
-use crate::features::settings::presentation::pages::{self, SettingsState};
+use crate::features::settings::presentation::controller::{ScopeFilter, TokenRow};
+use crate::features::settings::presentation::pages::{self, SettingsState, TokenFrame};
 use crate::features::settings::presentation::scramble::{self, ScramblePose};
-use crate::ui::paint::{DASH_OFF, DASH_ON};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::spacing;
 use crate::ui::toasts::app_toasts;
+use crate::ui::topbar::icon_button;
 
 use super::pickers::PICK_TITLE_GAP;
 use super::rows::{
-    HAIRLINE, RADIUS_FULL, ROW_GAP, ROW_LINE_GAP, ROW_PAD_X, ROW_PAD_Y, centered_row, h_gap,
-    spacer, stretch_column,
+    HAIRLINE, RADIUS_FULL, ROW_LINE_GAP, ROW_PAD_X, SCROLL_PAD_BOTTOM, SETTINGS_CLAMP_WIDTH,
+    centered_row, group_label, stretch_column,
 };
 
-/// `.token-top{margin-bottom:4px}`.
-const TOKEN_LINE_GAP: f64 = spacing::TIGHT;
+/// A row is 52px, its hairline included.
+const ROW_HEIGHT: f64 = 52.0;
+const TOKEN_LINE_GAP: f64 = spacing::MICRO;
 /// `.token-scope{padding:2px 7px}`.
 const CHIP_PAD_X: f64 = 7.0;
 const CHIP_PAD_Y: f64 = spacing::MICRO;
-/// `.add-token-btn{margin:12px 16px 4px; padding:10px}`.
-const ADD_MARGIN_TOP: f64 = spacing::BASE;
-const ADD_MARGIN_BOTTOM: f64 = spacing::TIGHT;
-const ADD_PAD: f64 = spacing::MD;
-const ADD_GAP: f64 = spacing::XS;
+/// The ⋯ press target, and the mark inside it.
+const MORE_BOX: f64 = 44.0;
+const MORE_MARK: f64 = 18.0;
+const FILTER_TOP: f64 = spacing::LG;
+const FILTER_GAP: f64 = spacing::BASE;
+const STATUS_PAD: f64 = spacing::HERO;
 const DIALOG_FIELD_GAP: f64 = spacing::XL;
 
-pub(super) const CREATE_TOKEN_PLUS: &str = "+";
-pub(super) const CREATE_TOKEN_LABEL: &str = "create new token";
-pub(super) const REVOKE_LABEL: &str = "revoke";
+pub const FILTER_PLACEHOLDER: &str = "filter tokens";
+pub const NO_MATCH_LABEL: &str = "no tokens match";
+pub const THIS_DEVICE_PREFIX: &str = "this device \u{b7} ";
+pub const NEW_TOKEN_ACTION: &str = "+ new token";
+const TOKENS_LOADING: &str = "loading\u{2026}";
+const TOKENS_FAILED: &str = "couldn't load tokens";
+const MENU_COPY_NAME: &str = "Copy name";
+const MENU_REVOKE: &str = "Revoke\u{2026}";
 const CREATE_TOKEN_TITLE: &str = "New token";
 const DIALOG_CANCEL_LABEL: &str = "Cancel";
 const DIALOG_SUBMIT_LABEL: &str = "Save";
@@ -52,34 +70,119 @@ const SECRET_CAPTION: &str =
     "This is the only time this secret is shown. Copy it now — it can't be viewed again.";
 const SECRET_ALREADY_DISMISSED: &str = "This secret has already been dismissed.";
 /// Duplicated, since a feature never imports a sibling's `presentation`.
-const COPIED_SECRET_TOAST: &str = "Copied to clipboard";
-const COPY_SECRET_FAILED_TOAST: &str = "Couldn't copy to clipboard";
+const COPIED_TOAST: &str = "Copied to clipboard";
+const COPY_FAILED_TOAST: &str = "Couldn't copy to clipboard";
 
-pub(super) fn token_item(
-    token: &AuthToken,
-    colors: &Palette,
-    revoke_enabled: bool,
-) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
-{
-    let theme = active_theme();
-    let name = token.name.clone();
-    let name_line = text(token.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg));
-    let revoke = button(REVOKE_LABEL, move |state: &mut SettingsState| {
-        pages::open_revoke_dialog(state, &name)
-    })
-    .style(if revoke_enabled {
-        ButtonStyle::Danger
-    } else {
-        ButtonStyle::Ghost
-    })
-    .small();
-    any(token_row(name_line, token, revoke, None, colors))
+/// A row's ⋯ menu, in its on-screen order (a separator sits between the two).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenMenu {
+    CopyName,
+    Revoke,
 }
 
-/// `token` is the scramble's own snapshot. The revoke button stays as a handlerless stand-in,
-/// so the row neither jumps when the animation starts nor offers a second confirmation.
-pub(super) fn scrambling_token_item(
+impl TokenMenu {
+    pub fn index(self) -> usize {
+        match self {
+            TokenMenu::CopyName => 0,
+            TokenMenu::Revoke => 2,
+        }
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        [TokenMenu::CopyName, TokenMenu::Revoke]
+            .into_iter()
+            .find(|entry| entry.index() == index)
+    }
+}
+
+pub(in super::super) fn token_menu() -> Vec<MenuEntry> {
+    vec![
+        menu_item(MENU_COPY_NAME),
+        menu_separator(),
+        menu_item_danger(MENU_REVOKE),
+    ]
+}
+
+pub type CopySink = Rc<dyn Fn(&str)>;
+
+thread_local! {
+    static COPY_NAME_SINK: RefCell<Option<CopySink>> = const { RefCell::new(None) };
+}
+
+/// Diverts Copy name from the system clipboard; `None` restores it.
+pub fn set_copy_name_sink_for_tests(sink: Option<CopySink>) {
+    COPY_NAME_SINK.with(|cell| *cell.borrow_mut() = sink);
+}
+
+/// A name is not a secret, so it takes the plain clipboard write.
+pub(in super::super) fn copy_token_name(name: &str) {
+    let sink = COPY_NAME_SINK.with(|cell| cell.borrow().clone());
+    let copied = match sink {
+        Some(sink) => {
+            sink(name);
+            true
+        }
+        None => frust_clipboard::Clipboard::set_text(name).is_ok(),
+    };
+    app_toasts().show(if copied {
+        COPIED_TOAST
+    } else {
+        COPY_FAILED_TOAST
+    });
+}
+
+pub fn token_actions_label(name: &str) -> String {
+    format!("{name} actions")
+}
+
+fn meta_line(token: &AuthToken, this_device: bool, colors: &Palette) -> impl View<SettingsState> {
+    let theme = active_theme();
+    let (label, ink) = if this_device {
+        (
+            format!("{THIS_DEVICE_PREFIX}{}", token.created_label()),
+            colors.amber,
+        )
+    } else {
+        (token.created_label(), colors.fg_dim)
+    };
+    text(label).style(inked(&theme.type_scale.label_small, ink))
+}
+
+fn token_item(row: &TokenRow, colors: &Palette) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
+{
+    let theme = active_theme();
+    let name = row.token.name.clone();
+    let anchor = Rc::new(Cell::new(Rect::ZERO));
+    let at = Rc::clone(&anchor);
+    let more = icon_button(
+        icons::MORE_HORIZ,
+        token_actions_label(&name),
+        move |state: &mut SettingsState| pages::open_token_menu(state, &name, at.get()),
+    )
+    .ink(colors.fg_dim)
+    .icon_size(MORE_MARK)
+    .box_size(Size::new(MORE_BOX, MORE_BOX))
+    .radius(theme.shape.small);
+    let name_line =
+        text(row.token.name.clone()).style(inked(&theme.type_scale.body_small, colors.fg));
+    any(token_row(
+        name_line,
+        meta_line(&row.token, row.this_device, colors),
+        row.token.scope,
+        AnchorProbe {
+            child: more,
+            anchor,
+        },
+        None,
+        colors,
+    ))
+}
+
+/// `token` is the scramble's own snapshot. The ⋯ stays as a handlerless stand-in, so the row
+/// neither jumps when the animation starts nor offers a second revoke.
+fn scrambling_token_item(
     token: &AuthToken,
+    this_device: bool,
     pose: &ScramblePose,
     colors: &Palette,
 ) -> AnyView<SettingsState> // erasure: keep accumulator into Vec<AnyView>
@@ -91,50 +194,65 @@ pub(super) fn scrambling_token_item(
         colors.fg
     };
     let name_line = text(pose.display.clone()).style(inked(&theme.type_scale.body_small, ink));
-    let revoke = button(REVOKE_LABEL, |_state: &mut SettingsState| {})
-        .style(ButtonStyle::Danger)
-        .small();
+    let more = icon_button(
+        icons::MORE_HORIZ,
+        token_actions_label(&token.name),
+        |_state: &mut SettingsState| {},
+    )
+    .ink(colors.fg_faintest)
+    .icon_size(MORE_MARK)
+    .box_size(Size::new(MORE_BOX, MORE_BOX))
+    .radius(theme.shape.small);
     // The ticker rides inside the row it drives, so the scroller's paint
     // culling can never leave one running without the other.
     let ticker = pose.running.then(scramble::frame_ticker);
-    let row = token_row(name_line, token, revoke, ticker, colors);
+    let row = token_row(
+        name_line,
+        meta_line(token, this_device, colors),
+        token.scope,
+        more,
+        ticker,
+        colors,
+    );
     any(scramble::collapsing(pose.ratio, row))
 }
 
 fn token_row(
     name_line: impl View<SettingsState>,
-    token: &AuthToken,
-    revoke: impl View<SettingsState>,
+    meta: impl View<SettingsState>,
+    scope: TokenScope,
+    more: impl View<SettingsState>,
     tail: Option<AnyView<SettingsState>>,
     colors: &Palette,
 ) -> impl View<SettingsState> {
-    let theme = active_theme();
-    let top = centered_row(vec![
-        flexible(1, name_line),
-        h_gap(ROW_GAP),
-        inflexible(scope_chip(token.scope, colors)),
-    ]);
-    let meta = centered_row(vec![
-        inflexible(
-            text(token.created_label()).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
-        ),
-        spacer(),
-        inflexible(revoke),
-    ]);
+    let lines = column()
+        .child(name_line)
+        .child(meta)
+        .gap(TOKEN_LINE_GAP)
+        .cross_axis(CrossAxisAlignment::Start);
+    let line = centered_row(vec![
+        flexible(1, lines),
+        inflexible(scope_chip(scope, colors)),
+        inflexible(more),
+    ])
+    .gap(spacing::TIGHT);
     // erasure: keep accumulator into Vec<AnyView>
-    let mut lines = vec![
-        any(top),
-        any(SizedBox::<SettingsState>(None, Some(TOKEN_LINE_GAP))),
-        any(meta),
-    ];
-    lines.extend(tail);
-    stretch_column((
-        Padding(
-            EdgeInsets::symmetric(ROW_PAD_X, ROW_PAD_Y),
-            stretch_column(lines),
+    let mut parts = vec![
+        any(
+            SizedBox::<SettingsState>(None, Some(ROW_HEIGHT - HAIRLINE)).child(Padding(
+                EdgeInsets {
+                    left: ROW_PAD_X,
+                    top: 0.0,
+                    right: spacing::TIGHT,
+                    bottom: 0.0,
+                },
+                line,
+            )),
         ),
-        divider(colors.rule),
-    ))
+        any(divider(colors.rule)),
+    ];
+    parts.extend(tail);
+    stretch_column(parts)
 }
 
 /// Hand-composed: `glyph::badge` has no cyan/info variant for the read-only scope.
@@ -156,39 +274,251 @@ fn scope_chip(scope: TokenScope, colors: &Palette) -> impl View<SettingsState> {
     chip
 }
 
-pub(in super::super) fn create_token_row(
-    colors: &Palette,
-    enabled: bool,
-) -> impl View<SettingsState> {
-    let theme = active_theme();
-    let (plus_ink, label_ink) = if enabled {
-        (colors.amber, colors.fg_dim)
-    } else {
-        (colors.fg_faintest, colors.fg_faintest)
+/// A token whose refresh already removed it keeps its scramble row at its old index (clamped),
+/// orphans in ascending index, so nothing under it jumps while the collapse plays out.
+fn token_rows(frame: &TokenFrame, colors: &Palette) -> Vec<AnyView<SettingsState>> {
+    let animating = |name: &str| {
+        frame
+            .showing
+            .iter()
+            .find(|(entry, _)| entry.token.name == name)
     };
-    let label = centered_row(vec![
-        inflexible(text(CREATE_TOKEN_PLUS).style(inked(&theme.type_scale.body_small, plus_ink))),
-        h_gap(ADD_GAP),
-        inflexible(text(CREATE_TOKEN_LABEL).style(inked(&theme.type_scale.body_small, label_ink))),
-    ]);
-    Padding(
+    let mut rows: Vec<AnyView<SettingsState>> = frame
+        .view
+        .rows
+        .iter()
+        .map(|row| match animating(&row.token.name) {
+            Some((entry, pose)) => {
+                scrambling_token_item(&entry.token, row.this_device, pose, colors)
+            }
+            None => token_item(row, colors),
+        })
+        .collect();
+
+    let mut orphans: Vec<_> = frame
+        .showing
+        .iter()
+        .filter(|(entry, _)| {
+            !frame
+                .view
+                .rows
+                .iter()
+                .any(|row| row.token.name == entry.token.name)
+        })
+        .collect();
+    orphans.sort_by_key(|(entry, _)| entry.index);
+    for (entry, pose) in orphans {
+        let at = entry.index.min(rows.len());
+        let this_device = frame.device_token.as_deref() == Some(entry.token.name.as_str());
+        rows.insert(
+            at,
+            scrambling_token_item(&entry.token, this_device, pose, colors),
+        );
+    }
+    rows
+}
+
+/// The filter field and the scope segments, which stay above the rows.
+fn token_list_header(frame: &TokenFrame) -> Vec<AnyView<SettingsState>> {
+    let field = text_input(frame.query.clone(), pages::set_token_query)
+        .placeholder(FILTER_PLACEHOLDER)
+        .submit_on_enter(false);
+    let labels = ScopeFilter::SEGMENTS
+        .iter()
+        .zip(frame.view.counts)
+        .map(|(segment, count)| format!("{} {count}", segment.label()))
+        .collect();
+    let segments = segmented_control(
+        labels,
+        frame.segment.index(),
+        |state: &mut SettingsState, index: usize| {
+            if let Some(segment) = ScopeFilter::SEGMENTS.get(index) {
+                pages::set_token_segment(state, *segment);
+            }
+        },
+    );
+    vec![any(Padding(
         EdgeInsets {
             left: ROW_PAD_X,
-            top: ADD_MARGIN_TOP,
+            top: FILTER_TOP,
             right: ROW_PAD_X,
-            bottom: ADD_MARGIN_BOTTOM,
+            bottom: FILTER_GAP,
         },
-        GestureDetector(
-            container(Padding(
-                EdgeInsets::all(ADD_PAD),
-                Align(Alignment::CENTER, label),
-            ))
-            .radius(theme.shape.small)
-            .border(colors.outline, HAIRLINE)
-            .border_style(BorderStyle::Dashed(DashPattern::new(DASH_ON, DASH_OFF))),
+        stretch_column((field, Align(Alignment::new(-1.0, 0.0), segments))).gap(FILTER_GAP),
+    ))]
+}
+
+/// The list's load state, its empty filter result, or its `<shown> of <total>` count.
+fn token_list_status(frame: &TokenFrame, colors: &Palette) -> Option<AnyView<SettingsState>> {
+    let line = if frame.failed {
+        TOKENS_FAILED.to_string()
+    } else if !frame.loaded {
+        TOKENS_LOADING.to_string()
+    } else if frame.view.rows.is_empty() && frame.showing.is_empty() {
+        if frame.view.total == 0 {
+            return None;
+        }
+        NO_MATCH_LABEL.to_string()
+    } else if frame.view.narrowed {
+        format!("{} of {} tokens", frame.view.rows.len(), frame.view.total)
+    } else {
+        return None;
+    };
+    let theme = active_theme();
+    Some(any(Padding(
+        EdgeInsets::symmetric(ROW_PAD_X, STATUS_PAD),
+        Align(
+            Alignment::CENTER,
+            text(line).style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+        ),
+    )))
+}
+
+fn token_list_body(frame: &TokenFrame, colors: &Palette) -> Vec<AnyView<SettingsState>> {
+    let mut body = token_rows(frame, colors);
+    body.extend(token_list_status(frame, colors));
+    body
+}
+
+/// The page: the filter stays put while the rows scroll beneath it. The shell's bar consumes the
+/// top inset, so the safe area skips its top edge.
+pub(in super::super) fn tokens_phone_page(
+    frame: &TokenFrame,
+    wide_clamp: bool,
+    colors: &Palette,
+) -> impl View<SettingsState> + use<> {
+    let rows = scroll_view(Padding(
+        EdgeInsets {
+            left: 0.0,
+            top: 0.0,
+            right: 0.0,
+            bottom: SCROLL_PAD_BOTTOM,
+        },
+        FlexView::new(
+            Axis::Vertical,
+            token_list_body(frame, colors)
+                .into_iter()
+                .map(inflexible)
+                .collect(),
         )
-        .on_tap(|state: &mut SettingsState| pages::open_create_token_dialog(state)),
-    )
+        .cross_axis(CrossAxisAlignment::Stretch),
+    ));
+    let mut children: Vec<_> = token_list_header(frame)
+        .into_iter()
+        .map(inflexible)
+        .collect();
+    children.push(flexible(1, rows));
+    let page =
+        safe_area(FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch))
+            .top(false);
+    if wide_clamp {
+        Either::Left(Align(
+            Alignment::CENTER,
+            SizedBox::<SettingsState>(Some(SETTINGS_CLAMP_WIDTH), None).child(page),
+        ))
+    } else {
+        Either::Right(page)
+    }
+}
+
+/// The Full-band card: `auth tokens · <n>` with `+ new token`, then the whole list, scrolling
+/// with the page.
+pub(in super::super) fn tokens_card(
+    frame: &TokenFrame,
+    read_only: bool,
+    colors: &Palette,
+) -> AnyView<SettingsState> {
+    let theme = active_theme();
+    let title = if frame.loaded && !frame.failed {
+        format!("auth tokens \u{b7} {}", frame.view.total)
+    } else {
+        "auth tokens".to_string()
+    };
+    let ink = if read_only {
+        colors.fg_faintest
+    } else {
+        colors.amber
+    };
+    let new_token = GestureDetector(Padding(
+        EdgeInsets {
+            left: spacing::SM,
+            top: spacing::SM,
+            right: ROW_PAD_X,
+            bottom: spacing::SM,
+        },
+        text(NEW_TOKEN_ACTION).style(inked(&theme.type_scale.label_small, ink)),
+    ))
+    .on_tap(pages::open_create_token_dialog);
+    let header = centered_row(vec![
+        flexible(1, group_label(&title, colors)),
+        inflexible(new_token),
+    ]);
+    let mut list = token_list_header(frame);
+    list.extend(token_list_body(frame, colors));
+    any(glyph_card::<SettingsState>().title(header).desc(
+        FlexView::new(Axis::Vertical, list.into_iter().map(inflexible).collect())
+            .cross_axis(CrossAxisAlignment::Stretch),
+    ))
+}
+
+/// A Glyph menu anchors in window space, and only paint learns where a widget landed.
+struct AnchorProbe<V> {
+    child: V,
+    anchor: Rc<Cell<Rect>>,
+}
+
+struct AnchorProbeWidget {
+    child: ChildPod,
+    anchor: Rc<Cell<Rect>>,
+}
+
+impl<State: 'static, V: View<State>> View<State> for AnchorProbe<V> {
+    type Element = AnchorProbeWidget;
+
+    fn build(&self, ctx: &mut BuildCtx<'_>) -> AnchorProbeWidget {
+        AnchorProbeWidget {
+            child: build_child(&self.child, ctx),
+            anchor: Rc::clone(&self.anchor),
+        }
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        element: &mut AnchorProbeWidget,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        // A press can land before the next paint: carry the last rect over.
+        self.anchor.set(element.anchor.get());
+        element.anchor = Rc::clone(&self.anchor);
+        rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+    }
+
+    fn teardown(&self, element: &mut AnchorProbeWidget, ctx: &mut BuildCtx<'_>) {
+        teardown_child(&self.child, &mut element.child, ctx);
+    }
+}
+
+impl Widget for AnchorProbeWidget {
+    fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+        let size = self.child.layout_child(ctx, bc);
+        self.child.set_origin(Point::ZERO);
+        size
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
+        self.anchor
+            .set(Rect::from_origin_size(ctx.origin(), self.child.size()));
+        self.child.paint_child(ctx, scene);
+    }
+
+    fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        route_event_single(&mut self.child, ctx, event)
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        self.child.semantics_child(ctx);
+    }
 }
 
 /// `on_submit` gets the trimmed, non-empty name; every other dismissal closes without a callback.
@@ -329,9 +659,9 @@ where
         button(COPY_SECRET_LABEL, move |_state: &mut AppState| {
             let copied = frust_clipboard::Clipboard::set_text_sensitive(&copy_secret).is_ok();
             app_toasts().show(if copied {
-                COPIED_SECRET_TOAST
+                COPIED_TOAST
             } else {
-                COPY_SECRET_FAILED_TOAST
+                COPY_FAILED_TOAST
             });
         })
         .style(ButtonStyle::Primary)
@@ -345,4 +675,23 @@ where
         .style(ButtonStyle::Ghost)
         .small(),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_menu_index_decodes_to_the_entry_it_names() {
+        let entries = token_menu();
+        for choice in [TokenMenu::CopyName, TokenMenu::Revoke] {
+            assert!(matches!(entries[choice.index()], MenuEntry::Item(_)));
+            assert_eq!(TokenMenu::from_index(choice.index()), Some(choice));
+        }
+        assert_eq!(
+            TokenMenu::from_index(1),
+            None,
+            "the separator chooses nothing"
+        );
+    }
 }

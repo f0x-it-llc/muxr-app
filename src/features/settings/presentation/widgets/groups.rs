@@ -1,147 +1,100 @@
-use frust::AnyView;
+use std::rc::Rc;
 
-use crate::connection::{ServerBackend, ServerInfo, TrustMode};
-use crate::features::settings::domain::entities::{AppearancePrefs, AuthToken, PollPrefs};
-use crate::features::settings::presentation::pages::SettingsState;
-use crate::features::settings::presentation::scramble::{RevokeScramble, ScramblePose};
+use frust::{AnyView, ButtonStyle, any, button};
+
+use crate::connection::{ServerBackend, TrustMode};
+use crate::features::settings::domain::entities::{AppearancePrefs, PollPrefs};
+use crate::features::settings::presentation::app_pages::AppSettingsState;
+use crate::features::settings::presentation::controller::TokenListView;
+use crate::features::settings::presentation::pages::{self, SettingsState};
 use crate::ui::palette::Palette;
 
 use super::misc::bell_notifications_row;
 use super::pickers::PickerKind;
-use super::rows::{self, RowAction, RowMark, ValueTone, settings_row};
-use super::tokens::{scrambling_token_item, token_item};
+use super::rows::{self, RowAction, ValueTone, settings_row};
+use super::server_sheet::{DELETE_LABEL, FORGET_SERVER_LABEL, SAVED_CREDENTIAL_LABEL};
+
+const APP_SETTINGS_VALUE: &str = "fonts, bell, Muxr Pro, servers";
+const GETTING_STARTED_VALUE: &str = "pair a server in three steps";
+
+/// The same copy the saved-server sheet prints for these two actions.
+const SAVED_CREDENTIAL_VALUE: &str = "on this device";
+const FORGET_SERVER_VALUE: &str = "remove the profile and its credential";
+const TOKENS_LABEL: &str = "auth tokens";
+const TOKENS_LOADING_VALUE: &str = "loading\u{2026}";
+const TOKENS_FAILED_VALUE: &str = "couldn't load tokens";
 
 /// `/settings` is not route-guarded, so a deep link or a disconnect racing a rebuild shows this.
-const DISCONNECTED_VALUE: &str = "not connected";
+pub(super) const DISCONNECTED_VALUE: &str = "not connected";
 
-/// A token whose refresh already removed it keeps its scramble row at its old index (clamped),
-/// orphans in ascending index, so nothing under it jumps while the collapse plays out.
-pub(in super::super) fn token_rows(
-    tokens: &[AuthToken],
-    showing: &[(RevokeScramble, ScramblePose)],
-    read_only: bool,
-    colors: &Palette,
-) -> Vec<AnyView<SettingsState>> {
-    let animating = |token: &AuthToken| {
-        showing
-            .iter()
-            .find(|(entry, _)| entry.token.name == token.name)
-    };
-    let mut rows: Vec<AnyView<SettingsState>> = tokens
-        .iter()
-        .map(|token| match animating(token) {
-            Some((entry, pose)) => scrambling_token_item(&entry.token, pose, colors),
-            None => token_item(token, colors, !read_only),
-        })
-        .collect();
-
-    let mut orphans: Vec<&(RevokeScramble, ScramblePose)> = showing
-        .iter()
-        .filter(|(entry, _)| !tokens.iter().any(|token| token.name == entry.token.name))
-        .collect();
-    orphans.sort_by_key(|(entry, _)| entry.index);
-    for (entry, pose) in orphans {
-        let at = entry.index.min(rows.len());
-        rows.insert(at, scrambling_token_item(&entry.token, pose, colors));
+/// `<n> tokens · <m> read-only`, singular for one; the load states stand in for it until a list
+/// has landed.
+fn token_count_value(total: usize, read_only: usize, loaded: bool, failed: bool) -> String {
+    if failed {
+        return TOKENS_FAILED_VALUE.to_string();
     }
-    rows
-}
-
-pub(in super::super) fn connection_rows(
-    info: Option<&ServerInfo>,
-    colors: &Palette,
-) -> Vec<AnyView<SettingsState>> {
-    let (endpoint, endpoint_tone) = match info {
-        Some(info) => (info.endpoint.clone(), ValueTone::Ok),
-        None => (DISCONNECTED_VALUE.to_string(), ValueTone::Plain),
-    };
-    let (tls_value, tls_tone) = match info {
-        Some(info) => tls_posture(info.trust_mode),
-        None => (DISCONNECTED_VALUE, ValueTone::Plain),
-    };
-    let latency = info.map_or_else(
-        || DISCONNECTED_VALUE.to_string(),
-        |info| format!("{}ms", info.latency_ms),
-    );
-    let mut rows = vec![
-        settings_row(
-            rows::MARK_SERVER_URL,
-            "server url",
-            endpoint,
-            endpoint_tone,
-            RowAction::Static,
-            colors,
-        ),
-        settings_row(
-            rows::MARK_TLS,
-            "tls certificate",
-            tls_value,
-            tls_tone,
-            RowAction::Static,
-            colors,
-        ),
-        settings_row(
-            rows::MARK_LATENCY,
-            "latency",
-            latency,
-            ValueTone::Plain,
-            RowAction::Static,
-            colors,
-        ),
-    ];
-    rows.extend(backend_version_rows(info, colors));
-    rows
-}
-
-fn backend_version_rows(
-    info: Option<&ServerInfo>,
-    colors: &Palette,
-) -> Vec<AnyView<SettingsState>> {
-    match info {
-        Some(info) if !info.backend_versions.is_empty() => info
-            .backend_versions
-            .iter()
-            .map(|backend_version| {
-                settings_row(
-                    backend_mark(backend_version.backend),
-                    backend_version_label(backend_version.backend),
-                    backend_version.version.clone(),
-                    ValueTone::Plain,
-                    RowAction::Static,
-                    colors,
-                )
-            })
-            .collect(),
-        Some(info) => vec![settings_row(
-            rows::MARK_ZELLIJ,
-            "zellij version",
-            version_number(&info.version).to_string(),
-            ValueTone::Plain,
-            RowAction::Static,
-            colors,
-        )],
-        None => vec![settings_row(
-            rows::MARK_ZELLIJ,
-            "zellij version",
-            DISCONNECTED_VALUE,
-            ValueTone::Plain,
-            RowAction::Static,
-            colors,
-        )],
+    if !loaded {
+        return TOKENS_LOADING_VALUE.to_string();
     }
+    let noun = if total == 1 { "token" } else { "tokens" };
+    format!("{total} {noun} \u{b7} {read_only} read-only")
 }
 
-fn backend_mark(backend: ServerBackend) -> RowMark {
+/// Pushes the tokens page.
+pub(in super::super) fn tokens_row(
+    view: &TokenListView,
+    loaded: bool,
+    failed: bool,
+    colors: &Palette,
+) -> AnyView<SettingsState> {
+    let [_, _, read_only] = view.counts;
+    settings_row(
+        rows::MARK_TOKENS,
+        TOKENS_LABEL,
+        token_count_value(view.total, read_only, loaded, failed),
+        ValueTone::Plain,
+        RowAction::AuthTokens,
+        colors,
+    )
+}
+
+/// Shown only for a server holding a saved credential; the delete runs the connected server's
+/// own confirm and flow.
+pub(in super::super) fn saved_credential_row(colors: &Palette) -> AnyView<SettingsState> {
+    let delete = button(DELETE_LABEL, |state: &mut SettingsState| {
+        pages::open_delete_credential_dialog(state)
+    })
+    .style(ButtonStyle::Danger)
+    .small();
+    rows::action_row(
+        rows::MARK_CREDENTIAL,
+        SAVED_CREDENTIAL_LABEL,
+        SAVED_CREDENTIAL_VALUE,
+        false,
+        any(delete),
+        None,
+        colors,
+    )
+}
+
+pub(in super::super) fn forget_server_row(colors: &Palette) -> AnyView<SettingsState> {
+    rows::action_row(
+        rows::MARK_FORGET,
+        FORGET_SERVER_LABEL,
+        FORGET_SERVER_VALUE,
+        true,
+        rows::chevron(colors),
+        Some(Rc::new(|state: &mut SettingsState| {
+            pages::open_forget_server_dialog(state)
+        })),
+        colors,
+    )
+}
+
+pub(super) fn backend_stat_label(backend: ServerBackend) -> &'static str {
     match backend {
-        ServerBackend::Zellij => rows::MARK_ZELLIJ,
-        ServerBackend::Herdr => rows::MARK_HERDR,
-    }
-}
-
-fn backend_version_label(backend: ServerBackend) -> &'static str {
-    match backend {
-        ServerBackend::Zellij => "zellij version",
-        ServerBackend::Herdr => "herdr version",
+        ServerBackend::Zellij => "zellij",
+        ServerBackend::Herdr => "herdr",
     }
 }
 
@@ -158,10 +111,42 @@ pub(super) fn version_number(version: &str) -> &str {
     version.rsplit_once(' ').map_or(version, |(_, tail)| tail)
 }
 
+pub(in super::super) fn app_settings_rows(colors: &Palette) -> Vec<AnyView<SettingsState>> {
+    vec![settings_row(
+        rows::MARK_APP_SETTINGS,
+        "app settings",
+        APP_SETTINGS_VALUE,
+        ValueTone::Plain,
+        RowAction::AppSettings,
+        colors,
+    )]
+}
+
+pub(in super::super) fn about_rows(colors: &Palette) -> Vec<AnyView<AppSettingsState>> {
+    vec![
+        settings_row(
+            rows::MARK_VERSION,
+            "version",
+            env!("CARGO_PKG_VERSION"),
+            ValueTone::Plain,
+            RowAction::Static,
+            colors,
+        ),
+        settings_row(
+            rows::MARK_GETTING_STARTED,
+            "getting started",
+            GETTING_STARTED_VALUE,
+            ValueTone::Plain,
+            RowAction::GettingStarted,
+            colors,
+        ),
+    ]
+}
+
 pub(in super::super) fn appearance_rows(
     prefs: &AppearancePrefs,
     colors: &Palette,
-) -> Vec<AnyView<SettingsState>> {
+) -> Vec<AnyView<AppSettingsState>> {
     vec![
         settings_row(
             rows::MARK_FONT_FAMILY,
@@ -194,7 +179,7 @@ pub(in super::super) fn appearance_rows(
 pub(in super::super) fn poll_rows(
     prefs: &PollPrefs,
     colors: &Palette,
-) -> Vec<AnyView<SettingsState>> {
+) -> Vec<AnyView<AppSettingsState>> {
     vec![
         settings_row(
             rows::MARK_REFRESH,
@@ -207,7 +192,7 @@ pub(in super::super) fn poll_rows(
         bell_notifications_row(
             prefs.bell_notifications,
             colors,
-            |state: &mut SettingsState| state.actions.toggle_bell(),
+            |state: &mut AppSettingsState| state.actions.toggle_bell(),
         ),
     ]
 }
@@ -230,6 +215,28 @@ mod tests {
             tls_posture(TrustMode::Pinned),
             ("pinned certificate", ValueTone::Ok)
         ));
+    }
+
+    #[test]
+    fn the_token_count_names_both_totals_and_is_singular_for_one() {
+        assert_eq!(
+            token_count_value(1, 0, true, false),
+            "1 token \u{b7} 0 read-only"
+        );
+        assert_eq!(
+            token_count_value(3, 2, true, false),
+            "3 tokens \u{b7} 2 read-only"
+        );
+        assert_eq!(
+            token_count_value(0, 0, true, false),
+            "0 tokens \u{b7} 0 read-only"
+        );
+    }
+
+    #[test]
+    fn the_token_count_shows_the_load_state_until_a_list_lands() {
+        assert_eq!(token_count_value(0, 0, false, false), TOKENS_LOADING_VALUE);
+        assert_eq!(token_count_value(0, 0, true, true), TOKENS_FAILED_VALUE);
     }
 
     #[test]
