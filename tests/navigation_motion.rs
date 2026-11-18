@@ -1537,6 +1537,45 @@ fn a_credential_less_switch_from_connects_app_settings_lands_on_sessions_of_that
 }
 
 #[test]
+fn a_home_connect_settling_after_the_gear_opened_app_settings_lands_on_guarded_sessions() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_app_settings_from_connect();
+
+    expect_connection_controller().connect(mock_target());
+    app_nav().land_home();
+    h.settle();
+    h.park();
+
+    assert!(
+        !h.labels().iter().any(|l| l == APP_SETTINGS_TITLE),
+        "app settings gave way to Sessions: {:?}",
+        h.labels()
+    );
+    assert_on_sessions_of(&mut h, HOST);
+}
+
+#[test]
+fn an_add_dial_settling_after_back_left_connects_app_settings_add_page_still_lands_on_sessions() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = on_app_settings_from_connect();
+    open_add_page_from_row(&mut h);
+    let mark = app_nav().mark_top();
+    press_back(&mut h);
+    h.settle();
+    h.park();
+    assert_titled(&h, APP_SETTINGS_TITLE);
+
+    expect_connection_controller().connect(mock_target());
+    app_nav().land_added(&mark);
+    h.settle();
+    h.park();
+
+    assert_on_sessions_of(&mut h, HOST);
+}
+
+#[test]
 fn a_connect_from_app_settings_inside_a_sessions_shell_returns_to_app_settings() {
     let _g = serial();
     let _ambient = setup();

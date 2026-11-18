@@ -21,7 +21,7 @@ use crate::features::pro::domain::entities::{Entitlement, ServerLimitVerdict};
 use crate::features::pro::presentation::controller::ProController;
 use crate::features::settings::di::SharedAuthTokensRepository;
 use crate::features::settings::domain::entities::CreateTokenRequest;
-use crate::routes::{Nav, PageMark, SESSIONS_ROUTE};
+use crate::routes::{Nav, PageMark};
 use crate::ui::toasts::app_toasts;
 
 pub struct CredentialOffer {
@@ -106,7 +106,7 @@ struct Landing {
 impl Landing {
     fn land(&self) {
         match &self.mark {
-            None => self.nav.push(SESSIONS_ROUTE),
+            None => self.nav.land_home(),
             Some(mark) => {
                 self.landed.store(true, Ordering::SeqCst);
                 self.nav.land_added(mark);

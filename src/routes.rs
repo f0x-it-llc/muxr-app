@@ -391,19 +391,36 @@ impl Nav {
 
     /// A settled connect or switch: a Sessions shell returns to its root, whatever lies above it;
     /// any other shell is replaced by a Sessions shell placed as a connect places it, so Back
-    /// there asks to disconnect. With no shell placed there is no Sessions to return to.
+    /// there asks to disconnect. Only the Sessions-shell return honours a dead `mark`: anywhere
+    /// else the user backed away from a connection that is live regardless, so it lands anyway.
     pub fn land_on_sessions(&self, mark: &PageMark) {
-        if !self.mark_is_live(mark) || !self.shell_is_placed() {
-            return;
-        }
+        let live = self.mark_is_live(mark);
         if self.in_sessions_shell() && !self.shell_is_covered() {
-            for _ in 1..self.inner.depth() {
-                self.pop_on(false);
+            if live {
+                for _ in 1..self.inner.depth() {
+                    self.pop_on(false);
+                }
             }
-        } else {
-            self.go(CONNECT_LOCATION);
+        } else if self.shell_is_placed() {
+            self.place_sessions();
+        } else if !live {
             self.push(SESSIONS_ROUTE);
         }
+    }
+
+    /// A Home-mode connect settled from Connect: Sessions over no shell, and a replacement Sessions
+    /// shell over one Connect's gear placed while the dial was in flight.
+    pub fn land_home(&self) {
+        if self.shell_is_placed() && !self.in_sessions_shell() {
+            self.place_sessions();
+        } else {
+            self.push(SESSIONS_ROUTE);
+        }
+    }
+
+    fn place_sessions(&self) {
+        self.go(CONNECT_LOCATION);
+        self.push(SESSIONS_ROUTE);
     }
 
     /// An add page's settled connect takes only itself off over a Sessions shell (or none) and
