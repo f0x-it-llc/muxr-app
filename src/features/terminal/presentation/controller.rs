@@ -26,7 +26,8 @@ use crate::features::terminal::domain::entities::{
 };
 use crate::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
 use crate::features::terminal::domain::repositories::{
-    AgentSink, PreferencesRepository, SessionsRepository, TerminalRepository, WatchEnd, WatchHandle,
+    AgentSink, Created, PreferencesRepository, SessionsRepository, TerminalRepository, WatchEnd,
+    WatchHandle,
 };
 use crate::features::terminal::domain::use_cases::{
     DetachSession, ListSpaceTabs, LoadWorkspace, RenameAttachedSession, SwitchTab, WorkspaceQuery,
@@ -163,6 +164,11 @@ const AGENT_INBOX_CAPACITY: usize = 64;
 pub const REVIVE_DEADLINE: Duration = Duration::from_secs(10);
 
 pub const NO_PANE_TOAST: &str = "Pick a pane first.";
+/// The server made the object but could not move this screen onto it.
+pub const CREATED_NOT_FOLLOWED_TOAST: &str = "Created. Pick it from Panes & tabs.";
+/// The server could not say whether the object was made; the list is re-read before any retry.
+pub const CREATE_UNKNOWN_TOAST: &str =
+    "No clear answer from the server. Check the list before trying again.";
 
 static AGENTS_CLOCK_AHEAD_MS: AtomicU64 = AtomicU64::new(0);
 
@@ -1612,28 +1618,36 @@ impl TerminalController {
     async fn tell_created(
         &self,
         moves_without_info: bool,
-        work: impl Future<Output = Result<String, AppFailure>>,
+        work: impl Future<Output = Result<Created, AppFailure>>,
     ) -> Option<String> {
         if self.stream_ended() {
             log::debug!("terminal create dropped: the attach stream ended");
             return None;
         }
-        self.focus_verbs_in_flight.fetch_add(1, Ordering::SeqCst);
-        let _in_flight = VerbGuard(&self.focus_verbs_in_flight);
-        let created = match work.await {
-            Ok(info) => Some(info),
+        let outcome = {
+            self.focus_verbs_in_flight.fetch_add(1, Ordering::SeqCst);
+            let _in_flight = VerbGuard(&self.focus_verbs_in_flight);
+            let outcome = work.await;
+            if let Ok(Created::Followed(info)) = &outcome
+                && (moves_without_info || !info.is_empty())
+            {
+                self.supersede_attach_target();
+            }
+            outcome
+        };
+        let toast = match outcome {
+            Ok(Created::Followed(info)) => return Some(info),
+            Ok(Created::NotFollowed) => CREATED_NOT_FOLLOWED_TOAST,
+            Ok(Created::Unknown) => CREATE_UNKNOWN_TOAST,
             Err(failure) => {
                 self.core.failures().emit(&failure);
-                None
+                return None;
             }
         };
-        if created
-            .as_ref()
-            .is_some_and(|info| moves_without_info || !info.is_empty())
-        {
-            self.supersede_attach_target();
-        }
-        created
+        app_toasts().show(toast);
+        self.settle_create().await;
+        self.load().await;
+        None
     }
 
     /// The one place the supersede rule acts; holds `focus_verbs_in_flight` across `work`.
@@ -2810,6 +2824,8 @@ mod tests {
         agents_delay: Mutex<Option<Duration>>,
         /// The ack `info` every create verb answers; empty by default (the legacy ack).
         create_info: Mutex<String>,
+        /// Overrides the followed answer of every create verb when set.
+        create_outcome: Mutex<Option<Created>>,
     }
 
     const SEEDED_SPACE: &str = "ws-1";
@@ -2859,6 +2875,21 @@ mod tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
+        }
+
+        fn created_outcome(&self) -> Created {
+            self.create_outcome
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .unwrap_or_else(|| Created::Followed(self.create_info()))
+        }
+
+        fn answer_creates_as(&self, outcome: Created) {
+            *self
+                .create_outcome
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(outcome);
         }
 
         fn refuse(&self, verb: &str) {
@@ -3072,30 +3103,30 @@ mod tests {
             self.record(format!("scroll_pane({pane_id},{is_plugin},{direction:?})"))
         }
 
-        async fn create_space(&self, label: String) -> Result<String, AppFailure> {
+        async fn create_space(&self, label: String) -> Result<Created, AppFailure> {
             self.record(format!("create_space({label})"))?;
             self.park().await;
-            Ok(self.create_info())
+            Ok(self.created_outcome())
         }
 
         async fn rename_space(&self, space_id: String, label: String) -> Result<(), AppFailure> {
             self.record(format!("rename_space({space_id},{label})"))
         }
 
-        async fn new_tab(&self, name: String) -> Result<String, AppFailure> {
+        async fn new_tab(&self, name: String) -> Result<Created, AppFailure> {
             self.record(format!("new_tab({name})"))?;
             self.park().await;
             self.created.store(true, Ordering::SeqCst);
-            Ok(self.create_info())
+            Ok(self.created_outcome())
         }
 
         async fn rename_tab(&self, tab_id: u64, name: String) -> Result<(), AppFailure> {
             self.record(format!("rename_tab({tab_id},{name})"))
         }
 
-        async fn new_pane(&self, floating: bool) -> Result<String, AppFailure> {
+        async fn new_pane(&self, floating: bool) -> Result<Created, AppFailure> {
             self.record(format!("new_pane({floating})"))?;
-            Ok(self.create_info())
+            Ok(self.created_outcome())
         }
 
         async fn rename_pane(
@@ -4287,6 +4318,69 @@ mod tests {
             ),
             before
         );
+    }
+
+    #[test]
+    fn a_create_that_landed_without_following_toasts_and_rereads_the_list() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        repository.answer_creates_as(Created::NotFollowed);
+        app_toasts().clear();
+        let lists_before = repository
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("list_tabs"))
+            .count();
+
+        block_on(c.new_pane(false));
+
+        assert_eq!(
+            app_toasts().pending_untracked(),
+            [CREATED_NOT_FOLLOWED_TOAST]
+        );
+        assert!(
+            repository
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("list_tabs"))
+                .count()
+                > lists_before,
+            "the tree is re-read so the created pane shows"
+        );
+        assert_eq!(
+            c.active_tab.get_untracked(),
+            "alpha",
+            "nothing claims the stream moved"
+        );
+        assert_eq!(c.resume_slot().target(), ResumeTarget::default());
+        app_toasts().clear();
+    }
+
+    #[test]
+    fn a_create_with_an_unknown_outcome_toasts_and_rereads_the_list() {
+        let (c, repository) = recorded("herdr:work");
+        c.attach_live();
+        repository.answer_creates_as(Created::Unknown);
+        app_toasts().clear();
+        let lists_before = repository
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("list_tabs"))
+            .count();
+
+        block_on(c.new_tab("logs".to_string()));
+
+        assert_eq!(app_toasts().pending_untracked(), [CREATE_UNKNOWN_TOAST]);
+        assert!(
+            repository
+                .calls()
+                .iter()
+                .filter(|call| call.starts_with("list_tabs"))
+                .count()
+                > lists_before
+        );
+        assert_eq!(c.resume_slot().target(), ResumeTarget::default());
+        app_toasts().clear();
     }
 
     #[test]

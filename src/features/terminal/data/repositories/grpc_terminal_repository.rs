@@ -20,13 +20,13 @@ use crate::features::terminal::domain::entities::{
     AgentEntry, AgentEventEntry, AgentMark, PaneEntry, ScrollStep, Space, TabEntry, TermLine,
 };
 use crate::features::terminal::domain::repositories::{
-    AgentSink, TerminalRepository, WatchEnd, WatchHandle,
+    AgentSink, Created, TerminalRepository, WatchEnd, WatchHandle,
 };
 use crate::net::agent_layouts::{
     AgentLayouts, TabSlot, agent_spaces, fetch_agent_layouts, tab_label, unique_tab_key,
 };
 use crate::net::proto::{
-    AgentEvent, AgentList, AgentMark as WireAgentMark, AgentMsg, CreateSpaceReq, Layout,
+    ActionAck, AgentEvent, AgentList, AgentMark as WireAgentMark, AgentMsg, CreateSpaceReq, Layout,
     NewPaneReq, NewTabReq, PaneMsg, PaneTarget, RenamePaneReq, RenameSpaceReq, RenameTabReq,
     ScrollDirection, ScrollReq, SessionRef, SpaceList, SwitchSpaceReq, TabTarget,
     ToggleFullscreenReq, agent_event,
@@ -579,7 +579,7 @@ impl TerminalRepository for GrpcTerminalRepository {
         Ok(())
     }
 
-    async fn create_space(&self, label: String) -> Result<String, AppFailure> {
+    async fn create_space(&self, label: String) -> Result<Created, AppFailure> {
         let (session, connection_id) = self.addressed()?;
         let client = self.client()?;
         let request = create_space_request(session, connection_id, label);
@@ -589,8 +589,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .await
             .map_err(|status| self.map_status(&client, status))?
             .into_inner();
-        error::ack_result(&ack)?;
-        Ok(ack.info)
+        created(ack)
     }
 
     async fn rename_space(&self, space_id: String, label: String) -> Result<(), AppFailure> {
@@ -606,7 +605,7 @@ impl TerminalRepository for GrpcTerminalRepository {
         error::ack_result(&ack)
     }
 
-    async fn new_tab(&self, name: String) -> Result<String, AppFailure> {
+    async fn new_tab(&self, name: String) -> Result<Created, AppFailure> {
         let (session, connection_id) = self.addressed()?;
         let client = self.client()?;
         let request = new_tab_request(session, connection_id, name);
@@ -616,8 +615,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .await
             .map_err(|status| self.map_status(&client, status))?
             .into_inner();
-        error::ack_result(&ack)?;
-        Ok(ack.info)
+        created(ack)
     }
 
     async fn rename_tab(&self, tab_id: u64, name: String) -> Result<(), AppFailure> {
@@ -633,7 +631,7 @@ impl TerminalRepository for GrpcTerminalRepository {
         error::ack_result(&ack)
     }
 
-    async fn new_pane(&self, floating: bool) -> Result<String, AppFailure> {
+    async fn new_pane(&self, floating: bool) -> Result<Created, AppFailure> {
         let (session, connection_id) = self.addressed()?;
         let client = self.client()?;
         let request = new_pane_request(session, connection_id, floating);
@@ -643,8 +641,7 @@ impl TerminalRepository for GrpcTerminalRepository {
             .await
             .map_err(|status| self.map_status(&client, status))?
             .into_inner();
-        error::ack_result(&ack)?;
-        Ok(ack.info)
+        created(ack)
     }
 
     async fn rename_pane(
@@ -866,6 +863,21 @@ fn pane_target(
         is_plugin,
         connection_id,
     }
+}
+
+/// Error prefixes a routed create answers with when the object may exist (muxr.proto, `NewPaneReq`).
+const CREATED_NOT_ATTACHED: &str = "created-not-attached:";
+const CREATE_OUTCOME_UNKNOWN: &str = "create-outcome-unknown:";
+
+fn created(ack: ActionAck) -> Result<Created, AppFailure> {
+    if !ack.ok && ack.error.starts_with(CREATED_NOT_ATTACHED) {
+        return Ok(Created::NotFollowed);
+    }
+    if !ack.ok && ack.error.starts_with(CREATE_OUTCOME_UNKNOWN) {
+        return Ok(Created::Unknown);
+    }
+    error::ack_result(&ack)?;
+    Ok(Created::Followed(ack.info))
 }
 
 fn create_space_request(session: String, connection_id: String, label: String) -> CreateSpaceReq {
@@ -2041,6 +2053,35 @@ mod tests {
         assert_eq!(request.session, "zellij:dev");
         assert_eq!(request.tab_id, 7);
         assert_eq!(request.name, "renamed");
+    }
+
+    #[test]
+    fn a_create_ack_says_whether_the_object_exists_and_was_followed() {
+        let ack = |ok: bool, error: &str, info: &str| ActionAck {
+            ok,
+            error: error.to_string(),
+            info: info.to_string(),
+        };
+        assert_eq!(
+            created(ack(true, "", "terminal_21")),
+            Ok(Created::Followed("terminal_21".to_string()))
+        );
+        assert_eq!(
+            created(ack(
+                false,
+                "created-not-attached: re-point failed",
+                "terminal_21"
+            )),
+            Ok(Created::NotFollowed)
+        );
+        assert_eq!(
+            created(ack(false, "create-outcome-unknown: timed out", "")),
+            Ok(Created::Unknown)
+        );
+        assert!(matches!(
+            created(ack(false, "reattach required (no matching connection)", "")),
+            Err(AppFailure::Network(_))
+        ));
     }
 
     #[test]
