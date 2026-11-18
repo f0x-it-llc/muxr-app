@@ -31,7 +31,7 @@ const TITLE_LINE_HEIGHT: f32 = 18.0;
 /// A word per state, never the `⛶`/`⤡` glyph it draws.
 const EXPAND_LABEL: &str = "Fullscreen";
 const COLLAPSE_LABEL: &str = "Exit fullscreen";
-const PANES_LABEL: &str = "Panes & tabs";
+pub(crate) const PANES_LABEL: &str = "Panes & tabs";
 const ATTENTION_DOT: f64 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

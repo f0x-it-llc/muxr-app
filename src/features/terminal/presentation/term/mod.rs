@@ -31,7 +31,7 @@ use crate::features::terminal::domain::feed::TerminalFeed;
 use geometry::CellGeometry;
 use selection::{GridPoint, GridRange};
 
-pub use chip::{CopyChipView, CopyChipWidget, CopySink, copy_chip};
+pub use chip::{CopyChipView, CopyChipWidget, CopySink, PasteSource, copy_chip};
 pub use geometry::{FALLBACK_COLS, FALLBACK_ROWS};
 pub use input::{BarKey, Emission, KeystrokeSource, ModifierLatch};
 pub use pinch::{PinchIntent, PinchIntentTracker, PinchSink};
@@ -71,6 +71,8 @@ pub struct InputSeam {
     read_only: Rc<Cell<bool>>,
     /// Compared across the grid's blur edge: unchanged means a real blur, not a key-cap hand-off.
     focus_claim: Rc<Cell<u64>>,
+    /// The emulator the grid renders, written from `build`: its modes frame a paste.
+    screen: Rc<RefCell<Option<SharedEmulator>>>,
     pump: Option<PumpHandle>,
 }
 
@@ -88,6 +90,7 @@ impl InputSeam {
             revision: RwSignal::new(0),
             read_only: Rc::new(Cell::new(false)),
             focus_claim: Rc::new(Cell::new(0)),
+            screen: Rc::new(RefCell::new(None)),
             pump: None,
         }
     }
@@ -115,6 +118,34 @@ impl InputSeam {
 
     pub fn read_only(&self) -> bool {
         self.read_only.get()
+    }
+
+    pub fn watch_screen(&self, emulator: &SharedEmulator) {
+        let mut screen = self.screen.borrow_mut();
+        if !screen
+            .as_ref()
+            .is_some_and(|held| Rc::ptr_eq(held, emulator))
+        {
+            *screen = Some(Rc::clone(emulator));
+        }
+    }
+
+    pub fn bracketed_paste(&self) -> bool {
+        self.screen
+            .borrow()
+            .as_ref()
+            .is_some_and(|emulator| emulator.borrow().screen().bracketed_paste())
+    }
+
+    /// The one paste path, keyboard and chip alike.
+    pub fn paste(&self, text: &str) -> Option<Emission> {
+        if self.read_only() {
+            return None;
+        }
+        let bracketed = self.bracketed_paste();
+        let emission = self.source.borrow_mut().on_paste(text, bracketed);
+        self.dispatch(&emission);
+        Some(emission)
     }
 
     /// Turning read-only on scrubs the buffered keystrokes.
@@ -175,6 +206,9 @@ impl InputSeam {
         if self.read_only() {
             return None;
         }
+        if let InputEvent::EditCommand(EditCommand::Paste(text)) = event {
+            return self.paste(text);
+        }
         let emission = {
             let mut source = self.source.borrow_mut();
             match event {
@@ -184,7 +218,6 @@ impl InputSeam {
                 InputEvent::Ime(ImeEvent::Compose { text, .. }) => source.on_compose(text),
                 InputEvent::Ime(ImeEvent::Disabled) => source.on_composition_end(),
                 InputEvent::Ime(ImeEvent::Enabled) => Emission::default(),
-                InputEvent::EditCommand(EditCommand::Paste(text)) => source.on_commit(text),
                 _ => return None,
             }
         };
@@ -219,6 +252,8 @@ pub struct SelectionSeam {
     /// Kept here because `build` re-runs mid-gesture and a fresh tracker would lose its scale.
     pinch: Rc<RefCell<PinchIntentTracker>>,
     pinching: Rc<Cell<bool>>,
+    /// Written from the grid's `build`; `None` on a read-only or input-less mount.
+    paste_target: Rc<RefCell<Option<InputSeam>>>,
 }
 
 impl SelectionSeam {
@@ -228,7 +263,25 @@ impl SelectionSeam {
             emulator,
             pinch: Rc::new(RefCell::new(PinchIntentTracker::new())),
             pinching: Rc::new(Cell::new(false)),
+            paste_target: Rc::new(RefCell::new(None)),
         }
+    }
+
+    pub fn set_paste_target(&self, input: Option<InputSeam>) {
+        *self.paste_target.borrow_mut() = input;
+    }
+
+    pub fn can_paste(&self) -> bool {
+        self.paste_target
+            .borrow()
+            .as_ref()
+            .is_some_and(|input| !input.read_only())
+    }
+
+    /// Refused, with nothing sent, unless [`can_paste`](Self::can_paste).
+    pub fn paste(&self, text: &str) -> Option<Emission> {
+        let input = self.paste_target.borrow().clone()?;
+        input.paste(text)
     }
 
     /// Clamps a held selection the instant a shrink is observed; a stale range would underflow
@@ -255,12 +308,13 @@ impl SelectionSeam {
     }
 
     /// The haptic fires before the word resolves, even over a separator. A fire with no finger
-    /// down goes straight to the released, chip-up state.
+    /// down goes straight to the released, chip-up state; over a separator that chip is Paste only.
     pub fn begin(&self) {
         if self.pinching.get() {
             return;
         }
         frust::perform_haptic(frust::HapticFeedback::Selection);
+        let pasteable = self.can_paste();
         let mut state = self.state.borrow_mut();
         state.haptics += 1;
         let Some(metrics) = state.metrics else {
@@ -274,7 +328,7 @@ impl SelectionSeam {
             state.chip = None;
         } else {
             state.dragging = false;
-            state.chip = state.range.map(|_| state.pointer);
+            state.chip = (state.range.is_some() || pasteable).then_some(state.pointer);
         }
     }
 
@@ -301,9 +355,11 @@ impl SelectionSeam {
     }
 
     pub fn finish(&self) {
+        let pasteable = self.can_paste();
         let mut state = self.state.borrow_mut();
         state.dragging = false;
-        state.chip = state.range.map(|_| state.pointer);
+        let offered = state.range.is_some() || (pasteable && state.anchor.is_some());
+        state.chip = offered.then_some(state.pointer);
     }
 
     /// The selection survives a stolen gesture; the next tap clears it.

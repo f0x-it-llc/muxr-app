@@ -13,6 +13,17 @@ use crate::features::terminal::domain::entities::{
     AgentEntry, AgentEventEntry, ScrollStep, Space, TabEntry, TermLine,
 };
 
+/// What a create verb's ack says happened to the object it asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Created {
+    /// Created, and this connection now views it; carries the ack's `info`.
+    Followed(String),
+    /// Created, but this connection could not move onto it.
+    NotFollowed,
+    /// The server could not tell whether it was created.
+    Unknown,
+}
+
 fn unsupported(verb: &str) -> AppFailure {
     AppFailure::Internal(format!("{verb} is not supported by this repository"))
 }
@@ -131,8 +142,9 @@ pub trait TerminalRepository {
 
     async fn detach_session(&self, id: String) -> Result<(), AppFailure>;
 
-    /// An empty `label` lets the backend choose a name. Mutating.
-    async fn create_space(&self, _label: String) -> Result<(), AppFailure> {
+    /// An empty `label` lets the backend choose a name. Mutating. On success the ack's `info` is the
+    /// new space id on a backend that moves this connection onto it, empty otherwise.
+    async fn create_space(&self, _label: String) -> Result<Created, AppFailure> {
         Err(unsupported("create_space"))
     }
 
@@ -140,8 +152,9 @@ pub trait TerminalRepository {
         Err(unsupported("rename_space"))
     }
 
-    /// An empty `name` lets the backend choose one. Mutating.
-    async fn new_tab(&self, _name: String) -> Result<(), AppFailure> {
+    /// An empty `name` lets the backend choose one. Mutating. On success the ack's `info` is the new
+    /// tab id on herdr, empty otherwise.
+    async fn new_tab(&self, _name: String) -> Result<Created, AppFailure> {
         Err(unsupported("new_tab"))
     }
 
@@ -149,7 +162,8 @@ pub trait TerminalRepository {
         Err(unsupported("rename_tab"))
     }
 
-    async fn new_pane(&self, _floating: bool) -> Result<(), AppFailure> {
+    /// On success the ack's `info` is `terminal_<id>` of the new pane on herdr, empty otherwise.
+    async fn new_pane(&self, _floating: bool) -> Result<Created, AppFailure> {
         Err(unsupported("new_pane"))
     }
 

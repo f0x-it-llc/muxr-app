@@ -53,6 +53,9 @@ pub const INBOUND_HIGH_WATER_FRAMES: usize = 4096;
 
 pub const INBOUND_LOW_WATER_FRAMES: usize = INBOUND_HIGH_WATER_FRAMES / 4;
 
+/// The `exit` payload of a stream whose pane is gone while the daemon still serves the session.
+pub const EXIT_PANE_EXITED: &str = "pane-exited";
+
 /// Best-effort hints the server resolves pane → tab → space, falling through on anything stale;
 /// `None` is no hint. herdr only: a zellij attach follows the server's own focus.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -573,10 +576,11 @@ impl Shared {
         }
     }
 
-    /// A `Closed` feed keeps its status, since the server said why.
+    /// An exited feed keeps its status, since the server said why.
     fn retire(&self) {
         let mut state = self.state();
-        if self.shutdown.load(Ordering::Acquire) && state.status != LinkStatus::Closed {
+        let exited = matches!(state.status, LinkStatus::Closed | LinkStatus::PaneGone);
+        if self.shutdown.load(Ordering::Acquire) && !exited {
             state.status = LinkStatus::Disconnected;
         }
         state.outbound = None;
@@ -789,7 +793,7 @@ async fn pump_stream(
             Some(server_frame::Kind::Control(event)) => match event.kind.as_str() {
                 CONTROL_CONNECTION_ID => shared.set_connection_id(event.payload),
                 CONTROL_EXIT => {
-                    shared.set_status(LinkStatus::Closed);
+                    shared.set_status(exit_status(&event.payload));
                     return Attempt::Closed;
                 }
                 // An unknown control kind is a newer server, not an error.
@@ -798,6 +802,15 @@ async fn pump_stream(
             // A frame whose oneof this build does not know: same rule.
             None => {}
         }
+    }
+}
+
+/// Any other payload, an older server's included, is an exit whose cause the screen looks up.
+fn exit_status(payload: &str) -> LinkStatus {
+    if payload == EXIT_PANE_EXITED {
+        LinkStatus::PaneGone
+    } else {
+        LinkStatus::Closed
     }
 }
 
@@ -1398,6 +1411,68 @@ mod tests {
             1,
             "a clean close is not a drop: nothing re-attaches"
         );
+    }
+
+    #[tokio::test]
+    async fn an_exit_naming_a_gone_pane_reports_it_and_does_not_reconnect() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let (feed, _) = rig.feed(80, 24);
+        wait_until("the stream is up", || {
+            feed.status() == LinkStatus::Connected
+        })
+        .await;
+
+        script.send_exit_with(EXIT_PANE_EXITED);
+        wait_until("the pump returns", || !feed.is_open()).await;
+        assert_eq!(feed.status(), LinkStatus::PaneGone);
+        assert_eq!(
+            script.attach_count(),
+            1,
+            "the feed never re-attaches itself"
+        );
+    }
+
+    #[test]
+    fn only_the_pane_exited_payload_names_a_gone_pane() {
+        assert_eq!(exit_status(EXIT_PANE_EXITED), LinkStatus::PaneGone);
+        for older in ["", "session-exited", "pane-exited ", "PANE-EXITED"] {
+            assert_eq!(exit_status(older), LinkStatus::Closed, "{older:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fresh_feed_after_a_gone_pane_attaches_at_the_pane_the_slot_names() {
+        let rig = Rig::start().await;
+        let script = rig.script();
+        let resume = Arc::new(ResumeSlot::default());
+        let (gone, _) = rig.feed_resuming(80, 24, &TEST_BACKOFF, Arc::clone(&resume));
+        wait_until("the stream is up", || {
+            gone.status() == LinkStatus::Connected
+        })
+        .await;
+        script.send_exit_with(EXIT_PANE_EXITED);
+        wait_until("the pump returns", || !gone.is_open()).await;
+
+        resume.remember_space("ws-2".to_string());
+        resume.remember_pane(Some(5), 51);
+        let (fresh, _) = rig.feed_resuming(80, 24, &TEST_BACKOFF, Arc::clone(&resume));
+        wait_until("the fresh stream is up", || {
+            fresh.connection_id().is_some() && fresh.status() == LinkStatus::Connected
+        })
+        .await;
+
+        let attach = script.attaches().remove(1);
+        assert_eq!(
+            (
+                attach.resume_space_id.as_str(),
+                attach.resume_tab_id,
+                attach.resume_pane_id
+            ),
+            ("ws-2", 5, 51)
+        );
+        assert_eq!(fresh.connection_id(), Some(testing::connection_id(2)));
+        assert_ne!(fresh.connection_id(), gone.connection_id());
     }
 
     #[tokio::test]

@@ -44,7 +44,7 @@ use muxr::features::terminal::domain::entities::{
     AgentEntry, AgentEventEntry, AgentStatus, Space, TabEntry, TermLine,
 };
 use muxr::features::terminal::domain::feed::{LinkStatus, TerminalFeed};
-use muxr::features::terminal::domain::repositories::{TerminalRepository, WatchEnd};
+use muxr::features::terminal::domain::repositories::{Created, TerminalRepository, WatchEnd};
 use muxr::features::terminal::presentation::controller::{
     AttachTarget, TerminalController, advance_agents_clock_for_tests,
 };
@@ -59,6 +59,7 @@ use muxr::features::terminal::presentation::term::{
 };
 use muxr::features::terminal::presentation::term::{PinchIntent, PinchSink};
 use muxr::routes::{app_nav, install_app_router};
+use muxr::ui::toasts::app_toasts;
 use muxr::{AppState, MuxrApp};
 
 mod support;
@@ -2057,9 +2058,9 @@ impl TerminalRepository for SlowCreate {
     async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
         self.0.focus_pane(pane_id, is_plugin).await
     }
-    async fn new_tab(&self, _name: String) -> Result<(), AppFailure> {
+    async fn new_tab(&self, _name: String) -> Result<Created, AppFailure> {
         clean_signals::time::sleep(Duration::from_millis(20)).await;
-        Ok(())
+        Ok(Created::Followed(String::new()))
     }
 }
 
@@ -2649,4 +2650,312 @@ fn pinch_converge_restores_the_fullscreen_pane_and_is_a_no_op_without_one() {
     h.pump_until("restored", |_| {
         pane_fullscreen_flags() == [(40, false), (41, false)]
     });
+}
+
+const NO_PANE: &str = "No pane open";
+const PANES_BUTTON: &str = "Panes & tabs";
+const ENDED_ID: &str = "c-1";
+const FRESH_ID: &str = "c-2";
+
+/// Every wire-bound call, tagged with the connection id bound when it ran.
+struct Wire {
+    inner: SharedTerminalRepository,
+    bound: std::sync::Mutex<String>,
+    log: std::sync::Mutex<Vec<String>>,
+}
+
+impl Wire {
+    fn over(inner: SharedTerminalRepository) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            bound: std::sync::Mutex::new(String::new()),
+            log: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn note(&self, call: String) {
+        let bound = self.bound.lock().expect("unpoisoned").clone();
+        self.log
+            .lock()
+            .expect("unpoisoned")
+            .push(format!("{call}@{bound}"));
+    }
+
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.log.lock().expect("unpoisoned"))
+    }
+}
+
+fn is_verb(call: &str) -> bool {
+    ["focus_pane", "go_to_tab", "switch_space"]
+        .iter()
+        .any(|verb| call.starts_with(verb))
+}
+
+#[clean_signals::async_trait]
+impl TerminalRepository for Wire {
+    fn bind(&self, session: Option<String>, connection_id: Option<String>) {
+        *self.bound.lock().expect("unpoisoned") = connection_id.clone().unwrap_or_default();
+        self.inner.bind(session, connection_id);
+    }
+    async fn list_spaces(&self) -> Result<Vec<Space>, AppFailure> {
+        self.note("list_spaces".to_string());
+        self.inner.list_spaces().await
+    }
+    async fn list_tabs(&self) -> Result<Vec<TabEntry>, AppFailure> {
+        self.note("list_tabs".to_string());
+        self.inner.list_tabs().await
+    }
+    async fn list_tabs_in_space(&self, space_id: &str) -> Result<Vec<TabEntry>, AppFailure> {
+        self.note(format!("list_tabs_in_space({space_id})"));
+        self.inner.list_tabs_in_space(space_id).await
+    }
+    async fn tab_lines(&self, key: String) -> Result<Vec<TermLine>, AppFailure> {
+        self.inner.tab_lines(key).await
+    }
+    async fn switch_space(&self, space_id: String) -> Result<(), AppFailure> {
+        self.note(format!("switch_space({space_id})"));
+        self.inner.switch_space(space_id).await
+    }
+    async fn go_to_tab(&self, tab_id: u64) -> Result<(), AppFailure> {
+        self.note(format!("go_to_tab({tab_id})"));
+        self.inner.go_to_tab(tab_id).await
+    }
+    async fn detach_session(&self, id: String) -> Result<(), AppFailure> {
+        self.inner.detach_session(id).await
+    }
+    async fn focus_pane(&self, pane_id: u32, is_plugin: bool) -> Result<(), AppFailure> {
+        self.note(format!("focus_pane({pane_id})"));
+        self.inner.focus_pane(pane_id, is_plugin).await
+    }
+}
+
+/// A live controller whose attached pane just exited with the gone-pane payload.
+fn wired_after_exit(
+    rt: &tokio::runtime::Runtime,
+    session: &str,
+) -> (Arc<TerminalController>, Arc<Wire>) {
+    let _state = MuxrApp.init();
+    let wire = Wire::over(expect_terminal_repository());
+    let c = Arc::new(TerminalController::new(
+        Arc::clone(&wire) as SharedTerminalRepository,
+        expect_sessions_repository(),
+        expect_preferences_repository(),
+        Some(session.to_string()),
+    ));
+    c.attach_live();
+    rt.block_on(c.load());
+    assert!(c.mirror_link(LinkStatus::Connected, Some(ENDED_ID.to_string())));
+    assert!(!c.mirror_link(LinkStatus::PaneGone, Some(ENDED_ID.to_string())));
+    wire.take();
+    (c, wire)
+}
+
+fn lose_the_pane(h: &mut Harness) -> Arc<TerminalController> {
+    let c = debug_controller().expect("a terminal screen is mounted");
+    c.mirror_link(LinkStatus::Connected, Some(ENDED_ID.to_string()));
+    assert!(!c.mirror_link(LinkStatus::PaneGone, Some(ENDED_ID.to_string())));
+    h.settle();
+    c
+}
+
+fn assert_no_pane(h: &Harness, button: bool) {
+    let labels = node_labels(&h.root);
+    assert!(labels.iter().any(|l| l == NO_PANE), "{labels:?}");
+    assert_eq!(
+        labels.iter().any(|l| l == PANES_BUTTON),
+        button,
+        "{labels:?}"
+    );
+    assert!(!labels.iter().any(|l| l == LINK_LEAVE), "{labels:?}");
+    let values = support::node_values(&h.root);
+    assert!(!values.iter().any(|v| v == LINK_CLOSED), "{values:?}");
+}
+
+#[test]
+fn a_gone_pane_on_a_phone_says_no_pane_open_and_offers_the_panes_sheet() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    let c = lose_the_pane(&mut h);
+    assert_no_pane(&h, true);
+
+    clear_verb_log_for_tests();
+    h.tap_label(PANES_BUTTON);
+    h.settle();
+    assert!(
+        support::node_values(&h.root)
+            .iter()
+            .any(|v| v == SHEET_LABEL),
+        "the button opens the panes-and-tabs sheet"
+    );
+    let rows = tree_pane_rows(&h.frame());
+    h.tap(center(rows[1]));
+    h.pump_until("the pick to ask for a fresh attach", |_| {
+        c.revive_requests.get_untracked() == 1
+    });
+    assert!(
+        verb_log_for_tests().is_empty(),
+        "{:?}",
+        verb_log_for_tests()
+    );
+    assert_eq!(c.link.get_untracked(), Some(LinkStatus::PaneGone));
+}
+
+#[test]
+fn a_gone_pane_on_a_tablet_shows_the_same_state_without_the_button() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = support::mount_with_metrics(
+        Some(support::metrics_at(SURFACE.width, SURFACE.height)),
+        Harness::mount,
+    );
+    h.enter_demo();
+    lose_the_pane(&mut h);
+    assert_no_pane(&h, false);
+    assert!(
+        !support::node_values(&h.root).iter().any(|v| v == "exited"),
+        "the rail's chip never reads exited for a gone pane"
+    );
+}
+
+#[test]
+fn an_exit_with_another_payload_leaves_no_pane_open_only_while_the_session_is_listed() {
+    let _g = serial();
+    let _ambient = setup();
+    for (session, gone) in [
+        ("zellij:dev", false),
+        ("herdr:herdr", false),
+        (SESSION_ID, true),
+    ] {
+        let mut h = Harness::mount_session(session);
+        h.enter_demo();
+        let c = debug_controller().expect("a terminal screen is mounted");
+        c.mirror_link(LinkStatus::Connected, Some(ENDED_ID.to_string()));
+        assert!(!c.mirror_link(LinkStatus::Closed, Some(ENDED_ID.to_string())));
+        assert!(c.take_exit_check());
+        drive(Box::pin({
+            let c = Arc::clone(&c);
+            async move { c.resolve_exit().await }
+        }));
+        h.settle();
+        if gone {
+            assert_eq!(
+                c.link.get_untracked(),
+                Some(LinkStatus::Closed),
+                "{session}"
+            );
+            assert!(
+                support::node_values(&h.root)
+                    .iter()
+                    .any(|v| v == LINK_CLOSED),
+                "{session}"
+            );
+            assert!(node_labels(&h.root).iter().any(|l| l == LINK_LEAVE));
+        } else {
+            assert_eq!(
+                c.link.get_untracked(),
+                Some(LinkStatus::PaneGone),
+                "{session}"
+            );
+            assert_no_pane(&h, true);
+        }
+        drop(h);
+    }
+}
+
+#[test]
+fn a_herdr_pick_with_no_pane_aims_the_fresh_attach_and_sends_nothing_on_the_ended_id() {
+    let _g = serial();
+    let _ambient = setup();
+    let rt = runtime();
+    let (c, wire) = wired_after_exit(&rt, "herdr:herdr");
+
+    rt.block_on(async {
+        c.reload_tabs().await;
+        c.expand_space("zelli_mobile".to_string()).await;
+    });
+    assert_eq!(
+        wire.take(),
+        [
+            "list_tabs_in_space(forgekit)@c-1",
+            "list_tabs_in_space(zelli_mobile)@c-1"
+        ],
+        "with no relay every tab read names its space"
+    );
+
+    assert!(rt.block_on(c.commit_pane_in_space(
+        "zelli_mobile".to_string(),
+        "worker".to_string(),
+        21,
+        false
+    )));
+    assert!(wire.take().is_empty(), "the pick itself reaches no server");
+    let target = c.resume_slot().target();
+    assert_eq!(
+        (target.space_id.as_deref(), target.tab_id, target.pane_id),
+        (Some("zelli_mobile"), Some(102), Some(21))
+    );
+    assert_eq!(c.revive_requests.get_untracked(), 1);
+
+    assert!(!c.mirror_link(LinkStatus::Connected, Some(ENDED_ID.to_string())));
+    assert!(c.mirror_link(LinkStatus::Connected, Some(FRESH_ID.to_string())));
+    rt.block_on(c.settle_attach());
+
+    let calls = wire.take();
+    assert!(calls.contains(&"list_spaces@c-2".to_string()), "{calls:?}");
+    assert!(calls.contains(&"list_tabs@c-2".to_string()), "{calls:?}");
+    assert!(calls.iter().all(|call| call.ends_with("@c-2")), "{calls:?}");
+    assert!(!calls.iter().any(|call| is_verb(call)), "{calls:?}");
+    assert_eq!(c.link.get_untracked(), Some(LinkStatus::Connected));
+    assert!(!c.is_pane_gone());
+}
+
+#[test]
+fn a_zellij_pick_with_no_pane_focuses_the_pane_exactly_once_on_the_fresh_id() {
+    let _g = serial();
+    let _ambient = setup();
+    let rt = runtime();
+    let (c, wire) = wired_after_exit(&rt, "zellij:dev");
+
+    assert!(rt.block_on(c.commit_pane("btop".to_string(), 11, false)));
+    assert!(wire.take().is_empty());
+
+    assert!(c.mirror_link(LinkStatus::Connected, Some(FRESH_ID.to_string())));
+    rt.block_on(c.settle_attach());
+
+    let calls = wire.take();
+    let verbs: Vec<&String> = calls.iter().filter(|call| is_verb(call)).collect();
+    assert_eq!(verbs, ["focus_pane(11)@c-2"], "{calls:?}");
+    assert!(calls.iter().all(|call| call.ends_with("@c-2")), "{calls:?}");
+}
+
+#[test]
+fn a_failed_fresh_attach_stays_on_no_pane_open_with_a_toast() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::mount();
+    h.enter_demo();
+    await_workspace(&mut h);
+    let c = lose_the_pane(&mut h);
+    app_toasts().clear();
+
+    drive(Box::pin({
+        let c = Arc::clone(&c);
+        async move {
+            assert!(c.commit_pane("btop".to_string(), 11, false).await);
+        }
+    }));
+    assert!(
+        app_toasts().pending_untracked().is_empty(),
+        "a pick alone toasts nothing"
+    );
+    assert!(c.revive_failed(LinkStatus::Reconnecting, 1));
+    h.settle();
+
+    assert!(!app_toasts().pending_untracked().is_empty());
+    assert_eq!(c.link.get_untracked(), Some(LinkStatus::PaneGone));
+    assert_no_pane(&h, true);
 }

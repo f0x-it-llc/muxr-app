@@ -10,8 +10,9 @@ pub enum LinkStatus {
     Connected,
     /// The schedule ran out or the credential expired; the screen's retry resets it.
     Disconnected,
-    /// The session exited; nothing arrives again.
+    /// The session exited, nothing arrives again; [`PaneGone`](Self::PaneGone): only its pane did.
     Closed,
+    PaneGone,
 }
 
 /// Mirrors the wire's `MouseKind`, which also reserves press and drag values.

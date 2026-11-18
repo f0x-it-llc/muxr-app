@@ -15,7 +15,7 @@ use frust::authoring::{
 use frust::{
     Align, Alignment, AnyView, BorderStyle, CrossAxisAlignment, EdgeInsets, Either, FlexChild,
     FlexView, GestureDetector, IconSource, Padding, SizedBox, Theme, any, column, container,
-    flexible, icon, icons, inflexible, text,
+    flexible, icon, icons, inflexible, stack, text,
 };
 use frust_glyph::motion::GlyphStagger;
 use frust_glyph::{
@@ -763,7 +763,10 @@ fn disclosure_row<State: 'static>(
     centered_row(children)
 }
 
-/// With an overflow button only the content presses, so the button's press never also taps the row.
+/// The whole framed card presses, padding included. In the rail the overflow button is a sibling
+/// stacked above it: hit-testing is topmost-first, so the button takes its own press and never also
+/// taps the row. The button sits `pad.top` down, which is its centre while the content is no taller
+/// than the button's own box.
 fn boxed_row<State: 'static>(
     content: FlexView<State>,
     boxed: RowBox,
@@ -779,11 +782,27 @@ fn boxed_row<State: 'static>(
     };
     match overflow {
         None => Either::Left(pressable(frame(content), on_tap, on_hold)),
-        Some(button) => Either::Right(frame(centered_row(vec![
-            flexible(1, pressable(content, on_tap, on_hold)),
-            h_gap(spacing::TIGHT),
-            inflexible(button),
-        ]))),
+        Some(button) => {
+            let card = frame(centered_row(vec![
+                flexible(1, content),
+                h_gap(spacing::TIGHT),
+                inflexible(SizedBox::<State>(Some(OVERFLOW_BOX), Some(OVERFLOW_BOX))),
+            ]));
+            let button_layer = Padding(
+                EdgeInsets {
+                    left: 0.0,
+                    top: boxed.pad.top,
+                    right: boxed.pad.right,
+                    bottom: 0.0,
+                },
+                Align(Alignment::TOP_RIGHT, button),
+            );
+            Either::Right(
+                stack()
+                    .child(pressable(card, on_tap, on_hold))
+                    .child(button_layer),
+            )
+        }
     }
 }
 
@@ -1012,6 +1031,7 @@ mod tests {
         panes: Vec<(Option<String>, String, u32)>,
         renames: Vec<String>,
         creates: Vec<String>,
+        menus: Vec<String>,
     }
 
     fn pane(id: u32, title: &str, focused: bool) -> PaneEntry {
@@ -1071,6 +1091,10 @@ mod tests {
     }
 
     fn actions(mutating: bool) -> TreeActions<Log> {
+        actions_with(mutating, None)
+    }
+
+    fn actions_with(mutating: bool, on_menu: Option<PressMenu<Log>>) -> TreeActions<Log> {
         TreeActions {
             on_space: Rc::new(|log: &mut Log, id: &str, expanded: bool| {
                 log.spaces.push((id.to_string(), expanded));
@@ -1100,7 +1124,7 @@ mod tests {
                 on_new_pane: Rc::new(|log: &mut Log, path: &TabPath| {
                     log.creates.push(format!("pane:{}", path.tab_key));
                 }),
-                on_menu: None,
+                on_menu,
             }),
         }
     }
@@ -1566,6 +1590,110 @@ mod tests {
             });
         }
         assert_eq!(worst_status(panes.iter()), Some(AgentStatus::Done));
+    }
+
+    fn docked_actions() -> TreeActions<Log> {
+        let menu: PressMenu<Log> = Rc::new(|log: &mut Log, _anchor: Rect, target: &RowTarget| {
+            log.menus.push(format!("{target:?}"));
+        });
+        actions_with(true, Some(menu))
+    }
+
+    /// The card's left edge, inside its padding and clear of every glyph.
+    fn in_padding((origin, size): (Point, Size)) -> Point {
+        Point::new(origin.x + 1.5, origin.y + size.height / 2.0)
+    }
+
+    /// The overflow button's centre, `pad_right` in from the card's right edge.
+    fn button_of((origin, size): (Point, Size), pad_right: f64) -> Point {
+        Point::new(
+            origin.x + size.width - pad_right - OVERFLOW_BOX / 2.0,
+            origin.y + size.height / 2.0,
+        )
+    }
+
+    fn docked_rows() -> (Vec<Space>, Vec<TabEntry>) {
+        (vec![space("ws-1", true)], tabs())
+    }
+
+    macro_rules! docked_tree {
+        ($spaces:expr, $tabs:expr, $acts:expr) => {
+            |_state: &mut Log| {
+                tree_body(
+                    &TreeData {
+                        spaces: &$spaces,
+                        tabs: &$tabs,
+                        browsed: None,
+                        expanded_space: Some("ws-1"),
+                        expanded_tab: Some("devbox"),
+                        has_spaces: true,
+                    },
+                    &$acts,
+                    TreeMode::Docked,
+                )
+            }
+        };
+    }
+
+    fn widest_pill(rec: &Rec) -> (Point, Size) {
+        rec.filled_at(RADIUS_FULL)
+            .into_iter()
+            .max_by(|a, b| a.1.width.total_cmp(&b.1.width))
+            .expect("the tree painted pane pills")
+    }
+
+    #[test]
+    fn a_docked_tap_in_the_card_padding_acts_on_each_row() {
+        let (spaces, tabs) = docked_rows();
+        let acts = docked_actions();
+        let mut logic = docked_tree!(spaces, tabs, acts);
+        let mut rig = Rig::new();
+        let rec = rig.frame(&mut logic, 0.0);
+
+        rig.tap(in_padding(rec.filled_at(CARD_RADIUS)[0]));
+        assert_eq!(rig.state.spaces, vec![("ws-1".to_string(), true)]);
+        rig.tap(in_padding(rec.filled_at(TAB_RADIUS)[0]));
+        assert_eq!(rig.state.tabs, vec![("alpha".to_string(), false)]);
+        rig.tap(in_padding(widest_pill(&rec)));
+        assert_eq!(rig.state.panes.len(), 1, "exactly one commit");
+        assert_eq!(rig.state.panes[0].1, "devbox");
+        assert!(rig.state.menus.is_empty());
+    }
+
+    #[test]
+    fn a_docked_hold_in_the_card_padding_renames_each_row() {
+        let (spaces, tabs) = docked_rows();
+        let acts = docked_actions();
+        let mut logic = docked_tree!(spaces, tabs, acts);
+        let mut rig = Rig::new();
+        let rec = rig.frame(&mut logic, 0.0);
+
+        rig.hold(&mut logic, in_padding(rec.filled_at(CARD_RADIUS)[0]));
+        rig.hold(&mut logic, in_padding(rec.filled_at(TAB_RADIUS)[0]));
+        rig.hold(&mut logic, in_padding(widest_pill(&rec)));
+        assert_eq!(rig.state.renames.len(), 3, "{:?}", rig.state.renames);
+        assert!(rig.state.renames[0].starts_with("space:"));
+        assert!(rig.state.renames[1].starts_with("tab:"));
+        assert!(rig.state.renames[2].starts_with("pane:"));
+        assert!(rig.state.spaces.is_empty() && rig.state.tabs.is_empty());
+        assert!(rig.state.panes.is_empty());
+    }
+
+    #[test]
+    fn a_docked_overflow_button_opens_its_menu_and_never_taps_the_row() {
+        let (spaces, tabs) = docked_rows();
+        let acts = docked_actions();
+        let mut logic = docked_tree!(spaces, tabs, acts);
+        let mut rig = Rig::new();
+        let rec = rig.frame(&mut logic, 0.0);
+
+        rig.tap(button_of(rec.filled_at(CARD_RADIUS)[0], CARD_PAD.right));
+        rig.tap(button_of(rec.filled_at(TAB_RADIUS)[0], TAB_PAD.right));
+        rig.tap(button_of(widest_pill(&rec), PANE_PAD.right));
+        assert_eq!(rig.state.menus.len(), 3, "{:?}", rig.state.menus);
+        assert!(rig.state.spaces.is_empty(), "{:?}", rig.state.spaces);
+        assert!(rig.state.tabs.is_empty(), "{:?}", rig.state.tabs);
+        assert!(rig.state.panes.is_empty(), "{:?}", rig.state.panes);
     }
 
     #[test]
