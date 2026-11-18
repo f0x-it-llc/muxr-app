@@ -1,8 +1,7 @@
 // VENDORED COPY — the body below this block is byte-for-byte upstream.
 //
 // Source: `muxrd/proto/muxr.proto` in the `f0x-it-llc/muxr-core` repo, rev
-// `8e36efc` (branch `fix/create-targets-caller`, muxr-core pull request 48;
-// re-copy from the `main` rev once it merges). `build.rs` compiles
+// `2063cba` (branch `main`). `build.rs` compiles
 // this file (protox -> tonic-prost-build) into the `muxr.v1` module
 // `src/net/proto.rs` includes; it is the single definition of the wire this
 // app speaks, so nothing else in the tree may restate a field number, an enum
