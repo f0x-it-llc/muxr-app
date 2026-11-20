@@ -865,7 +865,8 @@ fn pane_target(
     }
 }
 
-/// Error prefixes a routed create answers with when the object may exist (`muxr/v1/pane.proto`, `NewPaneReq`).
+/// Error prefixes a routed create answers with when the object may exist
+/// (`muxr/v1/pane.proto`, `NewPaneReq`).
 const CREATED_NOT_ATTACHED: &str = "created-not-attached:";
 const CREATE_OUTCOME_UNKNOWN: &str = "create-outcome-unknown:";
 
