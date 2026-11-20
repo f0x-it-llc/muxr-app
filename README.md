@@ -73,7 +73,7 @@ frust run --flavor production
 - `src/ui/` holds the shared widgets and painting helpers.
 - `src/fonts/` is the font catalog and downloader.
 - `tests/` holds the headless test suites.
-- `proto/muxr.proto` is vendored from muxr-core.
+- `proto/muxr/v1/` is vendored from muxr-core, see `proto/VENDORED.md`.
 - `docs/` holds design mocks, icon masters and the store badges.
 
 ## Contributing

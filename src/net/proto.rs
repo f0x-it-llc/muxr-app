@@ -1,4 +1,4 @@
-//! The `muxr.v1` service generated from `proto/muxr.proto`. Wire shapes live only in the
+//! The `muxr.v1` service generated from `proto/muxr/v1/`. Wire shapes live only in the
 //! proto; the server stubs exist for in-process test fixtures.
 
 // The generated file carries its own `#![allow(...)]`; never widen it to the crate.
