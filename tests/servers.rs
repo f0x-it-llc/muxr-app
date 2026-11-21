@@ -1959,35 +1959,37 @@ fn a_failed_renewal_that_lands_on_its_automatic_retry_shows_no_notice() {
     let _g = serial();
     let _ambient = setup();
     let _rig = notice_rig(Some("9.9.9"));
-    let (mut h, before) = failed_renewal_on_a(300, false);
+    let (mut h, before) = failed_renewal_on_a(PAST_NOTICE_MS + 400, false);
     wait_out_the_notice(&mut h);
+    assert_eq!(dial_generation(), before + 1, "the retry has not fired yet");
 
-    h.pump_until(|_| {
+    // Watched from before the retry fires until well after it lands.
+    h.pump_until(|h| {
+        assert!(
+            !notice_shown(h),
+            "a retry is not a connect: {:?}",
+            h.labels()
+        );
         dial_generation() > before + 1
             && connected_endpoint().as_deref() == Some(A_ENDPOINT)
             && switcher().pending_reconnect().is_none()
     });
-    let runtime = ReactiveRuntime::get().expect("setup() installs the reactive runtime");
-    let end = Instant::now() + Duration::from_millis(300);
-    while Instant::now() < end {
-        runtime.pump_local();
-        h.frame();
-        assert!(
-            !notice_shown(&h),
-            "a retry is not a connect: {:?}",
-            h.labels()
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    pump_for(&mut h, 300, || {});
+    assert!(!notice_shown(&h), "{:?}", h.labels());
 }
 
 #[test]
-fn a_showing_notice_survives_the_controllers_own_renewal() {
+fn a_showing_notice_survives_the_controllers_own_renewal_and_keeps_its_deadline() {
+    const LONG_NOTICE_MS: u64 = 1_500;
+    const BEFORE_RENEWAL_MS: u64 = 800;
+
     let _g = serial();
     let _ambient = setup();
     let _rig = notice_rig(Some("9.9.9"));
-    set_update_notice_ms_for_tests(5_000);
+    set_update_notice_ms_for_tests(LONG_NOTICE_MS);
     let mut h = connected_with_the_notice_up();
+    let shown_at = Instant::now();
+    pump_for(&mut h, BEFORE_RENEWAL_MS, || {});
 
     let before = epoch();
     assert!(
@@ -2000,4 +2002,11 @@ fn a_showing_notice_survives_the_controllers_own_renewal() {
             && banner().is_none()
     });
     h.pump_until(notice_shown);
+
+    h.pump_until(|h| !notice_shown(h));
+    let lasted = shown_at.elapsed();
+    assert!(
+        lasted < Duration::from_millis(BEFORE_RENEWAL_MS + LONG_NOTICE_MS - 200),
+        "the renewal armed a second notice: it lasted {lasted:?}"
+    );
 }

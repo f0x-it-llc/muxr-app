@@ -274,10 +274,10 @@ impl ServersSwitcherController {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A renewal in flight or waiting on its backoff: the connection is down, but not by the user.
+    /// A renewal dial in flight: the connection is down for the moment it takes, and not by the
+    /// user. One that failed and waits on its backoff has left the connection down for real.
     fn renewal_underway(&self) -> bool {
         self.bg().as_ref().is_some_and(|dial| dial.renewal)
-            || self.pending().as_ref().is_some_and(|wait| wait.renewal)
     }
 
     /// The newer muxrd release to announce in the bar, once per user connect and for
