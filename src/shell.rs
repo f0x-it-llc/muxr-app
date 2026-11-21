@@ -19,7 +19,7 @@ use crate::features::servers::di::{
 };
 use crate::features::servers::domain::entities::{FaceKind, ServerFace};
 use crate::features::servers::presentation::controller::{
-    ReconnectBanner, ServersSwitcherController, SwitchGate,
+    ReconnectBanner, ServersSwitcherController, SwitchGate, update_notice_text,
 };
 use crate::features::servers::presentation::widgets::{bar::servers_bar, faces, label_row};
 use crate::features::sessions::presentation::widgets::{
@@ -216,15 +216,23 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<impl View<A
     {
         title = host;
     }
-    let banner = switcher.banner.get().map(|state| {
-        let variant = match state {
-            ReconnectBanner::Connected => BannerVariant::Success,
-            ReconnectBanner::Connecting { .. } | ReconnectBanner::Failed { .. } => {
-                BannerVariant::Warning
-            }
-        };
-        banner_spec(state.text(), variant)
-    });
+    // Read on every build so its timer starts with the connect; the reconnect banner owns the slot.
+    let notice = switcher.update_notice();
+    let banner = switcher
+        .banner
+        .get()
+        .map(|state| {
+            let variant = match state {
+                ReconnectBanner::Connected => BannerVariant::Success,
+                ReconnectBanner::Connecting { .. } | ReconnectBanner::Failed { .. } => {
+                    BannerVariant::Warning
+                }
+            };
+            banner_spec(state.text(), variant)
+        })
+        .or_else(|| {
+            notice.map(|version| banner_spec(update_notice_text(&version), BannerVariant::Warning))
+        });
     let mut bar = app_bar::<AppState>(title)
         .banner(banner)
         .title_direction(direction)

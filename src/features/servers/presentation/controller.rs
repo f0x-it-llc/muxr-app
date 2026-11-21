@@ -140,6 +140,48 @@ struct BackgroundDial {
     dialed: Option<u64>,
 }
 
+/// The newer-release notice of one user connect. `epoch` is the connection epoch it was decided for;
+/// `version` is what the bar shows until the timer of generation `id` clears it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct UpdateNotice {
+    epoch: u64,
+    version: Option<String>,
+    id: u64,
+}
+
+impl UpdateNotice {
+    /// A connection change this notice has not seen is a user connect, a disconnect or a switch:
+    /// each decides the notice afresh from what the server reports. Answers the timer to arm.
+    fn observe(&mut self, epoch: u64, available: Option<&str>) -> Option<u64> {
+        if self.epoch == epoch {
+            return None;
+        }
+        self.epoch = epoch;
+        self.version = available.map(str::to_string);
+        self.version.as_ref()?;
+        self.id += 1;
+        Some(self.id)
+    }
+
+    /// The controller's own renewal of the live server is not a user connect: it adopts the new
+    /// epoch without deciding anything.
+    fn adopt(&mut self, epoch: u64) {
+        self.epoch = epoch;
+    }
+
+    fn expire(&mut self, id: u64) -> bool {
+        if self.id != id || self.version.is_none() {
+            return false;
+        }
+        self.version = None;
+        true
+    }
+}
+
+pub fn update_notice_text(version: &str) -> String {
+    format!("muxrd {version} is available")
+}
+
 #[derive(Clone, Debug)]
 struct PendingReconnect {
     endpoint: String,
@@ -174,6 +216,11 @@ pub struct ServersSwitcherController {
     /// Bumped by every retry and cancel: a backoff timer fires only if it still holds.
     retry_generation: AtomicU64,
     trouble: AtomicBool,
+    update_notice: Mutex<UpdateNotice>,
+    /// Bumped when a notice's time is up, so the bar that read it rebuilds.
+    pub update_notice_tick: RwSignal<u64>,
+    /// The endpoint whose session this controller is renewing in place.
+    renewing: Mutex<Option<String>>,
 }
 
 impl ServersSwitcherController {
@@ -215,7 +262,49 @@ impl ServersSwitcherController {
             pending: Mutex::new(None),
             retry_generation: AtomicU64::new(0),
             trouble: AtomicBool::new(false),
+            update_notice: Mutex::new(UpdateNotice::default()),
+            update_notice_tick: RwSignal::new(0),
+            renewing: Mutex::new(None),
         }
+    }
+
+    fn notice(&self) -> std::sync::MutexGuard<'_, UpdateNotice> {
+        self.update_notice
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn renewing(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.renewing.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The newer muxrd release to announce in the bar, once per user connect and for
+    /// `update_notice_ms`. Read by the bar on every build: the state it keeps is plain, so reading
+    /// never re-triggers the build, and only the expiry timer writes a signal.
+    pub fn update_notice(self: &Arc<Self>) -> Option<String> {
+        self.update_notice_tick.get();
+        let epoch = self.connection.connection_epoch.get();
+        let info = self.connection.server_info.get_untracked();
+        let available = info.as_ref().and_then(|info| info.update_available());
+        let armed = self.notice().observe(epoch, available);
+        if let Some(id) = armed {
+            self.expire_notice_later(id);
+        }
+        info.as_ref()?;
+        self.notice().version.clone()
+    }
+
+    fn expire_notice_later(self: &Arc<Self>, id: u64) {
+        let controller = Arc::clone(self);
+        spawn_local(async move {
+            let after = crate::features::servers::di::update_notice_ms();
+            clean_signals::time::sleep(Duration::from_millis(after)).await;
+            if controller.notice().expire(id) {
+                controller
+                    .update_notice_tick
+                    .set(controller.update_notice_tick.get_untracked() + 1);
+            }
+        });
     }
 
     /// A saved list that cannot be read leaves the previous strip in place.
@@ -530,6 +619,7 @@ impl ServersSwitcherController {
         if self.bg().take().is_none() {
             return false;
         }
+        *self.renewing() = None;
         self.connection.disconnect();
         self.set_banner(None);
         true
@@ -546,6 +636,7 @@ impl ServersSwitcherController {
             self.fail(endpoint, epoch, NO_CREDENTIAL_MESSAGE.to_string());
             return;
         };
+        *self.renewing() = None;
         let id = self.arm_bg(endpoint, row.host.clone(), page);
         self.release_claim();
         // Faces first, so the target is the live card when the stage closes.
@@ -572,6 +663,7 @@ impl ServersSwitcherController {
             return false;
         };
         let page = self.live_page(&endpoint);
+        *self.renewing() = Some(endpoint.clone());
         let id = self.arm_bg(&endpoint, row.host.clone(), page);
         self.refresh_faces();
         self.dial_bg(&endpoint, &row, token, id);
@@ -673,6 +765,10 @@ impl ServersSwitcherController {
             return;
         }
         self.cancel_pending();
+        if self.renewing().take().as_deref() == Some(endpoint) {
+            self.notice()
+                .adopt(self.connection.connection_epoch.get_untracked());
+        }
         let mut failures = self.failures.get_untracked();
         failures.remove(endpoint);
         self.failures.set(failures);
@@ -728,6 +824,7 @@ impl ServersSwitcherController {
             return;
         }
         self.cancel_pending();
+        *self.renewing() = None;
         self.clear_banner_later(
             generation,
             crate::features::servers::di::banner_failure_ms(),
@@ -887,6 +984,7 @@ impl ServersSwitcherController {
             self.fail(endpoint, epoch, NO_CREDENTIAL_MESSAGE.to_string());
             return;
         };
+        *self.renewing() = None;
         let controller = Arc::clone(self);
         let dialed = endpoint.to_string();
         self.keyring_unlock
@@ -976,6 +1074,7 @@ impl ServersSwitcherController {
         *self.bg() = None;
         self.cancel_pending();
         self.trouble.store(false, Ordering::SeqCst);
+        *self.renewing() = None;
         self.set_banner(None);
         self.seed.set(None);
         self.connection
@@ -1770,6 +1869,55 @@ mod tests {
         rig.controller.report_trouble(true);
         rig.controller.report_recovered();
         assert_eq!(rig.controller.banner.get_untracked(), None);
+    }
+
+    #[test]
+    fn a_new_connection_epoch_with_an_update_arms_one_notice() {
+        let mut notice = UpdateNotice::default();
+        assert_eq!(notice.observe(1, Some("9.9.9")), Some(1));
+        assert_eq!(notice.version.as_deref(), Some("9.9.9"));
+        assert_eq!(notice.observe(1, Some("9.9.9")), None, "the same epoch");
+        assert_eq!(
+            notice.observe(1, Some("9.9.10")),
+            None,
+            "a heartbeat's fresher answer is not a connect"
+        );
+        assert_eq!(notice.version.as_deref(), Some("9.9.9"));
+    }
+
+    #[test]
+    fn a_connection_without_an_update_and_a_disconnect_clear_the_notice() {
+        let mut notice = UpdateNotice::default();
+        notice.observe(1, Some("9.9.9"));
+        assert_eq!(notice.observe(2, None), None);
+        assert_eq!(notice.version, None);
+        assert_eq!(
+            notice.observe(3, Some("9.9.9")),
+            Some(2),
+            "the next connect"
+        );
+    }
+
+    #[test]
+    fn an_adopted_epoch_is_never_announced() {
+        let mut notice = UpdateNotice::default();
+        let first = notice.observe(1, Some("9.9.9")).expect("armed");
+        assert!(notice.expire(first));
+        notice.adopt(3);
+        assert_eq!(notice.observe(3, Some("9.9.9")), None);
+        assert_eq!(notice.version, None);
+    }
+
+    #[test]
+    fn only_the_timer_of_the_showing_notice_expires_it() {
+        let mut notice = UpdateNotice::default();
+        let first = notice.observe(1, Some("9.9.9")).expect("armed");
+        notice.observe(2, None);
+        let second = notice.observe(3, Some("9.9.9")).expect("armed again");
+        assert!(!notice.expire(first), "a superseded timer");
+        assert_eq!(notice.version.as_deref(), Some("9.9.9"));
+        assert!(notice.expire(second));
+        assert!(!notice.expire(second), "already cleared");
     }
 
     #[test]
