@@ -138,6 +138,8 @@ struct BackgroundDial {
     endpoint: String,
     id: u64,
     dialed: Option<u64>,
+    /// The controller renewing the live server in place, as opposed to a switch the user asked for.
+    renewal: bool,
 }
 
 /// The newer-release notice of one user connect. `epoch` is the connection epoch it was decided for;
@@ -186,6 +188,7 @@ pub fn update_notice_text(version: &str) -> String {
 struct PendingReconnect {
     endpoint: String,
     attempt: u32,
+    renewal: bool,
 }
 
 pub struct ServersSwitcherController {
@@ -219,8 +222,6 @@ pub struct ServersSwitcherController {
     update_notice: Mutex<UpdateNotice>,
     /// Bumped when a notice's time is up, so the bar that read it rebuilds.
     pub update_notice_tick: RwSignal<u64>,
-    /// The endpoint whose session this controller is renewing in place.
-    renewing: Mutex<Option<String>>,
 }
 
 impl ServersSwitcherController {
@@ -264,7 +265,6 @@ impl ServersSwitcherController {
             trouble: AtomicBool::new(false),
             update_notice: Mutex::new(UpdateNotice::default()),
             update_notice_tick: RwSignal::new(0),
-            renewing: Mutex::new(None),
         }
     }
 
@@ -274,23 +274,30 @@ impl ServersSwitcherController {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn renewing(&self) -> std::sync::MutexGuard<'_, Option<String>> {
-        self.renewing.lock().unwrap_or_else(PoisonError::into_inner)
+    /// A renewal in flight or waiting on its backoff: the connection is down, but not by the user.
+    fn renewal_underway(&self) -> bool {
+        self.bg().as_ref().is_some_and(|dial| dial.renewal)
+            || self.pending().as_ref().is_some_and(|wait| wait.renewal)
     }
 
     /// The newer muxrd release to announce in the bar, once per user connect and for
-    /// `update_notice_ms`. Read by the bar on every build: the state it keeps is plain, so reading
-    /// never re-triggers the build, and only the expiry timer writes a signal.
-    pub fn update_notice(self: &Arc<Self>) -> Option<String> {
+    /// `update_notice_ms`. Not a plain read: the bar calls it on every build, and the first build
+    /// after a connection change decides the notice and arms its timer. The state it keeps is
+    /// plain, so the call never re-triggers the build; only the expiry timer writes a signal.
+    pub fn observe_update_notice(self: &Arc<Self>) -> Option<String> {
         self.update_notice_tick.get();
         let epoch = self.connection.connection_epoch.get();
-        let info = self.connection.server_info.get_untracked();
-        let available = info.as_ref().and_then(|info| info.update_available());
-        let armed = self.notice().observe(epoch, available);
+        let Some(info) = self.connection.server_info.get_untracked() else {
+            // A renewal's own teardown decides nothing, so a showing notice survives it.
+            if !self.renewal_underway() {
+                self.notice().observe(epoch, None);
+            }
+            return None;
+        };
+        let armed = self.notice().observe(epoch, info.update_available());
         if let Some(id) = armed {
             self.expire_notice_later(id);
         }
-        info.as_ref()?;
         self.notice().version.clone()
     }
 
@@ -619,7 +626,6 @@ impl ServersSwitcherController {
         if self.bg().take().is_none() {
             return false;
         }
-        *self.renewing() = None;
         self.connection.disconnect();
         self.set_banner(None);
         true
@@ -636,8 +642,7 @@ impl ServersSwitcherController {
             self.fail(endpoint, epoch, NO_CREDENTIAL_MESSAGE.to_string());
             return;
         };
-        *self.renewing() = None;
-        let id = self.arm_bg(endpoint, row.host.clone(), page);
+        let id = self.arm_bg(endpoint, row.host.clone(), page, false);
         self.release_claim();
         // Faces first, so the target is the live card when the stage closes.
         self.refresh_faces();
@@ -663,8 +668,7 @@ impl ServersSwitcherController {
             return false;
         };
         let page = self.live_page(&endpoint);
-        *self.renewing() = Some(endpoint.clone());
-        let id = self.arm_bg(&endpoint, row.host.clone(), page);
+        let id = self.arm_bg(&endpoint, row.host.clone(), page, true);
         self.refresh_faces();
         self.dial_bg(&endpoint, &row, token, id);
         true
@@ -705,12 +709,19 @@ impl ServersSwitcherController {
         page
     }
 
-    fn arm_bg(self: &Arc<Self>, endpoint: &str, host: String, page: Arc<PageSnapshot>) -> u64 {
+    fn arm_bg(
+        self: &Arc<Self>,
+        endpoint: &str,
+        host: String,
+        page: Arc<PageSnapshot>,
+        renewal: bool,
+    ) -> u64 {
         let id = self.seed_generation.fetch_add(1, Ordering::SeqCst) + 1;
         *self.bg() = Some(BackgroundDial {
             endpoint: endpoint.to_string(),
             id,
             dialed: None,
+            renewal,
         });
         self.trouble.store(false, Ordering::SeqCst);
         // `Connecting` shows only if the dial is still pending after the delay; any later banner change fences it.
@@ -751,21 +762,21 @@ impl ServersSwitcherController {
         }
     }
 
-    fn finish_bg(&self, id: u64) -> bool {
+    /// The dial `id` named, if it is still the one in flight.
+    fn finish_bg(&self, id: u64) -> Option<BackgroundDial> {
         let mut bg = self.bg();
         if bg.as_ref().is_some_and(|dial| dial.id == id) {
-            *bg = None;
-            return true;
+            return bg.take();
         }
-        false
+        None
     }
 
     fn settle_bg(self: &Arc<Self>, endpoint: &str, id: u64) {
-        if !self.finish_bg(id) {
+        let Some(dial) = self.finish_bg(id) else {
             return;
-        }
+        };
         self.cancel_pending();
-        if self.renewing().take().as_deref() == Some(endpoint) {
+        if dial.renewal {
             self.notice()
                 .adopt(self.connection.connection_epoch.get_untracked());
         }
@@ -795,9 +806,9 @@ impl ServersSwitcherController {
 
     /// A `retryable` failure with nothing else connected keeps the target pending (banner kept, backoff armed); any other clears the banner after its timeout.
     fn fail_bg(self: &Arc<Self>, endpoint: &str, id: u64, message: String, retryable: bool) {
-        if !self.finish_bg(id) {
+        let Some(dial) = self.finish_bg(id) else {
             return;
-        }
+        };
         let mut failures = self.failures.get_untracked();
         failures.insert(endpoint.to_string(), message);
         self.failures.set(failures);
@@ -819,12 +830,12 @@ impl ServersSwitcherController {
             *self.pending() = Some(PendingReconnect {
                 endpoint: endpoint.to_string(),
                 attempt,
+                renewal: dial.renewal,
             });
             self.schedule_retry(attempt);
             return;
         }
         self.cancel_pending();
-        *self.renewing() = None;
         self.clear_banner_later(
             generation,
             crate::features::servers::di::banner_failure_ms(),
@@ -895,6 +906,7 @@ impl ServersSwitcherController {
             endpoint: pending.endpoint.clone(),
             id,
             dialed: None,
+            renewal: pending.renewal,
         });
         let shown = self.banner_generation.load(Ordering::SeqCst);
         self.show_connecting_later(shown, row.host.clone());
@@ -984,7 +996,6 @@ impl ServersSwitcherController {
             self.fail(endpoint, epoch, NO_CREDENTIAL_MESSAGE.to_string());
             return;
         };
-        *self.renewing() = None;
         let controller = Arc::clone(self);
         let dialed = endpoint.to_string();
         self.keyring_unlock
@@ -1074,7 +1085,6 @@ impl ServersSwitcherController {
         *self.bg() = None;
         self.cancel_pending();
         self.trouble.store(false, Ordering::SeqCst);
-        *self.renewing() = None;
         self.set_banner(None);
         self.seed.set(None);
         self.connection
@@ -1864,6 +1874,7 @@ mod tests {
             endpoint: "a:7777".to_string(),
             id: 1,
             dialed: None,
+            renewal: false,
         });
         rig.controller.set_banner(None);
         rig.controller.report_trouble(true);

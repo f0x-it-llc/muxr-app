@@ -217,7 +217,7 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<impl View<A
         title = host;
     }
     // Read on every build so its timer starts with the connect; the reconnect banner owns the slot.
-    let notice = switcher.update_notice();
+    let notice = switcher.observe_update_notice();
     let banner = switcher
         .banner
         .get()

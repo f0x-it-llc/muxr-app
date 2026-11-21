@@ -24,7 +24,7 @@ use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::{
-    BANNER_CONNECTING_DELAY_MS, PEER_TAIL, expect_servers_controller,
+    BANNER_CONNECTING_DELAY_MS, PEER_TAIL, UPDATE_NOTICE_DEFAULT_MS, expect_servers_controller,
     installed_session_renewer_for_tests, keep_peers, set_banner_connecting_delay_for_tests,
     set_banner_timings_for_tests, set_stage_clock_for_tests, set_update_notice_ms_for_tests,
     stage_settled, use_last_seen,
@@ -1813,7 +1813,7 @@ struct NoticeRig;
 impl Drop for NoticeRig {
     fn drop(&mut self) {
         set_mock_latest_version_for_tests(None);
-        set_update_notice_ms_for_tests(6_000);
+        set_update_notice_ms_for_tests(UPDATE_NOTICE_DEFAULT_MS);
         reset_reconnect_rig();
     }
 }
@@ -1952,4 +1952,52 @@ fn a_disconnect_clears_a_showing_notice_at_once() {
     h.frame();
     h.frame();
     assert!(!notice_shown(&h), "{:?}", h.labels());
+}
+
+#[test]
+fn a_failed_renewal_that_lands_on_its_automatic_retry_shows_no_notice() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(Some("9.9.9"));
+    let (mut h, before) = failed_renewal_on_a(300, false);
+    wait_out_the_notice(&mut h);
+
+    h.pump_until(|_| {
+        dial_generation() > before + 1
+            && connected_endpoint().as_deref() == Some(A_ENDPOINT)
+            && switcher().pending_reconnect().is_none()
+    });
+    let runtime = ReactiveRuntime::get().expect("setup() installs the reactive runtime");
+    let end = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < end {
+        runtime.pump_local();
+        h.frame();
+        assert!(
+            !notice_shown(&h),
+            "a retry is not a connect: {:?}",
+            h.labels()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_showing_notice_survives_the_controllers_own_renewal() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(Some("9.9.9"));
+    set_update_notice_ms_for_tests(5_000);
+    let mut h = connected_with_the_notice_up();
+
+    let before = epoch();
+    assert!(
+        switcher().reconnect_live(),
+        "the live server renews in place"
+    );
+    h.pump_until(|_| {
+        epoch() > before
+            && connected_endpoint().as_deref() == Some(A_ENDPOINT)
+            && banner().is_none()
+    });
+    h.pump_until(notice_shown);
 }

@@ -396,8 +396,16 @@ async fn open_session(
     Ok(info)
 }
 
+const MAX_VERSION_LEN: usize = 32;
+
+/// Shown verbatim in the bar and on the settings card, so anything that is not a dotted number is
+/// dropped rather than displayed.
 fn latest_version_of(version: &VersionInfo) -> Option<String> {
-    (!version.latest_version.is_empty()).then(|| version.latest_version.clone())
+    let latest = version.latest_version.as_str();
+    let dotted_number = !latest.is_empty()
+        && latest.len() <= MAX_VERSION_LEN
+        && latest.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+    dotted_number.then(|| latest.to_string())
 }
 
 fn server_info(
@@ -704,6 +712,7 @@ impl ConnectionController {
         let _release = ReleasePingClaim(&self.pinging);
 
         let client = self.client()?;
+        let epoch = self.connection_epoch.get_untracked();
         let started = Instant::now();
         let version = client
             .unauth()
@@ -713,6 +722,10 @@ impl ConnectionController {
             .into_inner();
         let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
 
+        // A reply that outlived its connection says nothing about the one that replaced it.
+        if self.connection_epoch.get_untracked() != epoch {
+            return None;
+        }
         // The measurement and the release notice are this call's to replace; the rest is the
         // handshake's.
         let info = self.server_info.get_untracked()?;
@@ -1222,6 +1235,21 @@ mod tests {
         let info = work.await.expect("the fixture accepts its own pin + token");
         controller.server_info.set(Some(info.clone()));
         (controller, info)
+    }
+
+    #[test]
+    fn only_a_dotted_number_is_kept_as_the_newer_release() {
+        let reported = |latest: &str| {
+            latest_version_of(&VersionInfo {
+                latest_version: latest.to_string(),
+                ..Default::default()
+            })
+        };
+        assert_eq!(reported("0.5.5").as_deref(), Some("0.5.5"));
+        assert_eq!(reported(""), None);
+        assert_eq!(reported("v0.5.5"), None);
+        assert_eq!(reported("0.5.5 — tap here"), None);
+        assert_eq!(reported(&"9".repeat(MAX_VERSION_LEN + 1)), None);
     }
 
     #[tokio::test]

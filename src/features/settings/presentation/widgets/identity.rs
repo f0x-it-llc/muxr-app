@@ -1,5 +1,6 @@
-//! Server settings' identity card: who the connected server is, in one block. An avatar tile, the saved label over the endpoint, a `connected` chip, a rule and one stat cell per fact (TLS posture, latency, a version per backend),
-//! then a second rule and the daemon's own version with a chip naming a newer release when the server knows one.
+//! Server settings' identity card: avatar, saved label over the endpoint and a `connected` chip;
+//! a rule and one stat cell per fact (TLS posture, latency, a version per backend); a second rule
+//! and the daemon's version, with a chip naming a newer release when the server knows one.
 
 use frust::authoring::text::TextOverflow;
 use frust::{

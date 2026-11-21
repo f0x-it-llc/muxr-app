@@ -38,7 +38,8 @@ pub fn set_banner_connecting_delay_for_tests(ms: u64) {
     BANNER_CONNECTING_MS.store(ms, Ordering::Relaxed);
 }
 
-static UPDATE_NOTICE_MS: AtomicU64 = AtomicU64::new(6_000);
+pub const UPDATE_NOTICE_DEFAULT_MS: u64 = 6_000;
+static UPDATE_NOTICE_MS: AtomicU64 = AtomicU64::new(UPDATE_NOTICE_DEFAULT_MS);
 
 pub fn update_notice_ms() -> u64 {
     UPDATE_NOTICE_MS.load(Ordering::Relaxed)
