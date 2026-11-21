@@ -822,6 +822,73 @@ fn the_identity_card_prints_the_live_servers_facts() {
     );
 }
 
+fn shown_text(h: &Harness) -> Vec<String> {
+    let mut shown = node_values(&h.root);
+    shown.extend(node_labels(&h.root));
+    shown
+}
+
+#[test]
+fn the_identity_card_prints_the_daemon_version_and_no_update_chip_when_current() {
+    let _g = serial();
+    let _ambient = setup();
+    muxr::connection::set_mock_latest_version_for_tests(None);
+    let h = Harness::connected();
+
+    let values = node_values(&h.root);
+    assert_eq!(
+        value_after(&values, "MUXRD"),
+        muxr::connection::MOCK_MUXRD_VERSION
+    );
+    let shown = shown_text(&h);
+    assert!(
+        !shown.iter().any(|text| text.contains("available")),
+        "a current server announces nothing: {shown:?}"
+    );
+}
+
+#[test]
+fn the_identity_card_names_the_newer_release_the_server_reports() {
+    struct ResetLatest;
+    impl Drop for ResetLatest {
+        fn drop(&mut self) {
+            muxr::connection::set_mock_latest_version_for_tests(None);
+        }
+    }
+
+    let _g = serial();
+    let _ambient = setup();
+    let _reset = ResetLatest;
+    muxr::connection::set_mock_latest_version_for_tests(Some("9.9.9"));
+    let h = Harness::connected();
+
+    let values = node_values(&h.root);
+    assert_eq!(
+        value_after(&values, "MUXRD"),
+        muxr::connection::MOCK_MUXRD_VERSION
+    );
+    let shown = shown_text(&h);
+    assert!(
+        shown.iter().any(|text| text == "9.9.9 available"),
+        "the update chip renders: {shown:?}"
+    );
+}
+
+#[test]
+fn a_disconnected_identity_card_says_not_connected_on_the_daemon_row() {
+    let _g = serial();
+    let _ambient = setup();
+    let h = Harness::mount();
+
+    let values = node_values(&h.root);
+    assert_eq!(value_after(&values, "MUXRD"), "not connected");
+    let shown = shown_text(&h);
+    assert!(
+        !shown.iter().any(|text| text.contains("available")),
+        "{shown:?}"
+    );
+}
+
 #[test]
 fn the_identity_card_prefers_the_saved_label_over_the_host() {
     let _g = serial();
