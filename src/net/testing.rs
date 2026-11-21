@@ -74,6 +74,7 @@ pub struct MuxrdFixture {
     actions: Arc<ActionLog>,
     agents: Arc<AgentScript>,
     connections: Arc<AtomicUsize>,
+    latest_version: Arc<Mutex<String>>,
     server: JoinHandle<()>,
 }
 
@@ -108,6 +109,7 @@ impl MuxrdFixture {
         let terminal = Arc::new(TerminalScript::default());
         let actions = Arc::new(ActionLog::default());
         let agents = Arc::new(AgentScript::default());
+        let latest_version = Arc::new(Mutex::new(String::new()));
         let router = Server::builder()
             .tls_config(ServerTlsConfig::new().identity(identity))
             .expect("the fixture identity is a valid server TLS config")
@@ -115,6 +117,7 @@ impl MuxrdFixture {
                 terminal: Arc::clone(&terminal),
                 actions: Arc::clone(&actions),
                 agents: Arc::clone(&agents),
+                latest_version: Arc::clone(&latest_version),
             }));
         let server = tokio::spawn(async move {
             // Torn down by abort, so a serve error at shutdown is expected.
@@ -129,8 +132,17 @@ impl MuxrdFixture {
             actions,
             agents,
             connections,
+            latest_version,
             server,
         }
+    }
+
+    /// What `GetVersion` reports as `latest_version` from now on; empty reports none.
+    pub fn report_latest_version(&self, version: &str) {
+        *self
+            .latest_version
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = version.to_string();
     }
 
     /// One per dial: a channel rebuild shows up as one more.
@@ -627,6 +639,7 @@ struct FixtureService {
     terminal: Arc<TerminalScript>,
     actions: Arc<ActionLog>,
     agents: Arc<AgentScript>,
+    latest_version: Arc<Mutex<String>>,
 }
 
 #[tonic::async_trait]
@@ -634,6 +647,11 @@ impl Muxr for FixtureService {
     async fn get_version(&self, _request: Request<Empty>) -> Result<Response<VersionInfo>, Status> {
         Ok(Response::new(VersionInfo {
             server_version: SERVER_VERSION.to_string(),
+            latest_version: self
+                .latest_version
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
             ..Default::default()
         }))
     }
