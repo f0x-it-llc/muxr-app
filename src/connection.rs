@@ -43,9 +43,17 @@ pub struct ServerInfo {
     pub available_backends: Vec<ServerBackend>,
     pub capabilities: BTreeSet<String>,
     pub is_read_only: bool,
+    /// The muxrd version as reported; empty when the server sent none.
+    pub server_version: String,
+    /// A muxrd release newer than `server_version`; the server does the comparison.
+    pub latest_version: Option<String>,
 }
 
 impl ServerInfo {
+    pub fn update_available(&self) -> Option<&str> {
+        self.latest_version.as_deref()
+    }
+
     pub fn supports(&self, capability: &str) -> bool {
         self.capabilities.contains(capability)
     }
@@ -180,6 +188,7 @@ pub trait KeyringLock {
 const MOCK_LATENCY_MS: u32 = 36;
 const MOCK_SERVER_VERSION: &str = "zellij 0.44.3";
 const MOCK_ZELLIJ_VERSION: &str = "0.44.3";
+pub const MOCK_MUXRD_VERSION: &str = "0.5.4";
 
 /// Never touches a socket; fails only when scripted by [`fail_next_mock_dials_for_tests`].
 pub struct MockConnectionBackend;
@@ -246,6 +255,8 @@ fn mock_server_info(target: &ConnectTarget) -> ServerInfo {
         available_backends: vec![ServerBackend::Zellij],
         capabilities: BTreeSet::from([CAP_MOUSE_INPUT.to_string()]),
         is_read_only: false,
+        server_version: MOCK_MUXRD_VERSION.to_string(),
+        latest_version: mock_latest_version(),
     }
 }
 
@@ -385,6 +396,18 @@ async fn open_session(
     Ok(info)
 }
 
+const MAX_VERSION_LEN: usize = 32;
+
+/// Shown verbatim in the bar and on the settings card, so anything that is not a dotted number is
+/// dropped rather than displayed.
+fn latest_version_of(version: &VersionInfo) -> Option<String> {
+    let latest = version.latest_version.as_str();
+    let dotted_number = !latest.is_empty()
+        && latest.len() <= MAX_VERSION_LEN
+        && latest.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+    dotted_number.then(|| latest.to_string())
+}
+
 fn server_info(
     target: &ConnectTarget,
     version: &VersionInfo,
@@ -416,6 +439,8 @@ fn server_info(
         backend_versions,
         capabilities: version.capabilities.iter().cloned().collect(),
         is_read_only,
+        server_version: version.server_version.clone(),
+        latest_version: latest_version_of(version),
     }
 }
 
@@ -687,14 +712,28 @@ impl ConnectionController {
         let _release = ReleasePingClaim(&self.pinging);
 
         let client = self.client()?;
+        let epoch = self.connection_epoch.get_untracked();
         let started = Instant::now();
-        client.unauth().get_version(Empty {}).await.ok()?;
+        let version = client
+            .unauth()
+            .get_version(Empty {})
+            .await
+            .ok()?
+            .into_inner();
         let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
 
-        // Only the measurement is this call's to replace.
+        // A reply that outlived its connection says nothing about the one that replaced it.
+        if self.connection_epoch.get_untracked() != epoch {
+            return None;
+        }
+        // The measurement and the release notice are this call's to replace; the rest is the
+        // handshake's.
         let info = self.server_info.get_untracked()?;
-        self.server_info
-            .set(Some(ServerInfo { latency_ms, ..info }));
+        self.server_info.set(Some(ServerInfo {
+            latency_ms,
+            latest_version: latest_version_of(&version),
+            ..info
+        }));
         Some(latency_ms)
     }
 
@@ -849,6 +888,22 @@ const MOCK_DIAL_REFUSED: &str = "mock dial refused";
 /// Process-wide, so a suite using it holds the serial guard; reset leftovers with `0`.
 pub fn fail_next_mock_dials_for_tests(count: usize) {
     MOCK_DIAL_FAILURES.store(count, Ordering::SeqCst);
+}
+
+static MOCK_LATEST_VERSION: Mutex<Option<String>> = Mutex::new(None);
+
+/// Process-wide, so a suite using it holds the serial guard; reset leftovers with `None`.
+pub fn set_mock_latest_version_for_tests(latest: Option<&str>) {
+    *MOCK_LATEST_VERSION
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = latest.map(str::to_string);
+}
+
+fn mock_latest_version() -> Option<String> {
+    MOCK_LATEST_VERSION
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 pub struct HeldDial {
@@ -1155,6 +1210,104 @@ mod tests {
             controller.server_info.get_untracked(),
             before,
             "an unmeasured ping publishes nothing"
+        );
+    }
+
+    async fn dial_fixture(
+        fixture: &crate::net::testing::MuxrdFixture,
+    ) -> (Arc<ConnectionController>, ServerInfo) {
+        use crate::net::testing;
+
+        let backend = Arc::new(NetConnectionBackend::new());
+        let controller = Arc::new(ConnectionController::new(
+            Arc::clone(&backend) as Arc<dyn ConnectionBackend>
+        ));
+        let mut connect = target(false);
+        connect.host = "127.0.0.1".to_string();
+        connect.port = fixture.port();
+        connect.trust_mode = TrustMode::Pinned;
+        connect.token = Zeroizing::new(testing::AUTH_TOKEN.to_string());
+        connect.fingerprint = Some(fixture.fingerprint_hex().to_string());
+
+        let ConnectRun::Pending(work) = backend.begin_connect(connect) else {
+            panic!("a real dial is never decided before it runs");
+        };
+        let info = work.await.expect("the fixture accepts its own pin + token");
+        controller.server_info.set(Some(info.clone()));
+        (controller, info)
+    }
+
+    #[test]
+    fn only_a_dotted_number_is_kept_as_the_newer_release() {
+        let reported = |latest: &str| {
+            latest_version_of(&VersionInfo {
+                latest_version: latest.to_string(),
+                ..Default::default()
+            })
+        };
+        assert_eq!(reported("0.5.5").as_deref(), Some("0.5.5"));
+        assert_eq!(reported(""), None);
+        assert_eq!(reported("v0.5.5"), None);
+        assert_eq!(reported("0.5.5 — tap here"), None);
+        assert_eq!(reported(&"9".repeat(MAX_VERSION_LEN + 1)), None);
+    }
+
+    #[tokio::test]
+    async fn a_connect_keeps_the_server_version_and_reports_no_update_by_default() {
+        use crate::net::testing::{self, MuxrdFixture};
+
+        let fixture = MuxrdFixture::start().await;
+        let (_controller, info) = dial_fixture(&fixture).await;
+
+        assert_eq!(info.server_version, testing::SERVER_VERSION);
+        assert_eq!(info.latest_version, None);
+        assert_eq!(info.update_available(), None);
+    }
+
+    #[tokio::test]
+    async fn a_connect_reports_the_newer_release_the_server_names() {
+        use crate::net::testing::MuxrdFixture;
+
+        let fixture = MuxrdFixture::start().await;
+        fixture.report_latest_version("9.9.9");
+        let (_controller, info) = dial_fixture(&fixture).await;
+
+        assert_eq!(info.latest_version.as_deref(), Some("9.9.9"));
+        assert_eq!(info.update_available(), Some("9.9.9"));
+    }
+
+    #[tokio::test]
+    async fn a_ping_refreshes_the_release_notice_and_nothing_else_of_the_handshake() {
+        use crate::net::testing::MuxrdFixture;
+
+        let fixture = MuxrdFixture::start().await;
+        let (controller, info) = dial_fixture(&fixture).await;
+        assert_eq!(info.latest_version, None);
+
+        fixture.report_latest_version("9.9.9");
+        let measured = controller.ping().await.expect("a live connection is timed");
+        let after = controller
+            .server_info
+            .get_untracked()
+            .expect("the ping republished the facts");
+        assert_eq!(
+            after,
+            ServerInfo {
+                latency_ms: measured,
+                latest_version: Some("9.9.9".to_string()),
+                ..info.clone()
+            }
+        );
+
+        fixture.report_latest_version("");
+        let measured = controller.ping().await.expect("a live connection is timed");
+        assert_eq!(
+            controller.server_info.get_untracked(),
+            Some(ServerInfo {
+                latency_ms: measured,
+                ..info
+            }),
+            "a release that is no longer newer clears the notice"
         );
     }
 
@@ -1810,6 +1963,8 @@ mod tests {
             available_backends: Vec::new(),
             capabilities: BTreeSet::new(),
             is_read_only: true,
+            server_version: MOCK_MUXRD_VERSION.to_string(),
+            latest_version: None,
         }
     }
 

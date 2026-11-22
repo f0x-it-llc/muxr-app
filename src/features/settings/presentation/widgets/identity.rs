@@ -1,6 +1,6 @@
-//! Server settings' identity card: who the connected server is, in one block. An avatar tile,
-//! the saved label over the endpoint, a `connected` chip, a rule and one stat cell per fact the
-//! five connection rows used to carry (TLS posture, latency, a version per backend).
+//! Server settings' identity card: avatar, saved label over the endpoint and a `connected` chip;
+//! a rule and one stat cell per fact (TLS posture, latency, a version per backend); a second rule
+//! and the daemon's version, with a chip naming a newer release when the server knows one.
 
 use frust::authoring::text::TextOverflow;
 use frust::{
@@ -20,6 +20,9 @@ const AVATAR_SIZE: f64 = 40.0;
 const NO_INITIAL: &str = "?";
 const STAT_GAP: f64 = spacing::BASE;
 const SECTION_GAP: f64 = spacing::BASE;
+const DAEMON_LABEL: &str = "muxrd";
+const UNKNOWN_DAEMON_VERSION: &str = "unknown";
+const UPDATE_SUFFIX: &str = "available";
 
 /// One labelled fact in the card's stat row.
 pub(in super::super) struct Stat {
@@ -63,6 +66,33 @@ pub(in super::super) fn identity_stats(info: Option<&ServerInfo>) -> Vec<Stat> {
         }));
     }
     stats
+}
+
+/// The daemon row under the stats: its version, and the newer release's chip text when there is one.
+#[derive(Debug, PartialEq)]
+pub(in super::super) struct DaemonVersion {
+    pub value: String,
+    pub update: Option<String>,
+}
+
+pub(in super::super) fn daemon_version(info: Option<&ServerInfo>) -> DaemonVersion {
+    let Some(info) = info else {
+        return DaemonVersion {
+            value: DISCONNECTED_VALUE.to_string(),
+            update: None,
+        };
+    };
+    let value = if info.server_version.is_empty() {
+        UNKNOWN_DAEMON_VERSION
+    } else {
+        &info.server_version
+    };
+    DaemonVersion {
+        value: value.to_string(),
+        update: info
+            .update_available()
+            .map(|latest| format!("{latest} {UPDATE_SUFFIX}")),
+    }
 }
 
 /// The label's first letter, uppercased; empty falls back to a question mark.
@@ -134,6 +164,23 @@ pub(in super::super) fn identity_card<S: 'static>(
         })
         .collect();
 
+    let daemon = daemon_version(info);
+    let mut daemon_row = vec![flexible(
+        1,
+        stretch_column((
+            text(DAEMON_LABEL.to_uppercase())
+                .style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+            text(daemon.value)
+                .style(inked(&theme.type_scale.label_large, colors.fg))
+                .max_lines(1)
+                .overflow(TextOverflow::Ellipsis),
+        ))
+        .gap(ROW_LINE_GAP),
+    )];
+    if let Some(update) = daemon.update {
+        daemon_row.push(inflexible(badge(update, BadgeVariant::Warning)));
+    }
+
     let body = stretch_column((
         centered_row(header).gap(ROW_GAP),
         SizedBox::<S>(None, Some(SECTION_GAP)),
@@ -146,6 +193,17 @@ pub(in super::super) fn identity_card<S: 'static>(
                 bottom: 0.0,
             },
             centered_row(cells).gap(STAT_GAP),
+        ),
+        SizedBox::<S>(None, Some(SECTION_GAP)),
+        divider(colors.rule),
+        Padding(
+            EdgeInsets {
+                left: 0.0,
+                top: SECTION_GAP,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            centered_row(daemon_row).gap(ROW_GAP),
         ),
     ));
     glyph_card::<S>().desc(body)
@@ -175,6 +233,8 @@ mod tests {
             available_backends: Vec::new(),
             capabilities: BTreeSet::new(),
             is_read_only: false,
+            server_version: String::new(),
+            latest_version: None,
         }
     }
 
@@ -202,6 +262,50 @@ mod tests {
                 ("zellij", "0.45.1"),
                 ("herdr", "0.9.5"),
             ]
+        );
+    }
+
+    #[test]
+    fn the_daemon_row_prints_the_version_and_no_chip_when_the_server_is_current() {
+        let mut current = info(TrustMode::System, &[]);
+        current.server_version = "0.5.4".to_string();
+        assert_eq!(
+            daemon_version(Some(&current)),
+            DaemonVersion {
+                value: "0.5.4".to_string(),
+                update: None,
+            }
+        );
+    }
+
+    #[test]
+    fn the_daemon_row_names_the_newer_release_the_server_reports() {
+        let mut behind = info(TrustMode::System, &[]);
+        behind.server_version = "0.5.4".to_string();
+        behind.latest_version = Some("0.5.5".to_string());
+        assert_eq!(
+            daemon_version(Some(&behind)),
+            DaemonVersion {
+                value: "0.5.4".to_string(),
+                update: Some("0.5.5 available".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_server_that_sent_no_version_reads_unknown() {
+        let silent = info(TrustMode::System, &[]);
+        assert_eq!(daemon_version(Some(&silent)).value, "unknown");
+    }
+
+    #[test]
+    fn a_disconnected_daemon_row_says_so_and_carries_no_chip() {
+        assert_eq!(
+            daemon_version(None),
+            DaemonVersion {
+                value: DISCONNECTED_VALUE.to_string(),
+                update: None,
+            }
         );
     }
 

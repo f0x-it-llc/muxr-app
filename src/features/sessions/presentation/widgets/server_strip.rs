@@ -117,6 +117,8 @@ mod tests {
             available_backends: Vec::new(),
             capabilities: std::collections::BTreeSet::new(),
             is_read_only: false,
+            server_version: String::new(),
+            latest_version: None,
         }
     }
 

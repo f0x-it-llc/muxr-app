@@ -1233,6 +1233,8 @@ mod tests {
                     available_backends: Vec::new(),
                     capabilities: Default::default(),
                     is_read_only: false,
+                    server_version: String::new(),
+                    latest_version: None,
                 }));
             let bus = crate::net::wake::WakeBus::new();
             let owner = frust_reactive::Owner::new();

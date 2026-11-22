@@ -15,6 +15,7 @@ use kurbo::{Point, Size};
 use muxr::connection::{
     ConnectTarget, HeldDial, TrustMode, expect_connection_controller,
     fail_next_mock_dials_for_tests, hold_next_mock_dials_for_tests,
+    set_mock_latest_version_for_tests,
 };
 use muxr::features::connect::di::{expect_keyring, expect_saved_servers, mock_credentials};
 use muxr::features::connect::domain::entities::{SavedServer, epoch_millis};
@@ -23,9 +24,10 @@ use muxr::features::connect::presentation::pages::ADD_SERVER_HEADING;
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
 use muxr::features::servers::di::{
-    BANNER_CONNECTING_DELAY_MS, PEER_TAIL, expect_servers_controller,
+    BANNER_CONNECTING_DELAY_MS, PEER_TAIL, UPDATE_NOTICE_DEFAULT_MS, expect_servers_controller,
     installed_session_renewer_for_tests, keep_peers, set_banner_connecting_delay_for_tests,
-    set_banner_timings_for_tests, set_stage_clock_for_tests, stage_settled, use_last_seen,
+    set_banner_timings_for_tests, set_stage_clock_for_tests, set_update_notice_ms_for_tests,
+    stage_settled, use_last_seen,
 };
 use muxr::features::servers::domain::entities::FaceKind;
 use muxr::features::servers::presentation::controller::{
@@ -1799,4 +1801,212 @@ fn concurrent_expiries_cost_one_renewal_and_a_peer_endpoint_is_never_renewed() {
     assert_eq!(dial_generation(), before + 1, "still one dial");
     assert!(app_toasts().pending_untracked().is_empty());
     reset_reconnect_rig();
+}
+
+const UPDATE_NOTICE: &str = "muxrd 9.9.9 is available";
+const NOTICE_MS: u64 = 700;
+const PAST_NOTICE_MS: u64 = NOTICE_MS + 400;
+
+/// Restores the process-wide hooks even when an assertion fails.
+struct NoticeRig;
+
+impl Drop for NoticeRig {
+    fn drop(&mut self) {
+        set_mock_latest_version_for_tests(None);
+        set_update_notice_ms_for_tests(UPDATE_NOTICE_DEFAULT_MS);
+        reset_reconnect_rig();
+    }
+}
+
+fn notice_rig(latest: Option<&str>) -> NoticeRig {
+    set_mock_latest_version_for_tests(latest);
+    set_update_notice_ms_for_tests(NOTICE_MS);
+    NoticeRig
+}
+
+fn notice_shown(h: &Harness) -> bool {
+    h.labels().iter().any(|label| label == UPDATE_NOTICE)
+}
+
+fn connected_with_the_notice_up() -> Harness {
+    let mut h = three_servers(TrustMode::System, true);
+    h.pump_until(notice_shown);
+    h
+}
+
+fn wait_out_the_notice(h: &mut Harness) {
+    pump_for(h, PAST_NOTICE_MS, || {});
+    assert!(!notice_shown(h), "{:?}", h.labels());
+}
+
+#[test]
+fn a_connect_to_a_server_with_a_newer_release_shows_the_notice_then_clears_it() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(Some("9.9.9"));
+    let mut h = connected_with_the_notice_up();
+
+    assert_eq!(banner(), None, "the reconnect banner is not involved");
+    wait_out_the_notice(&mut h);
+}
+
+#[test]
+fn a_connect_to_a_current_server_shows_no_notice_in_any_frame() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(None);
+    let mut h = three_servers(TrustMode::System, true);
+
+    let runtime = ReactiveRuntime::get().expect("setup() installs the reactive runtime");
+    let end = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < end {
+        runtime.pump_local();
+        h.frame();
+        let labels = h.labels();
+        assert!(
+            !labels.iter().any(|label| label.contains("is available")),
+            "{labels:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn the_controllers_own_renewal_of_the_live_server_does_not_show_the_notice_again() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(Some("9.9.9"));
+    let mut h = connected_with_the_notice_up();
+    wait_out_the_notice(&mut h);
+
+    let before = epoch();
+    assert!(
+        switcher().reconnect_live(),
+        "the live server renews in place"
+    );
+    h.pump_until(|_| {
+        epoch() > before
+            && connected_endpoint().as_deref() == Some(A_ENDPOINT)
+            && banner().is_none()
+    });
+    let runtime = ReactiveRuntime::get().expect("setup() installs the reactive runtime");
+    let end = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < end {
+        runtime.pump_local();
+        h.frame();
+        assert!(
+            !notice_shown(&h),
+            "a renewal is not a connect: {:?}",
+            h.labels()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_reconnect_after_a_disconnect_and_a_user_switch_each_show_the_notice_again() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(Some("9.9.9"));
+    let mut h = connected_with_the_notice_up();
+    wait_out_the_notice(&mut h);
+
+    expect_connection_controller().disconnect();
+    h.pump_until(|_| connected_endpoint().is_none());
+    expect_connection_controller().connect(mock_target());
+    h.pump_until(notice_shown);
+    wait_out_the_notice(&mut h);
+
+    set_entitlement(&mut h, Entitlement::Pro);
+    switch_via_controller(&mut h, B_ENDPOINT);
+    h.pump_until(notice_shown);
+}
+
+#[test]
+fn the_reconnect_banner_takes_the_slot_from_a_showing_notice() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(Some("9.9.9"));
+    set_update_notice_ms_for_tests(5_000);
+    let mut h = connected_with_the_notice_up();
+
+    switcher().report_trouble(true);
+    let failed = ReconnectBanner::Failed {
+        host: A_HOST.to_string(),
+    };
+    assert_eq!(banner(), Some(failed.clone()));
+    h.pump_until(|h| h.labels().iter().any(|label| *label == failed.text()));
+    assert!(!notice_shown(&h), "{:?}", h.labels());
+    assert_banner_text(&h, &failed.text());
+}
+
+#[test]
+fn a_disconnect_clears_a_showing_notice_at_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(Some("9.9.9"));
+    set_update_notice_ms_for_tests(5_000);
+    let mut h = connected_with_the_notice_up();
+
+    expect_connection_controller().disconnect();
+    h.frame();
+    h.frame();
+    assert!(!notice_shown(&h), "{:?}", h.labels());
+}
+
+#[test]
+fn a_failed_renewal_that_lands_on_its_automatic_retry_shows_no_notice() {
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(Some("9.9.9"));
+    let (mut h, before) = failed_renewal_on_a(PAST_NOTICE_MS + 400, false);
+    wait_out_the_notice(&mut h);
+    assert_eq!(dial_generation(), before + 1, "the retry has not fired yet");
+
+    // Watched from before the retry fires until well after it lands.
+    h.pump_until(|h| {
+        assert!(
+            !notice_shown(h),
+            "a retry is not a connect: {:?}",
+            h.labels()
+        );
+        dial_generation() > before + 1
+            && connected_endpoint().as_deref() == Some(A_ENDPOINT)
+            && switcher().pending_reconnect().is_none()
+    });
+    pump_for(&mut h, 300, || {});
+    assert!(!notice_shown(&h), "{:?}", h.labels());
+}
+
+#[test]
+fn a_showing_notice_survives_the_controllers_own_renewal_and_keeps_its_deadline() {
+    const LONG_NOTICE_MS: u64 = 1_500;
+    const BEFORE_RENEWAL_MS: u64 = 800;
+
+    let _g = serial();
+    let _ambient = setup();
+    let _rig = notice_rig(Some("9.9.9"));
+    set_update_notice_ms_for_tests(LONG_NOTICE_MS);
+    let mut h = connected_with_the_notice_up();
+    let shown_at = Instant::now();
+    pump_for(&mut h, BEFORE_RENEWAL_MS, || {});
+
+    let before = epoch();
+    assert!(
+        switcher().reconnect_live(),
+        "the live server renews in place"
+    );
+    h.pump_until(|_| {
+        epoch() > before
+            && connected_endpoint().as_deref() == Some(A_ENDPOINT)
+            && banner().is_none()
+    });
+    h.pump_until(notice_shown);
+
+    h.pump_until(|h| !notice_shown(h));
+    let lasted = shown_at.elapsed();
+    assert!(
+        lasted < Duration::from_millis(BEFORE_RENEWAL_MS + LONG_NOTICE_MS - 200),
+        "the renewal armed a second notice: it lasted {lasted:?}"
+    );
 }
