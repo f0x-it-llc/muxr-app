@@ -80,6 +80,10 @@ frust run --flavor production
 
 Pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CLA.md](CLA.md).
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+
 ## License
 
 [PolyForm Shield License 1.0.0](LICENSE)
