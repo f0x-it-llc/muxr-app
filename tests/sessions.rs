@@ -73,8 +73,8 @@ const FULL_TABLET: Size = Size::new(1024.0, 720.0);
 const COLLAPSED_TABLET: Size = Size::new(720.0, 720.0);
 const PHONE: Size = Size::new(390.0, 844.0);
 
-const SEEDED: [&str; 3] = ["dev", "jumping-peach", "herdr"];
-const RUNNING: usize = 2;
+const SEEDED: [&str; 4] = ["dev", "jumping-peach", "herdr", "ops"];
+const RUNNING: usize = 3;
 
 fn mock_target(offer_credential: bool) -> ConnectTarget {
     ConnectTarget {
@@ -566,9 +566,9 @@ fn a_herdr_card_with_agents_renders_the_strip_and_the_needs_you_rollup() {
         "pill order: {order:?}"
     );
     // A blocked agent: the herdr card's badge reads `needs you`, so only the
-    // zellij card still says `running`.
+    // zellij and tmux cards still say `running`.
     assert_eq!(labels.iter().filter(|l| *l == "needs you").count(), 1);
-    assert_eq!(labels.iter().filter(|l| *l == "running").count(), 1);
+    assert_eq!(labels.iter().filter(|l| *l == "running").count(), 2);
 }
 
 #[test]
@@ -589,7 +589,7 @@ fn zero_count_pills_are_absent_and_an_unblocked_card_stays_running() {
         );
     }
     assert!(!labels.iter().any(|l| l == "needs you"), "{labels:?}");
-    assert_eq!(labels.iter().filter(|l| *l == "running").count(), 2);
+    assert_eq!(labels.iter().filter(|l| *l == "running").count(), 3);
 }
 
 #[test]

@@ -95,6 +95,7 @@ pub(super) fn backend_stat_label(backend: ServerBackend) -> &'static str {
     match backend {
         ServerBackend::Zellij => "zellij",
         ServerBackend::Herdr => "herdr",
+        ServerBackend::Tmux => "tmux",
     }
 }
 

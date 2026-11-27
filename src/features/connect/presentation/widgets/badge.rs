@@ -9,14 +9,14 @@ use crate::ui::palette::{Palette, inked};
 use crate::ui::spacing;
 
 /// `pub`: `tests/connect.rs` reads the very lines this string wraps into.
-pub const SUBTITLE: &str = "Enter credentials to attach to a remote zellij or herdr session.";
+pub const SUBTITLE: &str = "Enter credentials to attach to a remote zellij, herdr or tmux session.";
 
 pub fn server_badge<S: 'static>(theme: &Theme, colors: &Palette) -> impl View<S> {
     // Hugging, not stretched: the lines center against each other, not the layer.
     let lines = hugging_column::<S, _>((
         text("muxrd server").style(inked(&theme.type_scale.body_small, colors.fg_muted)),
         v_gap::<S>(spacing::MICRO),
-        text("zellij · herdr").style(inked(&theme.type_scale.label_small, colors.fg_dim)),
+        text("zellij · herdr · tmux").style(inked(&theme.type_scale.label_small, colors.fg_dim)),
     ));
     let box_ = container(Padding(
         EdgeInsets::symmetric(spacing::BASE, spacing::SM),

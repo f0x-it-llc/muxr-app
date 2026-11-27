@@ -55,6 +55,7 @@ impl SessionStatus {
 pub enum SessionBackend {
     Zellij,
     Herdr,
+    Tmux,
 }
 
 impl SessionBackend {
@@ -62,6 +63,7 @@ impl SessionBackend {
         match self {
             SessionBackend::Zellij => "zellij",
             SessionBackend::Herdr => "herdr",
+            SessionBackend::Tmux => "tmux",
         }
     }
 }

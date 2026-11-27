@@ -270,6 +270,7 @@ fn create_request(name: &str, backend: SessionBackend) -> CreateSessionReq {
     let wire = match backend {
         SessionBackend::Zellij => Backend::Zellij,
         SessionBackend::Herdr => Backend::Herdr,
+        SessionBackend::Tmux => Backend::Tmux,
     };
     CreateSessionReq {
         name: name.to_string(),
@@ -282,6 +283,7 @@ fn create_request(name: &str, backend: SessionBackend) -> CreateSessionReq {
 fn map_backend(value: i32) -> SessionBackend {
     match Backend::try_from(value) {
         Ok(Backend::Herdr) => SessionBackend::Herdr,
+        Ok(Backend::Tmux) => SessionBackend::Tmux,
         Ok(Backend::Zellij) | Ok(Backend::Unspecified) | Err(_) => SessionBackend::Zellij,
     }
 }
@@ -293,7 +295,9 @@ fn third_metric(status: SessionStatus, backend: SessionBackend, info: &SessionIn
     }
     match backend {
         SessionBackend::Herdr => ThirdMetric::Spaces(info.space_count),
-        SessionBackend::Zellij => ThirdMetric::Clients(info.connected_clients),
+        SessionBackend::Zellij | SessionBackend::Tmux => {
+            ThirdMetric::Clients(info.connected_clients)
+        }
     }
 }
 
@@ -351,6 +355,7 @@ fn backend_prefix(id: &str) -> Option<(&str, &str)> {
 fn backend_from_prefix(prefix: &str) -> SessionBackend {
     match prefix {
         "herdr" => SessionBackend::Herdr,
+        "tmux" => SessionBackend::Tmux,
         _ => SessionBackend::Zellij,
     }
 }
@@ -358,7 +363,7 @@ fn backend_from_prefix(prefix: &str) -> SessionBackend {
 fn optimistic_session(id: String, name: String, backend: SessionBackend) -> Session {
     let third = match backend {
         SessionBackend::Herdr => ThirdMetric::Spaces(0),
-        SessionBackend::Zellij => ThirdMetric::Clients(0),
+        SessionBackend::Zellij | SessionBackend::Tmux => ThirdMetric::Clients(0),
     };
     Session {
         id,
@@ -585,6 +590,19 @@ mod tests {
     }
 
     #[test]
+    fn map_backend_covers_every_wire_value() {
+        for (wire, want) in [
+            (Backend::Unspecified as i32, SessionBackend::Zellij),
+            (Backend::Zellij as i32, SessionBackend::Zellij),
+            (Backend::Herdr as i32, SessionBackend::Herdr),
+            (Backend::Tmux as i32, SessionBackend::Tmux),
+            (999, SessionBackend::Zellij),
+        ] {
+            assert_eq!(map_backend(wire), want);
+        }
+    }
+
+    #[test]
     fn an_unspecified_or_unknown_wire_backend_falls_back_to_zellij() {
         assert_eq!(
             map_backend(Backend::Unspecified as i32),
@@ -658,6 +676,8 @@ mod tests {
         let herdr = create_request("work", SessionBackend::Herdr);
         assert_eq!(herdr.backend, Backend::Herdr as i32);
         assert_eq!(herdr.name, "work");
+        let tmux = create_request("ops", SessionBackend::Tmux);
+        assert_eq!(tmux.backend, Backend::Tmux as i32);
     }
 
     #[test]
@@ -815,6 +835,7 @@ mod tests {
     fn backend_from_prefix_recognizes_both_labels_and_falls_back_to_zellij() {
         assert_eq!(backend_from_prefix("herdr"), SessionBackend::Herdr);
         assert_eq!(backend_from_prefix("zellij"), SessionBackend::Zellij);
+        assert_eq!(backend_from_prefix("tmux"), SessionBackend::Tmux);
         assert_eq!(backend_from_prefix("mystery"), SessionBackend::Zellij);
     }
 

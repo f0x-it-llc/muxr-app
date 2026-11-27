@@ -22,11 +22,16 @@ pub(in crate::features::sessions::presentation) fn offered(
     available: &[ServerBackend],
 ) -> Vec<SessionBackend> {
     let mut out = Vec::new();
-    for wanted in [ServerBackend::Zellij, ServerBackend::Herdr] {
+    for wanted in [
+        ServerBackend::Zellij,
+        ServerBackend::Herdr,
+        ServerBackend::Tmux,
+    ] {
         if available.contains(&wanted) {
             out.push(match wanted {
                 ServerBackend::Zellij => SessionBackend::Zellij,
                 ServerBackend::Herdr => SessionBackend::Herdr,
+                ServerBackend::Tmux => SessionBackend::Tmux,
             });
         }
     }
@@ -141,6 +146,23 @@ mod tests {
             vec![SessionBackend::Herdr]
         );
         assert_eq!(offered(&[]), vec![SessionBackend::Zellij]);
+    }
+
+    #[test]
+    fn a_server_listing_all_three_offers_three_and_tmux_alone_offers_tmux() {
+        assert_eq!(
+            offered(&[
+                ServerBackend::Tmux,
+                ServerBackend::Herdr,
+                ServerBackend::Zellij
+            ]),
+            vec![
+                SessionBackend::Zellij,
+                SessionBackend::Herdr,
+                SessionBackend::Tmux
+            ]
+        );
+        assert_eq!(offered(&[ServerBackend::Tmux]), vec![SessionBackend::Tmux]);
     }
 
     #[test]

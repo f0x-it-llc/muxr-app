@@ -152,6 +152,20 @@ mod tests {
     }
 
     #[test]
+    fn the_strips_meta_line_names_tmux() {
+        assert_eq!(
+            meta_line(&info(
+                TrustMode::NoVerification,
+                vec![
+                    backend(ServerBackend::Zellij, "0.44.3"),
+                    backend(ServerBackend::Tmux, "3.5"),
+                ]
+            )),
+            "zellij 0.44.3 \u{b7} tmux 3.5"
+        );
+    }
+
+    #[test]
     fn a_server_that_reported_no_backends_falls_back_to_the_handshakes_version() {
         assert_eq!(
             meta_line(&info(TrustMode::NoVerification, Vec::new())),

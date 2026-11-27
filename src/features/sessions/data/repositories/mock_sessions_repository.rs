@@ -224,6 +224,40 @@ fn seed() -> Vec<Session> {
                 PREVIEW_AGENT_MARKS.iter().copied(),
             )),
         },
+        Session {
+            id: session_id(SessionBackend::Tmux, "ops"),
+            name: "ops".to_string(),
+            status: SessionStatus::Running,
+            backend: SessionBackend::Tmux,
+            age_secs: 90 * 60,
+            has_bell: false,
+            is_current: false,
+            layout: LayoutSummary {
+                tabs: 2,
+                panes: 3,
+                third: ThirdMetric::Clients(1),
+                preview: vec!["htop".to_string(), "ed@ops:~".to_string()],
+                tabs_detail: vec![
+                    tab(
+                        0,
+                        "monitor",
+                        true,
+                        vec![
+                            pane("htop", Some("/home/ed"), true, false),
+                            pane("ed@ops:~", Some("/home/ed"), false, false),
+                        ],
+                    ),
+                    tab(
+                        1,
+                        "logs",
+                        false,
+                        vec![pane("journalctl", None, false, false)],
+                    ),
+                ],
+                space: None,
+            },
+            agents: None,
+        },
     ]
 }
 
@@ -266,7 +300,7 @@ fn seed_herdr_agents() -> Vec<SessionAgent> {
 
 fn new_session(name: String, backend: SessionBackend) -> Session {
     let third = match backend {
-        SessionBackend::Zellij => ThirdMetric::Clients(0),
+        SessionBackend::Zellij | SessionBackend::Tmux => ThirdMetric::Clients(0),
         SessionBackend::Herdr => ThirdMetric::Spaces(0),
     };
     Session {
@@ -383,7 +417,7 @@ impl SessionsRepository for MockSessionsRepository {
 mod tests {
     use super::*;
 
-    const SEEDED_COUNT: usize = 3;
+    const SEEDED_COUNT: usize = 4;
 
     fn block_on<T>(fut: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
@@ -417,7 +451,7 @@ mod tests {
         let sessions = block_on(repo.list_sessions()).expect("the mock never fails to list");
 
         let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["dev", "jumping-peach", "herdr"]);
+        assert_eq!(names, ["dev", "jumping-peach", "herdr", "ops"]);
 
         assert!(sessions[0].status.is_live());
         assert_eq!(sessions[0].backend, SessionBackend::Zellij);
@@ -538,7 +572,7 @@ mod tests {
     #[test]
     fn killing_every_session_empties_the_store() {
         let repo = MockSessionsRepository::seeded();
-        for id in [SEEDED_DEV_ID, SEEDED_PEACH_ID, SEEDED_HERDR_ID] {
+        for id in [SEEDED_DEV_ID, SEEDED_PEACH_ID, SEEDED_HERDR_ID, "tmux:ops"] {
             block_on(repo.kill_session(id.to_string())).expect("kill succeeds");
         }
 
@@ -557,7 +591,10 @@ mod tests {
     #[test]
     fn the_seeded_id_constants_name_the_seeded_sessions() {
         let ids: Vec<String> = seed().into_iter().map(|s| s.id).collect();
-        assert_eq!(ids, [SEEDED_DEV_ID, SEEDED_PEACH_ID, SEEDED_HERDR_ID]);
+        assert_eq!(
+            ids,
+            [SEEDED_DEV_ID, SEEDED_PEACH_ID, SEEDED_HERDR_ID, "tmux:ops"]
+        );
     }
 
     #[test]

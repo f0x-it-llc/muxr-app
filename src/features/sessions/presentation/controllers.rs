@@ -593,7 +593,7 @@ mod tests {
         CreateSessionParams, LayoutSummary, SessionStatus, ThirdMetric,
     };
 
-    const SEEDED_COUNT: usize = 3;
+    const SEEDED_COUNT: usize = 4;
 
     /// Test wiring: the mock repository behind the domain trait object; `di.rs` stays the only
     /// production site where presentation meets `data`.

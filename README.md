@@ -1,6 +1,6 @@
 # Muxr
 
-Muxr puts your zellij and herdr terminal sessions on your iPhone, iPad or
+Muxr puts your zellij, herdr and tmux terminal sessions on your iPhone, iPad or
 Android device, including the sessions your coding agents (Claude Code, Codex
 and others) run in, so you can watch and steer them from your phone. It needs
 `muxrd`, a daemon you run on your own machine, from
@@ -15,7 +15,7 @@ and others) run in, so you can watch and steer them from your phone. It needs
 
 ## What it does
 
-- Attaches to remote zellij and herdr sessions through `muxrd`, over TLS with token authentication.
+- Attaches to remote zellij, herdr and tmux sessions through `muxrd`, over TLS with token authentication.
 - Pairs with a server by scanning a QR code.
 - Saves servers and switches between them without leaving the app.
 - Browses the sessions on a server and opens, creates and manages them.
@@ -32,11 +32,11 @@ The app is free for one server. Muxr Pro is a one-time $19.99 purchase, 50% off 
 
 ## Status
 
-Muxr works with zellij and herdr today. tmux support, push notifications, voice input and desktop apps are coming soon; see the [roadmap](https://muxr.app/roadmap.html).
+Muxr works with zellij, herdr and tmux today. Push notifications, voice input and desktop apps are coming soon; see the [roadmap](https://muxr.app/roadmap.html).
 
 ## Not the npm package
 
-Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.
+Muxr by F0X IT LLC (muxr.app) is a zellij, herdr and tmux client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.
 
 ## Building from source: requirements
 
