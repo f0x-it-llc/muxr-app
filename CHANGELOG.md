@@ -3,7 +3,7 @@
 What changed in each release of the Muxr app for iPhone, iPad and Android.
 Versions are the store versions, and dates are release dates.
 
-## 1.0.3 - Unreleased
+## 1.0.3 - 2026-11-27
 
 ### Added
 
