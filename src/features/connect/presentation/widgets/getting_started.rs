@@ -24,7 +24,7 @@ pub const APP_SETTINGS_LABEL: &str = "App settings";
 pub const GETTING_STARTED_TITLE: &str = "Getting started with Muxr";
 pub const GETTING_STARTED_BODY: &str = concat!(
     "Muxr is the mobile client for muxrd, a small open-source server you run on ",
-    "your own machine beside zellij or herdr. Install muxrd there, pair this app ",
+    "your own machine beside zellij, herdr or tmux. Install muxrd there, pair this app ",
     "with it, and connect. The setup guide at muxr.app/docs.html walks through ",
     "every step.",
 );
@@ -106,6 +106,8 @@ pub(crate) fn tablet_headline<S: 'static>(theme: &Theme, colors: &Palette) -> im
         text("attach to a").style(inked(&theme.type_scale.headline_small, colors.fg)),
         centered_row::<S>(vec![
             run("herdr", colors.amber),
+            run(",", colors.fg),
+            run(" tmux", colors.amber),
             run(" or", colors.fg),
             run(" zellij", colors.amber),
             run(" session", colors.fg),

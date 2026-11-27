@@ -3,6 +3,12 @@
 What changed in each release of the Muxr app for iPhone, iPad and Android.
 Versions are the store versions, and dates are release dates.
 
+## Unreleased
+
+### Added
+
+- The app works with tmux sessions, on a muxrd with the tmux backend.
+
 ## 1.0.3 - 2026-11-27
 
 ### Added

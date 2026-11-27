@@ -63,6 +63,7 @@ impl ServerInfo {
 pub enum ServerBackend {
     Zellij,
     Herdr,
+    Tmux,
 }
 
 impl ServerBackend {
@@ -70,6 +71,7 @@ impl ServerBackend {
         match self {
             ServerBackend::Zellij => "zellij",
             ServerBackend::Herdr => "herdr",
+            ServerBackend::Tmux => "tmux",
         }
     }
 
@@ -77,6 +79,7 @@ impl ServerBackend {
         match Backend::try_from(value) {
             Ok(Backend::Zellij) => Some(ServerBackend::Zellij),
             Ok(Backend::Herdr) => Some(ServerBackend::Herdr),
+            Ok(Backend::Tmux) => Some(ServerBackend::Tmux),
             Ok(Backend::Unspecified) | Err(_) => None,
         }
     }

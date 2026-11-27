@@ -1,7 +1,7 @@
 # Vendored proto
 
 The files under `proto/muxr/` are a byte-for-byte copy of `muxrd/proto/muxr/` in
-`f0x-it-llc/muxr-core` at rev `04c0428be0486f223c4db48c7916b2b020bab771` (branch `main`).
+`f0x-it-llc/muxr-core` at rev `c6a399967e4b2490204181babcf06b7e7ea72296` (branch `main`).
 They are the single definition of the wire this app speaks, so nothing else in the tree
 restates a field number, enum value or RPC name.
 

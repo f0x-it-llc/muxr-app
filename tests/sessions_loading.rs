@@ -625,8 +625,8 @@ fn a_settle_inside_the_offset_window_measures_the_landing_from_the_gate() {
     );
 }
 
-const SEEDED: [&str; 3] = ["dev", "jumping-peach", "herdr"];
-const BAND_COPIES: [usize; 3] = [1, 1, 2];
+const SEEDED: [&str; 4] = ["dev", "jumping-peach", "herdr", "ops"];
+const BAND_COPIES: [usize; 4] = [1, 1, 2, 1];
 const PUMP_DEADLINE: Duration = Duration::from_secs(5);
 const BAND_PIECES: usize = SEEDED.len() + 1;
 const BAND_LANDED_MS: f64 =
