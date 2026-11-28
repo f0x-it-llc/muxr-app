@@ -26,6 +26,9 @@ pub const CAP_MOUSE_INPUT: &str = "mouse-input";
 /// `WatchAgents` delivers live agent changes; absent, a client polls `ListAgents`.
 pub const CAP_AGENTS_STREAM: &str = "agents-stream";
 
+/// Gates `WatchVitals`, `GetVitalsHistory`, `WatchProcesses` and `SignalProcess`.
+pub const CAP_HOST_VITALS: &str = "host-vitals";
+
 const UNKNOWN_VERSION: &str = "unknown";
 
 const MISSING_PIN: &str = "a pinned connection needs a certificate fingerprint";

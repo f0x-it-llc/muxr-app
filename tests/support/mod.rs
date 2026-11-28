@@ -372,6 +372,7 @@ pub fn setup() -> Owner {
         false,
     ));
     muxr::features::pro::di::use_mock_entitlement_for_tests();
+    muxr::features::monitor::di::use_mock_monitor_for_tests();
     muxr::links::set_link_opener_for_tests(|_url| {});
     muxr::fonts::use_offline_font_source_for_tests();
     muxr::fonts::use_font_cache_dir_for_tests(

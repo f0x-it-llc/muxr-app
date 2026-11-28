@@ -957,6 +957,38 @@ impl Muxr for FixtureService {
     ) -> Result<Response<ActionAck>, Status> {
         Err(unsupported("RemovePushTarget"))
     }
+
+    type WatchVitalsStream = ReceiverStream<Result<crate::net::proto::VitalsEvent, Status>>;
+
+    async fn watch_vitals(
+        &self,
+        _request: Request<crate::net::proto::WatchVitalsRequest>,
+    ) -> Result<Response<Self::WatchVitalsStream>, Status> {
+        Err(unsupported("WatchVitals"))
+    }
+
+    async fn get_vitals_history(
+        &self,
+        _request: Request<crate::net::proto::VitalsHistoryRequest>,
+    ) -> Result<Response<crate::net::proto::VitalsHistory>, Status> {
+        Err(unsupported("GetVitalsHistory"))
+    }
+
+    type WatchProcessesStream = ReceiverStream<Result<crate::net::proto::ProcessSnapshot, Status>>;
+
+    async fn watch_processes(
+        &self,
+        _request: Request<crate::net::proto::WatchProcessesRequest>,
+    ) -> Result<Response<Self::WatchProcessesStream>, Status> {
+        Err(unsupported("WatchProcesses"))
+    }
+
+    async fn signal_process(
+        &self,
+        _request: Request<crate::net::proto::SignalProcessRequest>,
+    ) -> Result<Response<ActionAck>, Status> {
+        Err(unsupported("SignalProcess"))
+    }
 }
 
 #[cfg(test)]
