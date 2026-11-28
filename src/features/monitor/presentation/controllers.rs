@@ -59,6 +59,9 @@ type SleepFn = Arc<dyn Fn(Duration) -> Task + Send + Sync>;
 type WakesFn = Arc<dyn Fn() -> broadcast::Receiver<WakeReason> + Send + Sync>;
 type Permit = Arc<dyn Fn() -> bool + Send + Sync>;
 type Sink<I> = Box<dyn Fn(I) + Send>;
+type NowFn = Arc<dyn Fn() -> i64 + Send + Sync>;
+
+pub const STALE_TICK: Duration = Duration::from_secs(1);
 
 /// Where the controllers' delayed and background work runs; a suite swaps in a manual clock.
 #[derive(Clone)]
@@ -66,6 +69,7 @@ pub struct Scheduler {
     spawn: fn(Task),
     sleep: SleepFn,
     wakes: WakesFn,
+    now: NowFn,
 }
 
 impl Scheduler {
@@ -86,7 +90,14 @@ impl Scheduler {
             spawn,
             sleep: Arc::new(sleep),
             wakes: Arc::new(wakes),
+            now: Arc::new(now_unix_ms),
         }
+    }
+
+    /// Swaps the phone clock the stale age is measured on.
+    pub fn with_now(mut self, now: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
+        self.now = Arc::new(now);
+        self
     }
 
     fn run(&self, task: impl Future<Output = ()> + 'static) {
@@ -134,6 +145,10 @@ impl MonitorEnv {
 
     fn epoch(&self) -> Option<u64> {
         self.connection.connection_epoch.try_get_untracked()
+    }
+
+    fn now_ms(&self) -> i64 {
+        (self.scheduler.now)()
     }
 
     fn track_epoch(&self) {
@@ -411,6 +426,46 @@ async fn next_wake(wakes: &mut broadcast::Receiver<WakeReason>, cancel: &Notify)
             .map(|outcome| !matches!(outcome, Err(broadcast::error::RecvError::Closed)))
     })
     .await
+}
+
+trait Aged: Streamed {
+    fn ticking(&self) -> &AtomicBool;
+    fn link_signal(&self) -> RwSignal<Link>;
+    fn tick_signal(&self) -> RwSignal<u64>;
+}
+
+/// While the link reads stale, rewrites it once a second so the age label advances.
+fn tick_while_stale<C: Aged>(controller: &Arc<C>) {
+    if controller.ticking().swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let weak = Arc::downgrade(controller);
+    let scheduler = controller.env().scheduler.clone();
+    let sleep = Arc::clone(&scheduler.sleep);
+    scheduler.run(async move {
+        loop {
+            sleep(STALE_TICK).await;
+            let Some(controller) = weak.upgrade() else {
+                return;
+            };
+            let link = controller.link_signal();
+            let current = link.try_get_untracked();
+            let stale = current.is_some_and(Link::is_stale);
+            if controller.controller_core().is_disposed() || !stale {
+                controller.ticking().store(false, Ordering::SeqCst);
+                let again = !controller.controller_core().is_disposed()
+                    && link.try_get_untracked().is_some_and(Link::is_stale);
+                if again && !controller.ticking().swap(true, Ordering::SeqCst) {
+                    continue;
+                }
+                return;
+            }
+            let _ = controller.tick_signal().try_update(|ticks| *ticks += 1);
+            if let Some(current) = current {
+                let _ = link.try_set(current);
+            }
+        }
+    });
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -700,8 +755,8 @@ pub fn resample(
 }
 
 fn missing_slots(last_unix_ms: i64, unix_ms: i64, interval_ms: u32) -> usize {
-    let spans = (unix_ms - last_unix_ms) as f64 / f64::from(interval_ms.max(1));
-    (spans.round() as i64 - 1).max(0) as usize
+    let spans = unix_ms.saturating_sub(last_unix_ms) as f64 / f64::from(interval_ms.max(1));
+    (spans.round() as i64).saturating_sub(1).max(0) as usize
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -715,7 +770,9 @@ pub struct RangeHistory {
 struct VitalsState {
     disabled: bool,
     last_sample_ms: Option<i64>,
+    last_received_ms: Option<i64>,
     gap_pending: bool,
+    gap_pushed: bool,
     pushed_since_open: usize,
     wanted_range: Option<HistoryRange>,
 }
@@ -733,9 +790,11 @@ pub struct MonitorController {
     history_in_flight: AtomicBool,
     history_generation: AtomicU64,
     history_revision: AtomicU64,
+    ticking: AtomicBool,
     pub host: RwSignal<Option<HostInfo>>,
     pub latest: RwSignal<Option<VitalsSample>>,
     pub link: RwSignal<Link>,
+    pub stale_tick: RwSignal<u64>,
     pub interval_ms: RwSignal<u32>,
     pub paused: RwSignal<bool>,
     pub live: RwSignal<LiveSeries>,
@@ -758,9 +817,11 @@ impl MonitorController {
             history_in_flight: AtomicBool::new(false),
             history_generation: AtomicU64::new(0),
             history_revision: AtomicU64::new(0),
+            ticking: AtomicBool::new(false),
             host: RwSignal::new(None),
             latest: RwSignal::new(None),
             link: RwSignal::new(link),
+            stale_tick: RwSignal::new(0),
             interval_ms: RwSignal::new(DEFAULT_INTERVAL_MS),
             paused: RwSignal::new(false),
             live: RwSignal::new(LiveSeries::new(live_capacity(DEFAULT_INTERVAL_MS))),
@@ -792,7 +853,11 @@ impl MonitorController {
             return;
         }
         put(self.interval_ms, interval_ms);
-        lock(&self.state).gap_pending = false;
+        {
+            let mut state = lock(&self.state);
+            state.gap_pending = false;
+            state.gap_pushed = false;
+        }
         let _ = self
             .live
             .try_update(|live| live.reset(live_capacity(interval_ms)));
@@ -807,7 +872,12 @@ impl MonitorController {
         put(self.paused, paused);
         if paused {
             self.stream.close();
+            self.mark_paused_span();
+            if self.link.try_get_untracked().is_some_and(Link::is_stale) {
+                put(self.link, Link::Live);
+            }
         } else {
+            lock(&self.state).last_received_ms = Some(self.env.now_ms());
             self.reconcile();
         }
     }
@@ -959,14 +1029,17 @@ impl MonitorController {
         let interval_ms = self.interval();
         let gaps = {
             let mut state = lock(&self.state);
+            let placed = usize::from(state.gap_pushed);
             let gaps = match (state.gap_pending, state.last_sample_ms) {
                 (true, Some(last)) => missing_slots(last, sample.unix_ms, interval_ms)
-                    .saturating_sub(1)
+                    .saturating_sub(placed)
                     .min(live_capacity(interval_ms)),
                 _ => 0,
             };
             state.gap_pending = false;
+            state.gap_pushed = false;
             state.last_sample_ms = Some(sample.unix_ms);
+            state.last_received_ms = Some(self.env.now_ms());
             state.pushed_since_open += gaps + 1;
             gaps
         };
@@ -979,15 +1052,26 @@ impl MonitorController {
         });
     }
 
+    /// The next sample fills the slots the pause spanned as gaps.
+    fn mark_paused_span(&self) {
+        let mut state = lock(&self.state);
+        if !state.gap_pending && state.last_sample_ms.is_some() {
+            state.gap_pending = true;
+            state.gap_pushed = false;
+        }
+    }
+
     fn go_stale(&self) -> Link {
+        let now = self.env.now_ms();
         let (since_unix_ms, first) = {
             let mut state = lock(&self.state);
-            let first = !state.gap_pending;
+            let first = !state.gap_pending || !state.gap_pushed;
             if first {
                 state.gap_pending = true;
+                state.gap_pushed = true;
                 state.pushed_since_open += 1;
             }
-            (state.last_sample_ms.unwrap_or_else(now_unix_ms), first)
+            (state.last_received_ms.unwrap_or(now), first)
         };
         if first {
             let _ = self.live.try_update(LiveSeries::push_gap);
@@ -1051,6 +1135,9 @@ impl Streamed for MonitorController {
         }
         if let Some(link) = link {
             put(self.link, link);
+            if link.is_stale() {
+                tick_while_stale(self);
+            }
         }
     }
 
@@ -1058,6 +1145,7 @@ impl Streamed for MonitorController {
         if self.link.try_get_untracked() == Some(Link::Live) {
             let stale = self.go_stale();
             put(self.link, stale);
+            tick_while_stale(self);
         }
     }
 
@@ -1070,9 +1158,36 @@ impl Streamed for MonitorController {
     }
 }
 
+impl Aged for MonitorController {
+    fn ticking(&self) -> &AtomicBool {
+        &self.ticking
+    }
+
+    fn link_signal(&self) -> RwSignal<Link> {
+        self.link
+    }
+
+    fn tick_signal(&self) -> RwSignal<u64> {
+        self.stale_tick
+    }
+}
+
 impl AsRef<ControllerCore<AppFailure>> for MonitorController {
     fn as_ref(&self) -> &ControllerCore<AppFailure> {
         &self.core
+    }
+}
+
+/// Releases the single-flight claim however the signal future ends, a drop included.
+struct SignalClaim<'a> {
+    claim: &'a AtomicBool,
+    signalling: RwSignal<bool>,
+}
+
+impl Drop for SignalClaim<'_> {
+    fn drop(&mut self) {
+        self.claim.store(false, Ordering::SeqCst);
+        put(self.signalling, false);
     }
 }
 
@@ -1091,7 +1206,9 @@ pub struct ProcessesController {
     stream: Stream<ProcessItem>,
     epoch: EpochMark,
     disabled: AtomicBool,
-    last_snapshot_ms: Mutex<Option<i64>>,
+    last_received_ms: Mutex<Option<i64>>,
+    snapshot_epoch: Mutex<Option<u64>>,
+    ticking: AtomicBool,
     filter_seq: AtomicU64,
     signal_claim: AtomicBool,
     started: AtomicBool,
@@ -1101,6 +1218,7 @@ pub struct ProcessesController {
     pub filter: RwSignal<String>,
     pub snapshot: RwSignal<Option<ProcessSnapshot>>,
     pub link: RwSignal<Link>,
+    pub stale_tick: RwSignal<u64>,
     pub selected: RwSignal<Option<(u32, i64)>>,
     pub selected_cpu: RwSignal<SeriesBuffer>,
     pub signalling: RwSignal<bool>,
@@ -1115,7 +1233,9 @@ impl ProcessesController {
             stream: Stream::new(),
             epoch: EpochMark::default(),
             disabled: AtomicBool::new(false),
-            last_snapshot_ms: Mutex::new(None),
+            last_received_ms: Mutex::new(None),
+            snapshot_epoch: Mutex::new(None),
+            ticking: AtomicBool::new(false),
             filter_seq: AtomicU64::new(0),
             signal_claim: AtomicBool::new(false),
             started: AtomicBool::new(false),
@@ -1125,6 +1245,7 @@ impl ProcessesController {
             filter: RwSignal::new(String::new()),
             snapshot: RwSignal::new(None),
             link: RwSignal::new(link),
+            stale_tick: RwSignal::new(0),
             selected: RwSignal::new(None),
             selected_cpu: RwSignal::new(SeriesBuffer::new(live_capacity(PROCESS_INTERVAL_MS))),
             signalling: RwSignal::new(false),
@@ -1179,6 +1300,7 @@ impl ProcessesController {
             return;
         }
         put(self.selected, pick);
+        *lock(&self.snapshot_epoch) = self.env.epoch();
         let _ = self.selected_cpu.try_update(SeriesBuffer::clear);
         self.requery(|query| query.pinned = pick);
     }
@@ -1190,7 +1312,10 @@ impl ProcessesController {
         start_unix_s: i64,
         signal: ProcessSignal,
     ) -> Result<(), AppFailure> {
-        let usable = self.env.gate() == Gate::Open
+        let fenced =
+            lock(&self.snapshot_epoch).is_some_and(|taken| Some(taken) != self.env.epoch());
+        let usable = !fenced
+            && self.env.gate() == Gate::Open
             && !self.disabled.load(Ordering::SeqCst)
             && self.env.permitted();
         if self.core.is_disposed() || !usable {
@@ -1199,17 +1324,15 @@ impl ProcessesController {
         if self.signal_claim.swap(true, Ordering::SeqCst) {
             return Err(AppFailure::Internal(SIGNAL_IN_FLIGHT.to_string()));
         }
+        let _claim = SignalClaim {
+            claim: &self.signal_claim,
+            signalling: self.signalling,
+        };
         put(self.signalling, true);
-        let outcome = self
-            .env
+        self.env
             .repository
             .signal_process(pid, start_unix_s, signal)
-            .await;
-        self.signal_claim.store(false, Ordering::SeqCst);
-        if !self.core.is_disposed() {
-            put(self.signalling, false);
-        }
-        outcome
+            .await
     }
 
     fn requery(self: &Arc<Self>, change: impl FnOnce(&mut ProcessQuery)) {
@@ -1266,7 +1389,8 @@ impl ProcessesController {
     fn forget_server(&self) {
         self.stream.close();
         self.disabled.store(false, Ordering::SeqCst);
-        *lock(&self.last_snapshot_ms) = None;
+        *lock(&self.last_received_ms) = None;
+        *lock(&self.snapshot_epoch) = None;
         put(self.snapshot, None);
         put(self.selected, None);
         let _ = self.selected_cpu.try_update(SeriesBuffer::clear);
@@ -1275,7 +1399,8 @@ impl ProcessesController {
     }
 
     fn record(&self, snapshot: &ProcessSnapshot) {
-        *lock(&self.last_snapshot_ms) = Some(snapshot.unix_ms);
+        *lock(&self.last_received_ms) = Some(self.env.now_ms());
+        *lock(&self.snapshot_epoch) = self.env.epoch();
         let Some(Some((pid, start_unix_s))) = self.selected.try_get_untracked() else {
             return;
         };
@@ -1291,7 +1416,7 @@ impl ProcessesController {
         if self.selected.try_get_untracked().flatten().is_some() {
             let _ = self.selected_cpu.try_update(SeriesBuffer::push_gap);
         }
-        let since_unix_ms = lock(&self.last_snapshot_ms).unwrap_or_else(now_unix_ms);
+        let since_unix_ms = lock(&self.last_received_ms).unwrap_or_else(|| self.env.now_ms());
         Link::Stale { since_unix_ms }
     }
 }
@@ -1351,6 +1476,9 @@ impl Streamed for ProcessesController {
         }
         if let Some(link) = link {
             put(self.link, link);
+            if link.is_stale() {
+                tick_while_stale(self);
+            }
         }
     }
 
@@ -1358,6 +1486,7 @@ impl Streamed for ProcessesController {
         if self.link.try_get_untracked() == Some(Link::Live) {
             let stale = self.go_stale();
             put(self.link, stale);
+            tick_while_stale(self);
         }
     }
 
@@ -1367,6 +1496,20 @@ impl Streamed for ProcessesController {
             self.stream.close();
             self.reconcile();
         }
+    }
+}
+
+impl Aged for ProcessesController {
+    fn ticking(&self) -> &AtomicBool {
+        &self.ticking
+    }
+
+    fn link_signal(&self) -> RwSignal<Link> {
+        self.link
+    }
+
+    fn tick_signal(&self) -> RwSignal<u64> {
+        self.stale_tick
     }
 }
 
@@ -1393,6 +1536,7 @@ mod tests {
     use crate::net::wake::WakeBus;
 
     const SEED_MS: i64 = 1_790_086_400_000;
+    const LOCAL_MS: i64 = 1_800_000_000_000;
 
     #[derive(Default)]
     struct ClockState {
@@ -1410,6 +1554,10 @@ mod tests {
             let at = state.now + delay;
             state.timers.push((at, Arc::clone(&ready)));
             Box::pin(async move { ready.notified().await })
+        }
+
+        fn now_ms(&self) -> i64 {
+            LOCAL_MS + lock(&self.0).now.as_millis() as i64
         }
 
         fn advance(&self, by: Duration) {
@@ -1493,6 +1641,7 @@ mod tests {
         fn env_over(&self, repository: SharedMonitorRepository) -> MonitorEnv {
             let allowed = Arc::clone(&self.allowed);
             let clock = self.clock.clone();
+            let phone = self.clock.clone();
             let bus = self.bus.clone();
             MonitorEnv::new(
                 repository,
@@ -1504,7 +1653,8 @@ mod tests {
                     },
                     move |delay| clock.sleep(delay),
                     move || bus.subscribe(),
-                ),
+                )
+                .with_now(move || phone.now_ms()),
             )
         }
 
@@ -1796,7 +1946,7 @@ mod tests {
             assert_eq!(
                 monitor.link.get_untracked(),
                 Link::Stale {
-                    since_unix_ms: SEED_MS
+                    since_unix_ms: LOCAL_MS
                 }
             );
             assert!(monitor.latest.get_untracked().is_some());
@@ -1830,7 +1980,7 @@ mod tests {
             assert_eq!(
                 monitor.link.get_untracked(),
                 Link::Stale {
-                    since_unix_ms: SEED_MS
+                    since_unix_ms: LOCAL_MS
                 }
             );
             rig.mock.push_sample(sample(SEED_MS + 9_000, 30.0));
@@ -1895,6 +2045,162 @@ mod tests {
             assert_eq!(rig.mock.vitals_opens().len(), 2);
             assert_eq!(rig.mock.open_watches(), 1);
         });
+    }
+
+    #[test]
+    fn pausing_a_stale_link_reads_paused_not_stale_and_resuming_restarts_staleness() {
+        run(async {
+            let rig = Rig::capable();
+            let monitor = rig.monitor();
+            monitor.start();
+            settle().await;
+            rig.clock.advance(stale_after(DEFAULT_INTERVAL_MS));
+            settle().await;
+            assert!(monitor.link.get_untracked().is_stale());
+            monitor.set_paused(true);
+            assert_eq!(monitor.link.get_untracked(), Link::Live);
+            assert!(monitor.paused.get_untracked());
+            rig.clock.advance(Duration::from_secs(120));
+            settle().await;
+            assert_eq!(monitor.link.get_untracked(), Link::Live);
+            monitor.set_paused(false);
+            settle().await;
+            assert_eq!(monitor.link.get_untracked(), Link::Live);
+            rig.clock.advance(stale_after(DEFAULT_INTERVAL_MS));
+            settle().await;
+            assert_eq!(
+                monitor.link.get_untracked(),
+                Link::Stale {
+                    since_unix_ms: LOCAL_MS + 8_000 + 120_000
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn the_stale_age_runs_on_the_phone_clock_and_re_renders_each_second() {
+        run(async {
+            let rig = Rig::capable();
+            let monitor = rig.monitor();
+            monitor.start();
+            settle().await;
+            rig.clock.advance(Duration::from_secs(2));
+            rig.mock.push_sample(sample(SEED_MS + 3_000, 30.0));
+            settle().await;
+            rig.clock.advance(stale_after(DEFAULT_INTERVAL_MS));
+            settle().await;
+            assert_eq!(
+                monitor.link.get_untracked(),
+                Link::Stale {
+                    since_unix_ms: LOCAL_MS + 2_000
+                }
+            );
+            let before = monitor.stale_tick.get_untracked();
+            for _ in 0..3 {
+                rig.clock.advance(STALE_TICK);
+                settle().await;
+            }
+            assert_eq!(monitor.stale_tick.get_untracked(), before + 3);
+            rig.mock.push_sample(sample(SEED_MS + 20_000, 31.0));
+            settle().await;
+            assert_eq!(monitor.link.get_untracked(), Link::Live);
+            rig.clock.advance(STALE_TICK);
+            settle().await;
+            assert_eq!(monitor.stale_tick.get_untracked(), before + 3);
+        });
+    }
+
+    #[test]
+    fn the_slots_a_pause_spanned_fill_as_gaps_with_or_without_a_seed() {
+        run(async {
+            let rig = Rig::capable();
+            let monitor = rig.monitor();
+            monitor.start();
+            settle().await;
+            monitor.set_paused(true);
+            monitor.set_paused(false);
+            rig.mock.push_sample(sample(SEED_MS + 12_000, 50.0));
+            settle().await;
+            assert_eq!(cpu_tail(&monitor, 4), [None, None, None, Some(50.0)]);
+        });
+    }
+
+    #[test]
+    fn losing_permission_while_mounted_closes_the_stream_until_it_returns() {
+        run(async {
+            let rig = Rig::capable();
+            let monitor = rig.monitor();
+            let processes = rig.processes();
+            monitor.start();
+            processes.start();
+            settle().await;
+            assert_eq!(rig.mock.open_watches(), 2);
+            rig.allowed.store(false, Ordering::SeqCst);
+            monitor.observe();
+            processes.observe();
+            assert_eq!(rig.mock.open_watches(), 0);
+            monitor.observe();
+            processes.observe();
+            assert_eq!(rig.mock.vitals_opens().len(), 1);
+            assert_eq!(rig.mock.process_opens().len(), 1);
+            rig.allowed.store(true, Ordering::SeqCst);
+            monitor.observe();
+            processes.observe();
+            assert_eq!(rig.mock.open_watches(), 2);
+        });
+    }
+
+    #[test]
+    fn a_dropped_signal_future_releases_the_single_flight_claim() {
+        run(async {
+            let rig = Rig::capable();
+            let gated = Gated::over(&rig.mock);
+            let processes = Arc::new(ProcessesController::new(
+                rig.env_over(Arc::clone(&gated) as SharedMonitorRepository),
+            ));
+            let sending = Arc::clone(&processes);
+            let first = tokio::task::spawn_local(async move {
+                sending.signal(4211, 7, ProcessSignal::Term).await
+            });
+            settle().await;
+            assert!(processes.signalling.get_untracked());
+            first.abort();
+            settle().await;
+            assert!(!processes.signalling.get_untracked());
+            gated.release(1);
+            assert_eq!(processes.signal(4211, 7, ProcessSignal::Kill).await, Ok(()));
+        });
+    }
+
+    #[test]
+    fn a_signal_across_an_epoch_change_is_refused_without_a_repository_call() {
+        run(async {
+            let rig = Rig::capable();
+            let processes = rig.processes();
+            processes.start();
+            settle().await;
+            processes.select(Some((4211, 7)));
+            rig.land(Some(server("other:7777", true)));
+            let refused = processes.signal(4211, 7, ProcessSignal::Term).await;
+            assert_eq!(
+                refused,
+                Err(AppFailure::Internal(MONITOR_UNAVAILABLE.to_string()))
+            );
+            assert!(rig.mock.signals().is_empty());
+        });
+    }
+
+    #[test]
+    fn slot_math_survives_extreme_server_timestamps() {
+        for (last, now) in [
+            (i64::MIN, i64::MAX),
+            (i64::MAX, i64::MIN),
+            (i64::MIN, 0),
+            (0, i64::MAX),
+        ] {
+            let _ = missing_slots(last, now, 3_000);
+        }
+        assert_eq!(missing_slots(i64::MAX, i64::MIN, 3_000), 0);
     }
 
     #[test]
