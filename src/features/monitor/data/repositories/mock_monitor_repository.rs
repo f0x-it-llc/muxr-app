@@ -6,12 +6,12 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::failure::AppFailure;
-use crate::features::monitor::data::repositories::grpc_monitor_repository::MONITORING_OFF;
 use crate::features::monitor::domain::entities::{
     DiskVolume, HistoryRange, HostInfo, LoadAverage, Memory, NetInterface, ProcessItem,
     ProcessQuery, ProcessRow, ProcessSignal, ProcessSnapshot, ProcessState, SeriesKind,
     Temperature, VitalsDetail, VitalsHistory, VitalsItem, VitalsSample,
 };
+use crate::features::monitor::domain::failures;
 use crate::features::monitor::domain::repositories::{
     MonitorRepository, MonitorWatch, ProcessSink, VitalsSink,
 };
@@ -225,7 +225,7 @@ impl MonitorRepository for MockMonitorRepository {
         let mut state = self.state();
         state.history_requests.push(range);
         if state.disabled {
-            return Err(AppFailure::Internal(MONITORING_OFF.to_string()));
+            return Err(failures::monitoring_off());
         }
         Ok(seed_history(range))
     }
@@ -268,7 +268,7 @@ impl MonitorRepository for MockMonitorRepository {
         let mut state = self.state();
         state.signals.push((pid, start_unix_s, signal));
         if state.disabled {
-            return Err(AppFailure::Internal(MONITORING_OFF.to_string()));
+            return Err(failures::monitoring_off());
         }
         state.signal_failure.clone().map_or(Ok(()), Err)
     }

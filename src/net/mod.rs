@@ -9,6 +9,7 @@ pub mod client;
 pub mod control;
 pub mod error;
 pub mod proto;
+pub mod pump;
 pub mod tls;
 pub mod wake;
 

@@ -4,12 +4,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::task::Poll;
 use std::time::Duration;
 
-use tokio::sync::Notify;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Code, Status};
 
@@ -20,19 +17,15 @@ use crate::features::monitor::domain::entities::{
     ProcessQuery, ProcessRow, ProcessSignal, ProcessSnapshot, ProcessSort, ProcessState,
     SeriesKind, Temperature, VitalsDetail, VitalsHistory, VitalsItem, VitalsSample,
 };
+use crate::features::monitor::domain::failures;
 use crate::features::monitor::domain::repositories::{
     MonitorRepository, MonitorWatch, ProcessSink, VitalsSink,
 };
 use crate::net::proto as wire;
+use crate::net::pump::{Nap, Stop, Winner, race};
 use crate::net::{MuxrClient, error};
 
 const NOT_CONNECTED: &str = "not connected to a server";
-
-pub const MONITORING_OFF: &str = "host monitoring is switched off on this server";
-
-pub const READ_ONLY: &str = "this server token is read-only and cannot signal processes";
-
-pub const INVALID_REQUEST: &str = "the server rejected the request as invalid";
 
 /// Retries past the end stay at the last step until the handle drops.
 pub const RECONNECT_BACKOFF: [Duration; 5] = [
@@ -69,6 +62,7 @@ impl GrpcMonitorRepository {
         Link {
             connection: Arc::clone(&self.connection),
             last: Mutex::new(None),
+            bound: Mutex::new(None),
             request,
         }
     }
@@ -121,18 +115,30 @@ impl MonitorRepository for GrpcMonitorRepository {
             .await
             .map_err(|status| self.map_status(&client, status))?
             .into_inner();
-        error::ack_result(&ack)
+        signal_ack(&ack)
     }
 }
 
 fn status_failure(status: &Status) -> AppFailure {
-    let detail = |what: &str| format!("{what}: {}", status.message());
     match status.code() {
-        Code::FailedPrecondition => AppFailure::Internal(MONITORING_OFF.to_string()),
-        Code::PermissionDenied => AppFailure::Auth(detail(READ_ONLY)),
-        Code::InvalidArgument => AppFailure::Internal(detail(INVALID_REQUEST)),
+        Code::FailedPrecondition => failures::monitoring_off(),
+        Code::PermissionDenied => failures::read_only(status.message()),
+        Code::InvalidArgument => failures::invalid_request(status.message()),
         _ => error::from_status(status),
     }
+}
+
+/// A refused ack is the server's answer, not a transport fault, so it never retries.
+fn signal_ack(ack: &wire::ActionAck) -> Result<(), AppFailure> {
+    if ack.ok {
+        return Ok(());
+    }
+    let reason = if ack.error.is_empty() {
+        "no reason given"
+    } else {
+        &ack.error
+    };
+    Err(failures::signal_refused(reason))
 }
 
 type WireStream<E> = Pin<Box<dyn Stream<Item = Result<E, Status>> + Send>>;
@@ -140,6 +146,8 @@ type WireStream<E> = Pin<Box<dyn Stream<Item = Result<E, Status>> + Send>>;
 enum Opened<E> {
     Stream(WireStream<E>),
     Offline,
+    /// The connection now holds another client than the one the watch began on.
+    Switched,
     Refused(Status),
 }
 
@@ -197,18 +205,37 @@ impl WatchItem for ProcessItem {
     }
 }
 
-/// Remembers the client of the last open, so an expiry is reported against the one that failed.
+/// Remembers the client of the last open, so an expiry is reported against the one that failed,
+/// and the client the watch began on, so a reopen never lands on another server.
 struct Link<Q> {
     connection: Arc<ConnectionController>,
     last: Mutex<Option<MuxrClient>>,
+    bound: Mutex<Option<MuxrClient>>,
     request: Q,
 }
 
+enum Reach {
+    Client(MuxrClient),
+    Offline,
+    Switched,
+}
+
 impl<Q> Link<Q> {
-    fn client(&self) -> Option<MuxrClient> {
-        let client = self.connection.client();
-        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = client.clone();
-        client
+    fn client(&self) -> Reach {
+        let current = self.connection.client();
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = current.clone();
+        let Some(client) = current else {
+            return Reach::Offline;
+        };
+        let mut bound = self.bound.lock().unwrap_or_else(PoisonError::into_inner);
+        match bound.as_ref() {
+            Some(first) if !first.is_same(&client) => Reach::Switched,
+            Some(_) => Reach::Client(client),
+            None => {
+                *bound = Some(client.clone());
+                Reach::Client(client)
+            }
+        }
     }
 
     fn expired(&self) {
@@ -229,8 +256,10 @@ impl WatchSource for VitalsSource {
     type Event = wire::VitalsEvent;
 
     async fn open(&self) -> Opened<wire::VitalsEvent> {
-        let Some(client) = self.0.client() else {
-            return Opened::Offline;
+        let client = match self.0.client() {
+            Reach::Client(client) => client,
+            Reach::Offline => return Opened::Offline,
+            Reach::Switched => return Opened::Switched,
         };
         match client.authed().watch_vitals(self.0.request).await {
             Ok(response) => Opened::Stream(Box::pin(response.into_inner())),
@@ -249,8 +278,10 @@ impl WatchSource for ProcessSource {
     type Event = wire::ProcessSnapshot;
 
     async fn open(&self) -> Opened<wire::ProcessSnapshot> {
-        let Some(client) = self.0.client() else {
-            return Opened::Offline;
+        let client = match self.0.client() {
+            Reach::Client(client) => client,
+            Reach::Offline => return Opened::Offline,
+            Reach::Switched => return Opened::Switched,
         };
         match client
             .authed()
@@ -267,74 +298,11 @@ impl WatchSource for ProcessSource {
     }
 }
 
-#[derive(Default)]
-struct Stop {
-    stopped: AtomicBool,
-    wake: Notify,
-}
-
-impl Stop {
-    fn stop(&self) {
-        self.stopped.store(true, Ordering::Release);
-        self.wake.notify_one();
-    }
-
-    fn is_stopped(&self) -> bool {
-        self.stopped.load(Ordering::Acquire)
-    }
-
-    /// The stored permit makes a stop raised between the check and the wait unmissable.
-    async fn stopped(&self) {
-        while !self.is_stopped() {
-            self.wake.notified().await;
-        }
-    }
-}
-
-/// Production `tokio` has no timer, so the app naps on frust's blocking pool.
-enum Nap {
-    Frust,
-    #[cfg(test)]
-    Tokio,
-}
-
-impl Nap {
-    async fn sleep(&self, delay: Duration) {
-        match self {
-            Nap::Frust => {
-                let _ = frust::spawn_blocking(move || std::thread::sleep(delay)).await;
-            }
-            #[cfg(test)]
-            Nap::Tokio => tokio::time::sleep(delay).await,
-        }
-    }
-}
-
-enum Winner<A, B> {
-    First(A),
-    Second(B),
-}
-
-/// Production `tokio` has no `select!`; `first` wins a tie.
-async fn race<A: Future, B: Future>(first: A, second: B) -> Winner<A::Output, B::Output> {
-    let mut first = std::pin::pin!(first);
-    let mut second = std::pin::pin!(second);
-    std::future::poll_fn(move |cx| {
-        if let Poll::Ready(value) = first.as_mut().poll(cx) {
-            return Poll::Ready(Winner::First(value));
-        }
-        if let Poll::Ready(value) = second.as_mut().poll(cx) {
-            return Poll::Ready(Winner::Second(value));
-        }
-        Poll::Pending
-    })
-    .await
-}
-
 enum End {
     Dropped { delivered: bool },
     Disabled,
     Expired,
+    Switched,
 }
 
 fn stream_end(status: &Status, delivered: bool) -> End {
@@ -399,6 +367,12 @@ where
             match end {
                 End::Disabled => return self.emit(I::DISABLED),
                 End::Expired => return self.source.expired(),
+                End::Switched => {
+                    if !dropped {
+                        self.emit(I::DROPPED);
+                    }
+                    return;
+                }
                 End::Dropped { delivered: true } => step = 0,
                 End::Dropped { delivered: false } => {}
             }
@@ -420,6 +394,7 @@ where
         let mut stream = match self.source.open().await {
             Opened::Stream(stream) => stream,
             Opened::Offline => return End::Dropped { delivered: false },
+            Opened::Switched => return End::Switched,
             Opened::Refused(status) => return stream_end(&status, false),
         };
         let mut delivered = false;
@@ -641,11 +616,12 @@ fn map_snapshot(snapshot: wire::ProcessSnapshot) -> ProcessSnapshot {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use clean_signals::Failure;
 
     use super::*;
+    use crate::features::monitor::domain::failures::{MonitorFailureKind, monitor_failure_kind};
     use crate::net::testing::wait_until;
 
     const TEST_BACKOFF: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(5)];
@@ -1052,19 +1028,86 @@ mod tests {
 
     #[test]
     fn signal_refusals_map_to_distinct_failures() {
-        let read_only = status_failure(&Status::permission_denied("read-only token"));
-        assert!(matches!(&read_only, AppFailure::Auth(d) if d.contains(READ_ONLY)));
-        let off = status_failure(&Status::failed_precondition("monitoring off"));
-        assert_eq!(off, AppFailure::Internal(MONITORING_OFF.to_string()));
-        assert!(!off.is_retryable());
-        let invalid = status_failure(&Status::invalid_argument("pid 0"));
-        assert!(matches!(&invalid, AppFailure::Internal(d) if d.contains(INVALID_REQUEST)));
-        assert_ne!(off, invalid);
+        let kind = |status: Status| monitor_failure_kind(&status_failure(&status));
+        assert_eq!(
+            kind(Status::permission_denied("read-only token")),
+            MonitorFailureKind::ReadOnly
+        );
+        assert_eq!(
+            kind(Status::failed_precondition("monitoring off")),
+            MonitorFailureKind::MonitoringOff
+        );
+        assert_eq!(
+            kind(Status::invalid_argument("pid 0")),
+            MonitorFailureKind::InvalidRequest
+        );
         assert!(matches!(
             status_failure(&Status::unauthenticated("expired")),
             AppFailure::Auth(_)
         ));
         assert!(status_failure(&Status::unavailable("down")).is_retryable());
+    }
+
+    #[test]
+    fn read_only_and_off_are_internal_and_not_retryable() {
+        for status in [
+            Status::permission_denied("read-only token"),
+            Status::failed_precondition("off"),
+            Status::invalid_argument("pid 0"),
+        ] {
+            let failure = status_failure(&status);
+            assert!(matches!(failure, AppFailure::Internal(_)), "{failure}");
+            assert!(!failure.is_retryable());
+        }
+    }
+
+    #[test]
+    fn a_refused_ack_is_a_non_retryable_refusal_with_the_server_text() {
+        let refused = wire::ActionAck {
+            ok: false,
+            error: "no such process".to_string(),
+            ..Default::default()
+        };
+        let failure = signal_ack(&refused).expect_err("refused");
+        assert!(!failure.is_retryable());
+        assert_eq!(
+            monitor_failure_kind(&failure),
+            MonitorFailureKind::Refused("no such process".to_string())
+        );
+        let ok = wire::ActionAck {
+            ok: true,
+            ..Default::default()
+        };
+        assert!(signal_ack(&ok).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_reopen_on_another_client_ends_the_pump_with_dropped() {
+        let script = MockScript::new(vec![
+            Opened::Refused(Status::unavailable("reset")),
+            Opened::Switched,
+        ]);
+        let (_watch, task, seen) = pump(&script);
+        finished(task).await;
+        assert_eq!(kinds(&seen), ["dropped"]);
+        assert_eq!(script.opens.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_link_binds_to_its_first_client_and_refuses_another() {
+        let fixture = crate::net::testing::MuxrdFixture::start().await;
+        let first = fixture.connect_pinned().await;
+        let other = fixture.connect_pinned().await;
+        let link = Link {
+            connection: ConnectionController::with_live_client_for_tests(first.clone()),
+            last: Mutex::new(None),
+            bound: Mutex::new(None),
+            request: (),
+        };
+        assert!(matches!(link.client(), Reach::Client(c) if c.is_same(&first)));
+        assert!(matches!(link.client(), Reach::Client(_)));
+        *link.bound.lock().expect("bound") = Some(other);
+        assert!(matches!(link.client(), Reach::Switched));
     }
 
     #[tokio::test]

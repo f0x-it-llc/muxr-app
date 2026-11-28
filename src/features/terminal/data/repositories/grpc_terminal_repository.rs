@@ -6,10 +6,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use tokio::sync::Notify;
 use tonic::{Code, Status};
 
 use crate::agents::{AgentStatus, agent_sort_key};
@@ -31,6 +29,7 @@ use crate::net::proto::{
     ScrollDirection, ScrollReq, SessionRef, SpaceList, SwitchSpaceReq, TabTarget,
     ToggleFullscreenReq, agent_event,
 };
+use crate::net::pump::{Nap, Stop, Winner, race};
 use crate::net::{MuxrClient, error};
 
 const NOT_CONNECTED: &str = "not connected to a server";
@@ -123,7 +122,7 @@ impl GrpcTerminalRepository {
         let handle = WatchHandle::new(
             Arc::clone(&watch.live),
             Arc::clone(&watch.ended),
-            move || stop.stop(),
+            move || stop.stop.stop(),
         );
         let keys = StreamKeys {
             spaces: HashMap::new(),
@@ -249,24 +248,9 @@ fn lock_keys(known: &Mutex<KnownKeys>) -> MutexGuard<'_, KnownKeys> {
 
 #[derive(Default)]
 struct AgentWatch {
-    stop: AtomicBool,
-    wake: Notify,
+    stop: Stop,
     live: Arc<AtomicBool>,
     ended: Arc<AtomicU8>,
-}
-
-impl AgentWatch {
-    fn stop(&self) {
-        self.stop.store(true, Ordering::Release);
-        self.wake.notify_one();
-    }
-
-    /// The stored permit makes a stop raised between the check and the wait unmissable.
-    async fn stopped(&self) {
-        while !self.stop.load(Ordering::Acquire) {
-            self.wake.notified().await;
-        }
-    }
 }
 
 enum StreamEnd {
@@ -276,25 +260,6 @@ enum StreamEnd {
     },
     Clean,
     Unauthenticated,
-}
-
-/// Production `tokio` has no timer, so the app naps on frust's blocking pool.
-enum Nap {
-    Frust,
-    #[cfg(test)]
-    Tokio,
-}
-
-impl Nap {
-    async fn sleep(&self, delay: Duration) {
-        match self {
-            Nap::Frust => {
-                let _ = frust::spawn_blocking(move || std::thread::sleep(delay)).await;
-            }
-            #[cfg(test)]
-            Nap::Tokio => tokio::time::sleep(delay).await,
-        }
-    }
 }
 
 /// Writes no signal. Reconnects on [`RECONNECT_BACKOFF`] (reset by a stream that delivered); a
@@ -312,7 +277,7 @@ async fn run_agent_watch(
     let mut step = 0;
     loop {
         let attempt = watch_once(&connection, &request, &sink, &watch, &mut keys);
-        let end = match race(watch.stopped(), attempt).await {
+        let end = match race(watch.stop.stopped(), attempt).await {
             Winner::First(()) => break,
             Winner::Second(end) => end,
         };
@@ -335,7 +300,7 @@ async fn run_agent_watch(
         };
         WatchEnd::Reconnecting.store(&watch.ended);
         step += 1;
-        if let Winner::First(()) = race(watch.stopped(), nap.sleep(delay)).await {
+        if let Winner::First(()) = race(watch.stop.stopped(), nap.sleep(delay)).await {
             break;
         }
     }
@@ -416,27 +381,6 @@ async fn map_agent_event(
         }
         agent_event::Kind::RemovedPaneId(pane_id) => Some(AgentEventEntry::Removed(pane_id)),
     }
-}
-
-enum Winner<A, B> {
-    First(A),
-    Second(B),
-}
-
-/// Production `tokio` has no `select!`; `first` wins a tie.
-async fn race<A: Future, B: Future>(first: A, second: B) -> Winner<A::Output, B::Output> {
-    let mut first = std::pin::pin!(first);
-    let mut second = std::pin::pin!(second);
-    std::future::poll_fn(move |cx| {
-        if let Poll::Ready(value) = first.as_mut().poll(cx) {
-            return Poll::Ready(Winner::First(value));
-        }
-        if let Poll::Ready(value) = second.as_mut().poll(cx) {
-            return Poll::Ready(Winner::Second(value));
-        }
-        Poll::Pending
-    })
-    .await
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), clean_signals::async_trait)]
@@ -965,6 +909,8 @@ fn focused_pane(panes: &[PaneMsg]) -> Option<&PaneMsg> {
 
 #[cfg(test)]
 mod tests {
+    use std::task::Poll;
+
     use frust::GetUntracked;
     use zeroize::Zeroizing;
 
