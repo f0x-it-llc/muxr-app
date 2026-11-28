@@ -7,14 +7,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust::{provide_context, use_context};
 
+use super::data::monitor_teaser_store::{MockMonitorTeaserStore, PrefsMonitorTeaserStore};
 use super::data::repositories::{
     DevelopEntitlementRepository, MockEntitlementRepository, PlayEntitlementRepository,
     UnavailableEntitlementRepository,
 };
-use super::domain::repositories::EntitlementRepository;
+use super::domain::repositories::{EntitlementRepository, MonitorTeaserStore};
 use super::presentation::controller::ProController;
 
 pub type SharedEntitlementRepository = Arc<dyn EntitlementRepository + Send + Sync>;
+
+pub type SharedMonitorTeaserStore = Arc<dyn MonitorTeaserStore + Send + Sync>;
 
 /// Whether this process publishes the scriptable mock handle beside the repository.
 static USE_MOCK_ENTITLEMENT_FOR_TESTS: AtomicBool = AtomicBool::new(false);
@@ -27,6 +30,24 @@ pub fn use_mock_entitlement_for_tests() {
 pub fn provide() {
     let repository = provide_entitlement_repository();
     provide_context(Arc::new(ProController::new(repository)));
+    provide_monitor_teaser_store();
+}
+
+/// Tests and `mock-iap` get the in-memory store; an unopenable preferences store keeps the teaser for this launch only.
+fn provide_monitor_teaser_store() {
+    let scripted = USE_MOCK_ENTITLEMENT_FOR_TESTS.load(Ordering::Relaxed);
+    let store: SharedMonitorTeaserStore = if scripted || cfg!(feature = "mock-iap") {
+        Arc::new(MockMonitorTeaserStore::new())
+    } else {
+        match PrefsMonitorTeaserStore::standard() {
+            Ok(store) => Arc::new(store),
+            Err(err) => {
+                log::warn!("pro monitor teaser: dismissal will not persist this launch: {err}");
+                Arc::new(MockMonitorTeaserStore::new())
+            }
+        }
+    };
+    provide_context(store);
 }
 
 /// Hands the store back so the controller is built over the same instance.
@@ -102,6 +123,13 @@ pub fn expect_entitlement_repository() -> SharedEntitlementRepository {
 pub fn expect_pro_controller() -> Arc<ProController> {
     use_context::<Arc<ProController>>().expect(
         "expect_pro_controller: features::pro::di::provide() must run first \
+         (MuxrApp::init calls it)",
+    )
+}
+
+pub fn expect_monitor_teaser_store() -> SharedMonitorTeaserStore {
+    use_context::<SharedMonitorTeaserStore>().expect(
+        "expect_monitor_teaser_store: features::pro::di::provide() must run first \
          (MuxrApp::init calls it)",
     )
 }
