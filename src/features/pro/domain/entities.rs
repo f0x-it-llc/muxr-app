@@ -31,12 +31,13 @@ impl Entitlement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProFeature {
     MultipleServers,
+    ServerMonitor,
 }
 
 impl ProFeature {
     pub fn requires_pro(self) -> bool {
         match self {
-            ProFeature::MultipleServers => true,
+            ProFeature::MultipleServers | ProFeature::ServerMonitor => true,
         }
     }
 }
@@ -161,6 +162,7 @@ mod tests {
     #[test]
     fn the_multiple_servers_feature_is_gated() {
         assert!(ProFeature::MultipleServers.requires_pro());
+        assert!(ProFeature::ServerMonitor.requires_pro());
     }
 
     #[test]

@@ -6,17 +6,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use frust::authoring::text::TextStyle;
-use frust::icons::LINK;
+use frust::icons::{LINK, PANE_MARK};
 use frust::{
     AnyView, Axis, ButtonStyle, CrossAxisAlignment, EitherOf3, FlexChild, FlexView, Get,
-    GetUntracked, IconSource, NavigatorController, SizedBox, View, any, button, icon, inflexible,
-    row, spawn_local, text,
+    GetUntracked, IconSource, NavigatorController, SizedBox, Theme, View, any, button, column,
+    icon, inflexible, row, spawn_local, text,
 };
 use frust_glyph::{dots_loader, skeleton};
 
 use crate::AppState;
 use crate::features::connect::domain::entities::SavedServer;
-use crate::features::pro::domain::entities::{ProOffer, PurchaseOutcome};
+use crate::features::pro::domain::entities::{ProFeature, ProOffer, PurchaseOutcome};
 use crate::features::pro::presentation::controller::{ProController, RestoreOutcome};
 use crate::ui::palette::{Palette, active_theme, inked};
 use crate::ui::sheet::{SheetHandle, show_sheet};
@@ -34,6 +34,8 @@ pub const NOTHING_TO_RESTORE_TOAST: &str = "No Muxr Pro purchase found for this 
 
 const SUBTITLE_COPY: &str = "One-time purchase. Yours on this account for good.";
 const MULTIPLE_SERVERS_COPY: &str = "Multiple servers";
+const SERVER_MONITOR_COPY: &str = "Server monitor";
+const SERVER_MONITOR_DETAIL_COPY: &str = "cpu, memory, disks, network and processes, live";
 const ALREADY_PRO_COPY: &str = "You're on Muxr Pro.";
 
 const TITLE_GAP: f64 = spacing::XS;
@@ -75,18 +77,32 @@ pub fn show_upgrade_sheet(
     pro: Arc<ProController>,
     context: UpgradeContext,
 ) {
+    show_upgrade_sheet_for(overlays, pro, ProFeature::MultipleServers, context);
+}
+
+/// The feature that raised the sheet leads the benefit list; the server-limit action only belongs to `MultipleServers`.
+pub fn show_upgrade_sheet_for(
+    overlays: &NavigatorController<AppState>,
+    pro: Arc<ProController>,
+    feature: ProFeature,
+    mut context: UpgradeContext,
+) {
+    if feature == ProFeature::ServerMonitor {
+        context.server_limit = None;
+    }
     if pro.offer.get_untracked().is_none() {
         let loading = Arc::clone(&pro);
         spawn_local(async move { loading.load_offer().await });
     }
     show_sheet(overlays, move |sheet| {
-        upgrade_sheet_body(&pro, sheet, &context)
+        upgrade_sheet_body(&pro, sheet, feature, &context)
     });
 }
 
 fn upgrade_sheet_body(
     pro: &Arc<ProController>,
     sheet: &SheetHandle,
+    feature: ProFeature,
     context: &UpgradeContext,
 ) -> impl View<AppState> + use<> {
     let theme = active_theme();
@@ -99,14 +115,12 @@ fn upgrade_sheet_body(
         any(gap(TITLE_GAP)),
         any(text(SUBTITLE_COPY).style(inked(&theme.type_scale.body_small, colors.fg_dim))),
         any(gap(SECTION_GAP)),
-        any(benefit_row(
-            MULTIPLE_SERVERS_COPY,
-            LINK,
-            &theme.type_scale.body_medium,
-            &colors,
-        )),
-        any(gap(SECTION_GAP)),
     ];
+    for benefit in benefit_order(feature) {
+        children.push(any(benefit_view(benefit, &theme, &colors)));
+        children.push(any(gap(ROW_GAP)));
+    }
+    children.push(any(gap(SECTION_GAP - ROW_GAP)));
 
     if entitled {
         children.push(any(
@@ -130,6 +144,43 @@ fn upgrade_sheet_body(
     }
     children.push(any(not_now_action(sheet)));
     stretch_column(children)
+}
+
+fn benefit_order(feature: ProFeature) -> [ProFeature; 2] {
+    match feature {
+        ProFeature::ServerMonitor => [ProFeature::ServerMonitor, ProFeature::MultipleServers],
+        ProFeature::MultipleServers => [ProFeature::MultipleServers, ProFeature::ServerMonitor],
+    }
+}
+
+fn benefit_view(benefit: ProFeature, theme: &Theme, colors: &Palette) -> AnyView<AppState> {
+    match benefit {
+        ProFeature::MultipleServers => any(benefit_row(
+            MULTIPLE_SERVERS_COPY,
+            LINK,
+            &theme.type_scale.body_medium,
+            colors,
+        )),
+        ProFeature::ServerMonitor => any(monitor_benefit_row(theme, colors)),
+    }
+}
+
+fn monitor_benefit_row(theme: &Theme, colors: &Palette) -> impl View<AppState> {
+    row()
+        .child(icon(PANE_MARK).size(BENEFIT_MARK).color(colors.amber))
+        .child(SizedBox::<AppState>(Some(BENEFIT_MARK_GAP), None))
+        .child(
+            column()
+                .child(
+                    text(SERVER_MONITOR_COPY)
+                        .style(inked(&theme.type_scale.body_medium, colors.fg)),
+                )
+                .child(
+                    text(SERVER_MONITOR_DETAIL_COPY)
+                        .style(inked(&theme.type_scale.body_small, colors.fg_dim)),
+                ),
+        )
+        .cross_axis(CrossAxisAlignment::Center)
 }
 
 fn offer_action(

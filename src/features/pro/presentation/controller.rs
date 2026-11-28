@@ -5,13 +5,13 @@
 use std::sync::Arc;
 
 use clean_signals::{ControllerCore, Failure, NoParams, RunOptions};
-use frust::{GetUntracked, RwSignal, Set};
+use frust::{Get, GetUntracked, RwSignal, Set};
 
 use crate::failure::AppFailure;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::features::pro::di::SharedEntitlementRepository;
 use crate::features::pro::domain::entities::{
-    Entitlement, ProOffer, PurchaseOutcome, RestoreResult, ServerLimitVerdict,
+    Entitlement, ProFeature, ProOffer, PurchaseOutcome, RestoreResult, ServerLimitVerdict,
 };
 use crate::features::pro::domain::use_cases::check_server_limit::check_new_server_limit;
 use crate::features::pro::domain::use_cases::{
@@ -48,6 +48,10 @@ fn quietly() -> RunOptions<AppFailure> {
         emit_failure: false,
         ..RunOptions::default()
     }
+}
+
+fn feature_unlocked(entitlement: Entitlement, feature: ProFeature) -> bool {
+    !feature.requires_pro() || entitlement.is_pro()
 }
 
 impl ProController {
@@ -153,6 +157,14 @@ impl ProController {
     /// Untracked: a press handler has no ambient owner on desktop for a tracked read.
     pub fn is_pro_untracked(&self) -> bool {
         self.entitlement.get_untracked().is_pro()
+    }
+
+    pub fn can_use(&self, feature: ProFeature) -> bool {
+        feature_unlocked(self.entitlement.get(), feature)
+    }
+
+    pub fn can_use_untracked(&self, feature: ProFeature) -> bool {
+        feature_unlocked(self.entitlement.get_untracked(), feature)
     }
 
     pub fn verdict_for(&self, saved: &[SavedServer], endpoint: &str) -> ServerLimitVerdict {
