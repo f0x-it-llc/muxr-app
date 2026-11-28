@@ -6,6 +6,11 @@ use frust::{provide_context, use_context};
 use crate::connection::expect_connection_controller;
 use crate::features::monitor::data::repositories::{GrpcMonitorRepository, MockMonitorRepository};
 use crate::features::monitor::domain::repositories::MonitorRepository;
+use crate::features::monitor::presentation::controllers::{
+    MonitorController, MonitorEnv, ProcessesController, Scheduler, VitalsSummaryController,
+};
+use crate::features::pro::di::expect_pro_controller;
+use crate::features::pro::domain::entities::ProFeature;
 
 pub type SharedMonitorRepository = Arc<dyn MonitorRepository + Send + Sync>;
 
@@ -43,4 +48,37 @@ pub fn expect_mock_monitor_repository() -> Arc<MockMonitorRepository> {
         "expect_mock_monitor_repository: provide() must run on the mock \
          (use_mock_monitor_for_tests)",
     )
+}
+
+/// Needs `provide` and `pro::di::provide` first; the permission reads Pro untracked at each open.
+pub fn monitor_env() -> MonitorEnv {
+    let pro = expect_pro_controller();
+    MonitorEnv::new(
+        expect_monitor_repository(),
+        expect_connection_controller(),
+        move || pro.can_use_untracked(ProFeature::ServerMonitor),
+        Scheduler::ui(),
+    )
+}
+
+pub fn provide_controller() -> Arc<VitalsSummaryController> {
+    let controller = Arc::new(VitalsSummaryController::new(monitor_env()));
+    provide_context(Arc::clone(&controller));
+    controller
+}
+
+pub fn expect_vitals_summary() -> Arc<VitalsSummaryController> {
+    use_context::<Arc<VitalsSummaryController>>().expect(
+        "expect_vitals_summary: features::monitor::di::provide_controller() must run first \
+         (MuxrApp::init calls it)",
+    )
+}
+
+/// A factory for `use_controller`, run from a screen's `Component::init`.
+pub fn new_monitor_controller() -> MonitorController {
+    MonitorController::new(monitor_env())
+}
+
+pub fn new_processes_controller() -> ProcessesController {
+    ProcessesController::new(monitor_env())
 }
