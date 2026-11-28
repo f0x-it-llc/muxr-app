@@ -6,7 +6,6 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
@@ -20,6 +19,7 @@ use crate::net::control::{CONTROL_CONNECTION_ID, CONTROL_EXIT};
 use crate::net::proto::{
     AttachReq, ClientFrame, MouseInput, MouseKind, Resize, ServerFrame, client_frame, server_frame,
 };
+use crate::net::pump::{Winner, race};
 use crate::net::wake::{self, WakeReason};
 
 /// No jitter. Resets on the first render frame after a (re)connect and on
@@ -912,27 +912,6 @@ async fn unless_signalled<F: Future>(
             Winner::Second(output) => return Ok(output),
         }
     }
-}
-
-enum Winner<A, B> {
-    First(A),
-    Second(B),
-}
-
-/// Production `tokio` carries no `select!`; `first` wins a tie.
-async fn race<A: Future, B: Future>(first: A, second: B) -> Winner<A::Output, B::Output> {
-    let mut first = std::pin::pin!(first);
-    let mut second = std::pin::pin!(second);
-    std::future::poll_fn(move |cx| {
-        if let Poll::Ready(value) = first.as_mut().poll(cx) {
-            return Poll::Ready(Winner::First(value));
-        }
-        if let Poll::Ready(value) = second.as_mut().poll(cx) {
-            return Poll::Ready(Winner::Second(value));
-        }
-        Poll::Pending
-    })
-    .await
 }
 
 #[cfg(test)]
