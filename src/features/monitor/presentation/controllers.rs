@@ -1300,7 +1300,6 @@ impl ProcessesController {
             return;
         }
         put(self.selected, pick);
-        *lock(&self.snapshot_epoch) = self.env.epoch();
         let _ = self.selected_cpu.try_update(SeriesBuffer::clear);
         self.requery(|query| query.pinned = pick);
     }
@@ -2218,6 +2217,26 @@ mod tests {
             settle().await;
             rig.mock.push_snapshot(snapshot(902, 9, 5.0));
             settle().await;
+            let refused = processes.signal(4211, 7, ProcessSignal::Term).await;
+            assert_eq!(
+                refused,
+                Err(AppFailure::Internal(MONITOR_UNAVAILABLE.to_string()))
+            );
+            assert!(rig.mock.signals().is_empty());
+        });
+    }
+
+    #[test]
+    fn selecting_after_a_server_switch_does_not_vouch_for_the_old_snapshot() {
+        run(async {
+            let rig = Rig::capable();
+            let processes = rig.processes();
+            processes.start();
+            settle().await;
+            rig.mock.push_snapshot(snapshot(4211, 7, 10.0));
+            settle().await;
+            rig.land(Some(server("other:7777", true)));
+            processes.select(Some((4211, 7)));
             let refused = processes.signal(4211, 7, ProcessSignal::Term).await;
             assert_eq!(
                 refused,
