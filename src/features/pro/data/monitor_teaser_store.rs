@@ -12,40 +12,16 @@ use crate::features::pro::domain::repositories::MonitorTeaserStore;
 const KEY_DISMISSED: &str = "pro_monitor_teaser_dismissed";
 
 pub(crate) struct PrefsMonitorTeaserStore {
-    backend: Backend,
+    store: SharedPreferences,
     dismissed_here: AtomicBool,
-}
-
-enum Backend {
-    Prefs(SharedPreferences),
-    /// In-process flag for unit tests: a headless process has no platform store or reactive runtime.
-    #[cfg(test)]
-    Memory(Arc<AtomicBool>),
 }
 
 impl PrefsMonitorTeaserStore {
     pub(crate) fn standard() -> Result<Self, PrefsError> {
-        Ok(Self::over(Backend::Prefs(SharedPreferences::standard()?)))
-    }
-
-    fn over(backend: Backend) -> Self {
-        Self {
-            backend,
+        Ok(Self {
+            store: SharedPreferences::standard()?,
             dismissed_here: AtomicBool::new(false),
-        }
-    }
-
-    #[cfg(test)]
-    fn in_memory() -> Self {
-        Self::over(Backend::Memory(Arc::new(AtomicBool::new(false))))
-    }
-
-    #[cfg(test)]
-    fn sharing_backing_with(other: &Self) -> Self {
-        match &other.backend {
-            Backend::Memory(flag) => Self::over(Backend::Memory(Arc::clone(flag))),
-            Backend::Prefs(_) => unreachable!("only the in-memory backend is shared"),
-        }
+        })
     }
 }
 
@@ -54,31 +30,43 @@ impl MonitorTeaserStore for PrefsMonitorTeaserStore {
         if self.dismissed_here.load(Ordering::Relaxed) {
             return true;
         }
-        match &self.backend {
-            Backend::Prefs(store) => store.get_bool(KEY_DISMISSED).unwrap_or(false),
-            #[cfg(test)]
-            Backend::Memory(flag) => flag.load(Ordering::Relaxed),
-        }
+        self.store.get_bool(KEY_DISMISSED).unwrap_or(false)
     }
 
     fn dismiss(&self) {
         self.dismissed_here.store(true, Ordering::Relaxed);
-        match &self.backend {
-            Backend::Prefs(store) => {
-                let store = store.clone();
-                spawn_blocking(move || {
-                    if let Err(err) = store.set_bool(KEY_DISMISSED, true) {
-                        log::warn!("pro monitor teaser: failed to persist the dismissal: {err}");
-                    }
-                });
+        let store = self.store.clone();
+        spawn_blocking(move || {
+            if let Err(err) = store.set_bool(KEY_DISMISSED, true) {
+                log::warn!("pro monitor teaser: failed to persist the dismissal: {err}");
             }
-            #[cfg(test)]
-            Backend::Memory(flag) => flag.store(true, Ordering::Relaxed),
-        }
+        });
     }
 }
 
-/// Headless stand-in; instances built over one backing behave like fresh launches over one preferences store.
+/// Production fallback when the preferences store cannot open: the dismissal holds for this launch only.
+#[derive(Clone, Default)]
+pub struct InMemoryMonitorTeaserStore {
+    dismissed: Arc<AtomicBool>,
+}
+
+impl InMemoryMonitorTeaserStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl MonitorTeaserStore for InMemoryMonitorTeaserStore {
+    fn is_dismissed(&self) -> bool {
+        self.dismissed.load(Ordering::Relaxed)
+    }
+
+    fn dismiss(&self) {
+        self.dismissed.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Test double: instances built over one backing behave like fresh launches over one preferences store.
 #[derive(Clone, Default)]
 pub struct MockMonitorTeaserStore {
     dismissed: Arc<AtomicBool>,
@@ -111,18 +99,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_fresh_store_is_not_dismissed() {
-        assert!(!PrefsMonitorTeaserStore::in_memory().is_dismissed());
-    }
-
-    #[test]
-    fn a_dismissal_survives_into_a_fresh_instance_over_the_same_backing() {
-        let first = PrefsMonitorTeaserStore::in_memory();
-        first.dismiss();
-        assert!(first.is_dismissed());
-
-        let relaunched = PrefsMonitorTeaserStore::sharing_backing_with(&first);
-        assert!(relaunched.is_dismissed());
+    fn a_fresh_in_memory_store_is_not_dismissed_until_dismissed() {
+        let store = InMemoryMonitorTeaserStore::new();
+        assert!(!store.is_dismissed());
+        store.dismiss();
+        assert!(store.is_dismissed());
     }
 
     #[test]
