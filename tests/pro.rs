@@ -292,6 +292,47 @@ fn a_failed_refresh_is_logged_never_announced_and_leaves_the_entitlement_alone()
 }
 
 #[test]
+fn the_entitlement_is_unresolved_until_the_first_refresh_answers_or_fails() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    assert!(!controller.resolved.get_untracked());
+    assert!(controller.is_deciding(ProFeature::ServerMonitor));
+
+    mock.fail_next_refresh(AppFailure::Network("store unreachable".to_string()));
+    block_on(controller.refresh());
+
+    assert!(
+        controller.resolved.get_untracked(),
+        "a failed refresh settles on the cache"
+    );
+    assert!(!controller.is_deciding(ProFeature::ServerMonitor));
+}
+
+#[test]
+fn a_cached_pro_is_never_deciding_even_before_the_first_refresh() {
+    let _g = serial();
+    let _ambient = setup();
+    let mock = Arc::new(MockEntitlementRepository::pro());
+    let controller = ProController::new(Arc::clone(&mock) as SharedEntitlementRepository);
+
+    assert!(!controller.resolved.get_untracked());
+    assert!(!controller.is_deciding(ProFeature::ServerMonitor));
+    assert!(controller.can_use_untracked(ProFeature::ServerMonitor));
+}
+
+#[test]
+fn a_landed_purchase_resolves_the_entitlement() {
+    let _g = serial();
+    let _ambient = setup();
+    let (_mock, controller) = controller();
+
+    block_on(controller.purchase());
+
+    assert!(controller.resolved.get_untracked());
+}
+
+#[test]
 fn a_failed_offer_lookup_settles_unavailable_and_announces_nothing() {
     let _g = serial();
     let _ambient = setup();

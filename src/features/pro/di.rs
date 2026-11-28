@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use frust::{provide_context, use_context};
 
-use super::data::monitor_teaser_store::{MockMonitorTeaserStore, PrefsMonitorTeaserStore};
+use super::data::monitor_teaser_store::{
+    InMemoryMonitorTeaserStore, MockMonitorTeaserStore, PrefsMonitorTeaserStore,
+};
 use super::data::repositories::{
     DevelopEntitlementRepository, MockEntitlementRepository, PlayEntitlementRepository,
     UnavailableEntitlementRepository,
@@ -33,17 +35,17 @@ pub fn provide() {
     provide_monitor_teaser_store();
 }
 
-/// Tests and `mock-iap` get the in-memory store; an unopenable preferences store keeps the teaser for this launch only.
+/// The test seam gets the mock; an unopenable preferences store falls back to the in-memory store for this launch.
 fn provide_monitor_teaser_store() {
     let scripted = USE_MOCK_ENTITLEMENT_FOR_TESTS.load(Ordering::Relaxed);
-    let store: SharedMonitorTeaserStore = if scripted || cfg!(feature = "mock-iap") {
+    let store: SharedMonitorTeaserStore = if scripted {
         Arc::new(MockMonitorTeaserStore::new())
     } else {
         match PrefsMonitorTeaserStore::standard() {
             Ok(store) => Arc::new(store),
             Err(err) => {
                 log::warn!("pro monitor teaser: dismissal will not persist this launch: {err}");
-                Arc::new(MockMonitorTeaserStore::new())
+                Arc::new(InMemoryMonitorTeaserStore::new())
             }
         }
     };

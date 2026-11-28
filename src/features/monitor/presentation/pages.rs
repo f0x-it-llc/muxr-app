@@ -8,10 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clean_signals_frust::use_controller;
 use frust::{
-    Align, Alignment, AnyView, Axis, ButtonStyle, Component, CrossAxisAlignment, EdgeInsets,
-    Either, FlexView, Get, GetUntracked, NavigatorController, Padding, SizedBox, View,
-    WindowMetrics, any, button, component, container, flexible, inflexible, on_cleanup, safe_area,
-    scroll_view, spawn_local, text, use_context,
+    Align, Alignment, AnyView, Axis, Component, CrossAxisAlignment, EdgeInsets, Either, FlexView,
+    Get, NavigatorController, Padding, SizedBox, View, WindowMetrics, any, component, container,
+    flexible, inflexible, on_cleanup, safe_area, scroll_view, spawn_local, use_context,
 };
 
 use crate::AppState;
@@ -19,7 +18,7 @@ use crate::connection::{ConnectionController, expect_connection_controller};
 use crate::failure::AppFailure;
 use crate::features::connect::domain::entities::epoch_millis;
 use crate::features::monitor::di::new_monitor_controller;
-use crate::features::monitor::presentation::controllers::{INTERVALS_MS, Link, MonitorController};
+use crate::features::monitor::presentation::controllers::{Link, MonitorController};
 use crate::features::pro::di::expect_pro_controller;
 use crate::features::pro::domain::entities::ProFeature;
 use crate::features::pro::presentation::UpgradeContext;
@@ -28,25 +27,19 @@ use crate::features::pro::presentation::widgets::upgrade_sheet::show_upgrade_she
 use crate::features::sessions::presentation::widgets::host_of;
 use crate::responsive::Responsive;
 use crate::routes::{MONITOR_ROUTE, MonitorView, Nav, app_nav};
-use crate::ui::palette::{Palette, active_theme, inked};
-use crate::ui::sheet::{SheetHandle, show_sheet};
-use crate::ui::spacing;
+use crate::ui::palette::{Palette, active_theme};
+use crate::ui::sheet::show_sheet;
 
 use super::widgets::{
-    HostStrip, dimmed, disabled_state, host_strip, offline_state, placeholder, unsupported_state,
+    HostStrip, dimmed, disabled_state, host_strip, menu_body, offline_state, placeholder,
+    unsupported_state,
 };
 
 pub const OVERVIEW_PLACEHOLDER: &str = "overview cards";
 pub const CPU_PLACEHOLDER: &str = "cpu detail";
 pub const PROCESSES_PLACEHOLDER: &str = "process table";
-pub const MENU_TITLE: &str = "Monitor";
-pub const PAUSE_LABEL: &str = "Pause";
-pub const RESUME_LABEL: &str = "Resume";
 
 const CLAMP_WIDTH: f64 = 640.0;
-const MENU_GAP: f64 = spacing::LG;
-const MENU_ROW_GAP: f64 = spacing::TIGHT;
-const CURRENT_MARK: &str = "\u{25cf}";
 
 pub fn monitor_page(
     view: MonitorView,
@@ -63,7 +56,16 @@ pub struct MonitorScreen {
 pub struct MonitorState {
     controller: Arc<MonitorController>,
     connection: Arc<ConnectionController>,
-    allowed: bool,
+    pro: Arc<ProController>,
+    guard: Guard,
+}
+
+/// The Pro guard's verdict: waits while the entitlement is unresolved, then lets in or sends away.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Guard {
+    Deciding,
+    Allowed,
+    Redirected,
 }
 
 #[derive(Clone)]
@@ -87,50 +89,6 @@ pub fn open_monitor_menu(_state: &mut AppState) {
     };
     let controller = chrome.controller;
     show_sheet(&chrome.overlays, move |sheet| menu_body(&controller, sheet));
-}
-
-fn interval_label(interval_ms: u32) -> String {
-    format!("{} s", interval_ms / 1_000)
-}
-
-fn menu_body(
-    controller: &Arc<MonitorController>,
-    sheet: &SheetHandle,
-) -> impl View<AppState> + use<> {
-    let theme = active_theme();
-    let colors = Palette::from_theme(&theme);
-    let current = controller.interval_ms.get_untracked();
-    let paused = controller.paused.get_untracked();
-    let mut children = vec![
-        inflexible(text(MENU_TITLE).style(inked(&theme.type_scale.label_large, colors.fg))),
-        inflexible(SizedBox::<AppState>(None, Some(MENU_GAP))),
-    ];
-    for interval_ms in INTERVALS_MS {
-        let label = if interval_ms == current {
-            format!("{CURRENT_MARK} {}", interval_label(interval_ms))
-        } else {
-            interval_label(interval_ms)
-        };
-        let (controller, sheet) = (Arc::clone(controller), sheet.clone());
-        children.push(inflexible(
-            button(label, move |_: &mut AppState| {
-                sheet.close();
-                controller.set_interval(interval_ms);
-            })
-            .style(ButtonStyle::Secondary),
-        ));
-        children.push(inflexible(SizedBox::<AppState>(None, Some(MENU_ROW_GAP))));
-    }
-    let (controller, sheet) = (Arc::clone(controller), sheet.clone());
-    let pause_label = if paused { RESUME_LABEL } else { PAUSE_LABEL };
-    children.push(inflexible(
-        button(pause_label, move |_: &mut AppState| {
-            sheet.close();
-            controller.set_paused(!paused);
-        })
-        .style(ButtonStyle::Secondary),
-    ));
-    FlexView::new(Axis::Vertical, children).cross_axis(CrossAxisAlignment::Stretch)
 }
 
 /// Pops rather than going: a `go` would replace the retained Sessions page under the monitor.
@@ -158,35 +116,62 @@ impl Component for MonitorScreen {
     type State = MonitorState;
 
     fn init(&self) -> MonitorState {
-        let nav = app_nav();
-        let pro = expect_pro_controller();
-        let connection = expect_connection_controller();
         let controller = use_controller::<MonitorController, AppFailure>(new_monitor_controller);
-        let allowed = pro.can_use_untracked(ProFeature::ServerMonitor);
-        if allowed {
-            controller.start();
-            if self.view == MonitorView::Overview {
-                self.publish_menu(&controller);
-            }
-        } else {
-            redirect_to_sessions(nav, self.overlays.clone(), pro);
+        if self.view == MonitorView::Overview {
+            self.publish_menu(&controller);
         }
         MonitorState {
             controller,
-            connection,
-            allowed,
+            connection: expect_connection_controller(),
+            pro: expect_pro_controller(),
+            guard: Guard::Deciding,
         }
     }
 
     fn build(&self, state: &mut MonitorState) -> impl View<MonitorState> {
-        if !state.allowed {
-            return Either::Left(SizedBox::<MonitorState>(Some(0.0), Some(0.0)));
-        }
+        self.apply_guard(state);
         let responsive = Responsive::of(use_context::<WindowMetrics>());
         let colors = Palette::from_theme(&active_theme());
+        let body: AnyView<MonitorState> = if state.guard == Guard::Allowed {
+            self.body(state, &colors)
+        } else {
+            any(SizedBox::<MonitorState>(Some(0.0), Some(0.0)))
+        };
+        let page = container(body).fill(colors.base);
+        if responsive.wide_clamp {
+            Either::Left(Align(
+                Alignment::CENTER,
+                SizedBox::<MonitorState>(Some(CLAMP_WIDTH), None).child(page),
+            ))
+        } else {
+            Either::Right(page)
+        }
+    }
+}
+
+impl MonitorScreen {
+    /// Tracked on every build, so a revocation while mounted redirects once, and the pop disposes the stream.
+    fn apply_guard(&self, state: &mut MonitorState) {
+        if state.guard == Guard::Redirected {
+            return;
+        }
+        let usable = state.pro.can_use(ProFeature::ServerMonitor);
+        let deciding = state.pro.is_deciding(ProFeature::ServerMonitor);
+        if usable {
+            if state.guard != Guard::Allowed {
+                state.guard = Guard::Allowed;
+                state.controller.start();
+            }
+        } else if !deciding {
+            state.guard = Guard::Redirected;
+            redirect_to_sessions(app_nav(), self.overlays.clone(), Arc::clone(&state.pro));
+        }
+    }
+
+    fn body(&self, state: &MonitorState, colors: &Palette) -> AnyView<MonitorState> {
         state.controller.observe();
         let link = state.controller.link.get();
-        let body: AnyView<MonitorState> = match link {
+        match link {
             Link::Unsupported => {
                 let (host, version) = state
                     .connection
@@ -198,21 +183,10 @@ impl Component for MonitorScreen {
             }
             Link::Disabled => any(disabled_state()),
             Link::Disconnected => any(offline_state()),
-            Link::Live | Link::Stale { .. } => self.live_body(state, link, &colors),
-        };
-        let page = container(body).fill(colors.base);
-        Either::Right(if responsive.wide_clamp {
-            Either::Left(Align(
-                Alignment::CENTER,
-                SizedBox::<MonitorState>(Some(CLAMP_WIDTH), None).child(page),
-            ))
-        } else {
-            Either::Right(page)
-        })
+            Link::Live | Link::Stale { .. } => self.live_body(state, link, colors),
+        }
     }
-}
 
-impl MonitorScreen {
     fn publish_menu(&self, controller: &Arc<MonitorController>) {
         let id = NEXT_CHROME_ID.fetch_add(1, Ordering::Relaxed);
         MONITOR_CHROME.with(|cell| {

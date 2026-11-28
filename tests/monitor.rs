@@ -2,10 +2,10 @@
 //! and the overflow menu, driven through the real router at Compact and Tablet sizes.
 
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use frust::{AnyView, Component, GetUntracked, Set};
+use frust::{AnyView, Component, GetUntracked, Set, any, button, spawn_local};
 use frust_core::RenderRoot;
 use frust_core::accesskit::Role;
 use frust_reactive::ReactiveRuntime;
@@ -16,12 +16,15 @@ use muxr::connection::{CAP_HOST_VITALS, ConnectTarget, TrustMode, expect_connect
 use muxr::features::monitor::di::expect_mock_monitor_repository;
 use muxr::features::monitor::domain::entities::{HostInfo, VitalsDetail};
 use muxr::features::monitor::presentation::controllers::INTERVALS_MS;
-use muxr::features::monitor::presentation::pages::{PAUSE_LABEL, RESUME_LABEL};
 use muxr::features::monitor::presentation::widgets::{
-    DISABLED_BODY, DISABLED_TITLE, OFFLINE_TITLE, UNSUPPORTED_TITLE, unsupported_body,
+    DISABLED_BODY, DISABLED_TITLE, OFFLINE_TITLE, PAUSE_LABEL, RESUME_LABEL, UNSUPPORTED_TITLE,
+    dimmed, unsupported_body,
 };
 use muxr::features::pro::di::{expect_pro_controller, mock_entitlement};
 use muxr::features::pro::domain::entities::Entitlement;
+use muxr::features::servers::di::expect_servers_controller;
+use muxr::features::servers::domain::entities::PageSnapshot;
+use muxr::features::servers::presentation::controller::ReconnectSeed;
 use muxr::routes::{
     MONITOR_CPU_ROUTE, MONITOR_PROCESSES_ROUTE, MONITOR_ROUTE, MonitorView, app_nav,
     monitor_location,
@@ -43,6 +46,10 @@ const SEEDED_IDENTITY: &str = "Arch Linux rolling \u{b7} x86_64 \u{b7} up ";
 const LIVE_3S: &str = "live \u{b7} 3s";
 const LIVE_5S: &str = "live \u{b7} 5s";
 const RECONNECTING: &str = "reconnecting \u{b7} last sample";
+const SEEDED_UPGRADE: &str = "Upgrade \u{b7} $4.99";
+const SHEET_TITLE: &str = "Server monitor";
+const CACHED_HOST: &str = "cached.example";
+const PROBE: &str = "Probe";
 const DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug)]
@@ -301,6 +308,12 @@ fn a_server_without_the_capability_gets_the_too_old_state_naming_its_muxrd(layou
     let body = unsupported_body(HOST, &info.server_version);
     assert!(h.shows(UNSUPPORTED_TITLE), "{layout:?}: {:?}", h.texts());
     assert!(body.contains(&info.server_version));
+    assert!(
+        h.shows(HOST),
+        "{layout:?}: the host is on screen (the empty state's body is not a semantics node): {:?}",
+        h.texts()
+    );
+    assert!(body.starts_with(HOST));
     assert!(!h.shows_prefix("live"), "{layout:?}");
     assert!(expect_mock_monitor_repository().vitals_opens().is_empty());
 }
@@ -477,3 +490,138 @@ fn a_disconnected_navigation_to_monitor_bounces_to_connect(layout: Layout) {
 }
 
 both_layouts!(a_disconnected_navigation_to_monitor_bounces_to_connect);
+
+/// Taps the probe under the wash and counts what reaches the control.
+fn taps_reaching_a_control_under_the_wash(layout: Layout, stale: bool) -> u32 {
+    let mut root: RenderRoot<u32, AnyView<u32>> = RenderRoot::new();
+    root.set_theme(Box::new(frust_glyph::baseline()));
+    let mut logic =
+        move |_: &mut u32| any(dimmed(button(PROBE, |count: &mut u32| *count += 1), stale));
+    let mut count = 0_u32;
+    let mut tcx = TextContext::new();
+    settle_sized(&mut root, &mut logic, &mut count, &mut tcx, layout.size());
+    let point = node_center_by_label(&root, PROBE).expect("the probe control is on screen");
+    tap(&mut root, &mut count, point);
+    settle_sized(&mut root, &mut logic, &mut count, &mut tcx, layout.size());
+    count
+}
+
+fn the_stale_wash_swallows_a_tap_on_a_control_under_it(layout: Layout) {
+    let _g = serial();
+    let _ambient = setup();
+
+    assert_eq!(
+        taps_reaching_a_control_under_the_wash(layout, false),
+        1,
+        "{layout:?}: a live body takes the tap"
+    );
+    assert_eq!(
+        taps_reaching_a_control_under_the_wash(layout, true),
+        0,
+        "{layout:?}: the stale wash absorbs it"
+    );
+}
+
+both_layouts!(the_stale_wash_swallows_a_tap_on_a_control_under_it);
+
+fn an_offline_cached_switch_titles_the_bar_with_the_cached_host(layout: Layout) {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::pro(layout);
+    h.push(MONITOR_ROUTE);
+    h.until("the live strip", |h| h.shows(LIVE_3S));
+    assert!(h.shows(HOST), "{layout:?}: the bar names the live host");
+
+    expect_servers_controller()
+        .seed
+        .set(Some(Arc::new(ReconnectSeed {
+            generation: 1,
+            endpoint: format!("{CACHED_HOST}:7777"),
+            host: CACHED_HOST.to_string(),
+            page: Arc::new(PageSnapshot {
+                sessions: Vec::new(),
+                info: None,
+                read_only: false,
+            }),
+        })));
+    expect_connection_controller().disconnect();
+    h.until("the offline state", |h| h.shows(OFFLINE_TITLE));
+
+    assert!(
+        h.shows(CACHED_HOST),
+        "{layout:?}: the bar names the cached server: {:?}",
+        h.texts()
+    );
+    assert!(!h.shows(HOST), "{layout:?}");
+}
+
+both_layouts!(an_offline_cached_switch_titles_the_bar_with_the_cached_host);
+
+fn unlocking_from_the_redirected_sheet_lands_on_the_monitor(layout: Layout) {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::free(layout);
+    h.push(MONITOR_ROUTE);
+    h.until("the upgrade sheet", |h| h.shows(SHEET_TITLE));
+
+    h.tap(SEEDED_UPGRADE);
+    h.until("the monitor after the purchase", |h| h.shows(LIVE_3S));
+
+    assert!(h.shows(BACK), "{layout:?}: {:?}", h.texts());
+    assert!(h.shows(HOST), "{layout:?}");
+    assert!(!h.shows(SHEET_TITLE), "{layout:?}: the sheet is gone");
+}
+
+both_layouts!(unlocking_from_the_redirected_sheet_lands_on_the_monitor);
+
+fn an_unresolved_entitlement_waits_and_a_pro_answer_never_bounces(layout: Layout) {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::free(layout);
+    let pro = expect_pro_controller();
+    pro.resolved.set(false);
+    mock_entitlement()
+        .expect("the test seam publishes the scriptable store")
+        .set_entitlement(Entitlement::Pro);
+
+    h.push(MONITOR_ROUTE);
+
+    assert!(!h.shows(SHEET_TITLE), "{layout:?}: no bounce while unknown");
+    assert!(h.shows(BACK), "{layout:?}: still on the monitor route");
+    assert!(!h.shows(LIVE_3S), "{layout:?}");
+    assert!(expect_mock_monitor_repository().vitals_opens().is_empty());
+
+    let refreshing = Arc::clone(&pro);
+    spawn_local(async move { refreshing.refresh().await });
+    h.until("the live strip once Pro resolves", |h| h.shows(LIVE_3S));
+
+    assert!(!h.shows(SHEET_TITLE), "{layout:?}");
+    assert!(h.shows(HOST), "{layout:?}");
+}
+
+both_layouts!(an_unresolved_entitlement_waits_and_a_pro_answer_never_bounces);
+
+fn a_revocation_while_mounted_redirects_to_sessions(layout: Layout) {
+    let _g = serial();
+    let _ambient = setup();
+    let mut h = Harness::pro(layout);
+    h.push(MONITOR_ROUTE);
+    h.until("the live strip", |h| h.shows(LIVE_3S));
+
+    mock_entitlement()
+        .expect("the test seam publishes the scriptable store")
+        .set_entitlement(Entitlement::Free);
+    expect_pro_controller().entitlement.set(Entitlement::Free);
+    h.until("the upgrade sheet", |h| h.shows(SHEET_TITLE));
+    h.tap("Not now");
+
+    assert!(
+        h.shows(BRAND),
+        "{layout:?}: Sessions is underneath: {:?}",
+        h.texts()
+    );
+    assert!(!h.shows(LIVE_3S), "{layout:?}");
+    assert!(!h.shows(BACK), "{layout:?}");
+}
+
+both_layouts!(a_revocation_while_mounted_redirects_to_sessions);
