@@ -17,6 +17,7 @@ use frust::{
 use crate::AppState;
 use crate::connection::ConnectionController;
 use crate::features::connect::presentation::pages::{add_server_page, connect_page};
+use crate::features::monitor::presentation::pages::monitor_page;
 use crate::features::sessions::presentation::pages::sessions_page;
 use crate::features::sessions::presentation::widgets::host_of;
 use crate::features::settings::presentation::app_pages::app_settings_page;
@@ -30,6 +31,24 @@ const TERMINAL_ROUTE: &str = "/terminal";
 pub const SETTINGS_ROUTE: &str = "/settings";
 pub const APP_SETTINGS_ROUTE: &str = "/settings/app";
 pub const TOKENS_ROUTE: &str = "/settings/tokens";
+pub const MONITOR_ROUTE: &str = "/monitor";
+pub const MONITOR_CPU_ROUTE: &str = "/monitor/cpu";
+pub const MONITOR_PROCESSES_ROUTE: &str = "/monitor/processes";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MonitorView {
+    Overview,
+    Cpu,
+    Processes,
+}
+
+pub const fn monitor_location(view: MonitorView) -> &'static str {
+    match view {
+        MonitorView::Overview => MONITOR_ROUTE,
+        MonitorView::Cpu => MONITOR_CPU_ROUTE,
+        MonitorView::Processes => MONITOR_PROCESSES_ROUTE,
+    }
+}
 
 /// The `/terminal` query keys, shared by the screens that push it and the one that reads it.
 pub const TERMINAL_SESSION_QUERY_KEY: &str = "session";
@@ -82,6 +101,7 @@ pub enum BarAction {
     Settings,
     TerminalMenu,
     NewToken,
+    MonitorMenu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +159,24 @@ pub fn route_meta(path: &str) -> Option<RouteMeta> {
             title: BarTitle::Fixed("auth tokens"),
             leading: BarLeading::Back,
             action: Some(BarAction::NewToken),
+            guarded: true,
+        }),
+        MONITOR_ROUTE => Some(RouteMeta {
+            title: BarTitle::ConnectedHost,
+            leading: BarLeading::Back,
+            action: Some(BarAction::MonitorMenu),
+            guarded: true,
+        }),
+        MONITOR_CPU_ROUTE => Some(RouteMeta {
+            title: BarTitle::Fixed("cpu"),
+            leading: BarLeading::Back,
+            action: None,
+            guarded: true,
+        }),
+        MONITOR_PROCESSES_ROUTE => Some(RouteMeta {
+            title: BarTitle::Fixed("processes"),
+            leading: BarLeading::Back,
+            action: None,
             guarded: true,
         }),
         _ => None,
@@ -631,6 +669,22 @@ pub(crate) fn build_routes(
                     let overlays = overlays.clone();
                     move |_params: &RouteParams| tokens_page(overlays.clone())
                 }),
+                Route::new(MONITOR_ROUTE, {
+                    let overlays = overlays.clone();
+                    move |_params: &RouteParams| {
+                        monitor_page(MonitorView::Overview, overlays.clone())
+                    }
+                }),
+                Route::new(MONITOR_CPU_ROUTE, {
+                    let overlays = overlays.clone();
+                    move |_params: &RouteParams| monitor_page(MonitorView::Cpu, overlays.clone())
+                }),
+                Route::new(MONITOR_PROCESSES_ROUTE, {
+                    let overlays = overlays.clone();
+                    move |_params: &RouteParams| {
+                        monitor_page(MonitorView::Processes, overlays.clone())
+                    }
+                }),
             ],
         ),
     ]
@@ -700,7 +754,15 @@ mod tests {
         let connection = Arc::new(ConnectionController::detached());
         let guard = session_guard_with(Arc::clone(&connection));
 
-        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE, TOKENS_ROUTE] {
+        for path in [
+            SESSIONS_ROUTE,
+            TERMINAL_ROUTE,
+            SETTINGS_ROUTE,
+            TOKENS_ROUTE,
+            MONITOR_ROUTE,
+            MONITOR_CPU_ROUTE,
+            MONITOR_PROCESSES_ROUTE,
+        ] {
             assert!(route_meta(path).is_some(), "{path} is in the shell");
             assert_eq!(
                 guard(&Location::parse(path)),
@@ -719,7 +781,15 @@ mod tests {
 
         connection.connect(target());
 
-        for path in [SESSIONS_ROUTE, TERMINAL_ROUTE, SETTINGS_ROUTE, TOKENS_ROUTE] {
+        for path in [
+            SESSIONS_ROUTE,
+            TERMINAL_ROUTE,
+            SETTINGS_ROUTE,
+            TOKENS_ROUTE,
+            MONITOR_ROUTE,
+            MONITOR_CPU_ROUTE,
+            MONITOR_PROCESSES_ROUTE,
+        ] {
             assert_eq!(
                 guard(&Location::parse(path)),
                 None,
@@ -743,6 +813,9 @@ mod tests {
             SETTINGS_ROUTE,
             APP_SETTINGS_ROUTE,
             TOKENS_ROUTE,
+            MONITOR_ROUTE,
+            MONITOR_CPU_ROUTE,
+            MONITOR_PROCESSES_ROUTE,
         ] {
             assert_eq!(
                 router.resolve(path).page_count(),
@@ -807,6 +880,9 @@ mod tests {
             SETTINGS_ROUTE,
             APP_SETTINGS_ROUTE,
             TOKENS_ROUTE,
+            MONITOR_ROUTE,
+            MONITOR_CPU_ROUTE,
+            MONITOR_PROCESSES_ROUTE,
         ] {
             assert!(route_meta(path).is_some(), "{path} carries a bar");
         }
@@ -847,6 +923,25 @@ mod tests {
         assert_eq!(meta.leading, BarLeading::Back);
         assert_eq!(meta.action, Some(BarAction::NewToken));
         assert!(meta.guarded);
+    }
+
+    #[test]
+    fn the_monitor_routes_are_guarded_backed_and_only_the_overview_carries_the_menu() {
+        let overview = route_meta(MONITOR_ROUTE).expect("a shell route");
+        assert_eq!(overview.title, BarTitle::ConnectedHost);
+        assert_eq!(overview.action, Some(BarAction::MonitorMenu));
+        for (view, title) in [
+            (MonitorView::Cpu, "cpu"),
+            (MonitorView::Processes, "processes"),
+        ] {
+            let meta = route_meta(monitor_location(view)).expect("a shell route");
+            assert_eq!(meta.title, BarTitle::Fixed(title));
+            assert_eq!(meta.action, None);
+            assert_eq!(meta.leading, BarLeading::Back);
+            assert!(meta.guarded);
+        }
+        assert_eq!(overview.leading, BarLeading::Back);
+        assert!(overview.guarded);
     }
 
     #[test]

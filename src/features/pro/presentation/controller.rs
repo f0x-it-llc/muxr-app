@@ -5,13 +5,13 @@
 use std::sync::Arc;
 
 use clean_signals::{ControllerCore, Failure, NoParams, RunOptions};
-use frust::{GetUntracked, RwSignal, Set};
+use frust::{Get, GetUntracked, RwSignal, Set};
 
 use crate::failure::AppFailure;
 use crate::features::connect::domain::entities::SavedServer;
 use crate::features::pro::di::SharedEntitlementRepository;
 use crate::features::pro::domain::entities::{
-    Entitlement, ProOffer, PurchaseOutcome, RestoreResult, ServerLimitVerdict,
+    Entitlement, ProFeature, ProOffer, PurchaseOutcome, RestoreResult, ServerLimitVerdict,
 };
 use crate::features::pro::domain::use_cases::check_server_limit::check_new_server_limit;
 use crate::features::pro::domain::use_cases::{
@@ -36,6 +36,8 @@ pub struct ProController {
     restore_purchases: RestorePurchases,
     store: SharedEntitlementRepository,
     pub entitlement: RwSignal<Entitlement>,
+    /// False until the first refresh, purchase or restore answers; a cached `Free` before then is only a guess.
+    pub resolved: RwSignal<bool>,
     /// `None` covers both "not asked yet" and "this platform cannot sell it".
     pub offer: RwSignal<Option<ProOffer>>,
     pub offer_settled: RwSignal<bool>,
@@ -50,6 +52,10 @@ fn quietly() -> RunOptions<AppFailure> {
     }
 }
 
+fn feature_unlocked(entitlement: Entitlement, feature: ProFeature) -> bool {
+    !feature.requires_pro() || entitlement.is_pro()
+}
+
 impl ProController {
     pub fn new(repository: SharedEntitlementRepository) -> Self {
         let cached = repository.cached();
@@ -61,6 +67,7 @@ impl ProController {
             restore_purchases: RestorePurchases::new(Arc::clone(&repository)),
             store: repository,
             entitlement: RwSignal::new(cached),
+            resolved: RwSignal::new(false),
             offer: RwSignal::new(None),
             offer_settled: RwSignal::new(false),
             busy: RwSignal::new(false),
@@ -82,6 +89,7 @@ impl ProController {
             Ok(entitlement) => self.entitlement.set(entitlement),
             Err(failure) => log::warn!("pro: entitlement refresh failed: {failure}"),
         }
+        self.resolved.set(true);
     }
 
     pub async fn follow_store_changes(&self) {
@@ -115,8 +123,14 @@ impl ProController {
             Err(failure) => PurchaseOutcome::Failed(failure.user_message()),
         };
         match outcome {
-            PurchaseOutcome::Purchased => self.entitlement.set(Entitlement::Pro),
-            PurchaseOutcome::Pending => self.entitlement.set(Entitlement::Pending),
+            PurchaseOutcome::Purchased => {
+                self.entitlement.set(Entitlement::Pro);
+                self.resolved.set(true);
+            }
+            PurchaseOutcome::Pending => {
+                self.entitlement.set(Entitlement::Pending);
+                self.resolved.set(true);
+            }
             _ => {}
         }
         self.last_outcome.set(Some(outcome.clone()));
@@ -137,6 +151,7 @@ impl ProController {
         {
             Ok(RestoreResult::Found(entitlement)) => {
                 self.entitlement.set(entitlement);
+                self.resolved.set(true);
                 match entitlement {
                     Entitlement::Pro => RestoreOutcome::Restored,
                     Entitlement::Pending => RestoreOutcome::Pending,
@@ -153,6 +168,19 @@ impl ProController {
     /// Untracked: a press handler has no ambient owner on desktop for a tracked read.
     pub fn is_pro_untracked(&self) -> bool {
         self.entitlement.get_untracked().is_pro()
+    }
+
+    pub fn can_use(&self, feature: ProFeature) -> bool {
+        feature_unlocked(self.entitlement.get(), feature)
+    }
+
+    /// Unusable and still unresolved reads as unknown, so a guard waits rather than deciding on a cold cache.
+    pub fn is_deciding(&self, feature: ProFeature) -> bool {
+        !self.can_use(feature) && !self.resolved.get()
+    }
+
+    pub fn can_use_untracked(&self, feature: ProFeature) -> bool {
+        feature_unlocked(self.entitlement.get_untracked(), feature)
     }
 
     pub fn verdict_for(&self, saved: &[SavedServer], endpoint: &str) -> ServerLimitVerdict {

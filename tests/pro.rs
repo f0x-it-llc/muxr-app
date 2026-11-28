@@ -15,17 +15,20 @@ use kurbo::Point;
 
 use muxr::failure::AppFailure;
 use muxr::features::connect::domain::entities::{SavedServer, TrustMode};
+use muxr::features::pro::data::monitor_teaser_store::MockMonitorTeaserStore;
 use muxr::features::pro::data::repositories::MockEntitlementRepository;
 use muxr::features::pro::di::{
-    SharedEntitlementRepository, expect_entitlement_repository, expect_pro_controller,
-    mock_entitlement,
+    SharedEntitlementRepository, expect_entitlement_repository, expect_monitor_teaser_store,
+    expect_pro_controller, mock_entitlement,
 };
 use muxr::features::pro::domain::entities::{
-    Entitlement, PurchaseOutcome, ServerLimitVerdict, row_is_beyond_free_tier,
+    Entitlement, ProFeature, PurchaseOutcome, ServerLimitVerdict, row_is_beyond_free_tier,
 };
+use muxr::features::pro::domain::repositories::MonitorTeaserStore;
 use muxr::features::pro::domain::use_cases::check_server_limit;
 use muxr::features::pro::domain::use_cases::check_server_limit::check_new_server_limit;
 use muxr::features::pro::presentation::controller::{ProController, RestoreOutcome};
+use muxr::features::pro::presentation::widgets::upgrade_sheet::show_upgrade_sheet_for;
 use muxr::features::pro::presentation::widgets::{
     NOT_NOW_LABEL, NOTHING_TO_RESTORE_TOAST, PENDING_TOAST, RESTORE_LABEL, UNAVAILABLE_COPY,
     UPGRADE_SHEET_TITLE,
@@ -286,6 +289,47 @@ fn a_failed_refresh_is_logged_never_announced_and_leaves_the_entitlement_alone()
         Entitlement::Pro,
         "an unreachable store must not downgrade a paying install"
     );
+}
+
+#[test]
+fn the_entitlement_is_unresolved_until_the_first_refresh_answers_or_fails() {
+    let _g = serial();
+    let _ambient = setup();
+    let (mock, controller) = controller();
+    assert!(!controller.resolved.get_untracked());
+    assert!(controller.is_deciding(ProFeature::ServerMonitor));
+
+    mock.fail_next_refresh(AppFailure::Network("store unreachable".to_string()));
+    block_on(controller.refresh());
+
+    assert!(
+        controller.resolved.get_untracked(),
+        "a failed refresh settles on the cache"
+    );
+    assert!(!controller.is_deciding(ProFeature::ServerMonitor));
+}
+
+#[test]
+fn a_cached_pro_is_never_deciding_even_before_the_first_refresh() {
+    let _g = serial();
+    let _ambient = setup();
+    let mock = Arc::new(MockEntitlementRepository::pro());
+    let controller = ProController::new(Arc::clone(&mock) as SharedEntitlementRepository);
+
+    assert!(!controller.resolved.get_untracked());
+    assert!(!controller.is_deciding(ProFeature::ServerMonitor));
+    assert!(controller.can_use_untracked(ProFeature::ServerMonitor));
+}
+
+#[test]
+fn a_landed_purchase_resolves_the_entitlement() {
+    let _g = serial();
+    let _ambient = setup();
+    let (_mock, controller) = controller();
+
+    block_on(controller.purchase());
+
+    assert!(controller.resolved.get_untracked());
 }
 
 #[test]
@@ -603,6 +647,20 @@ impl Sheet {
             || launch.refresh_calls() >= 1,
         );
         sheet
+    }
+
+    fn open_for(&mut self, feature: ProFeature) {
+        let unlocked = Rc::clone(&self.unlocked);
+        show_upgrade_sheet_for(
+            &self.nav,
+            Arc::clone(&self.pro),
+            feature,
+            UpgradeContext {
+                on_unlocked: Rc::new(move || unlocked.set(unlocked.get() + 1)),
+                server_limit: None,
+            },
+        );
+        self.flush();
     }
 
     fn open(&mut self, to_forget: Vec<SavedServer>) {
@@ -1004,4 +1062,106 @@ fn the_develop_repository_reports_pro_and_never_reaches_a_store() {
         rt.block_on(repo.restore()),
         Ok(RestoreResult::Found(Entitlement::Pro))
     );
+}
+
+fn position_of(values: &[String], wanted: &str) -> usize {
+    values
+        .iter()
+        .position(|v| v == wanted)
+        .unwrap_or_else(|| panic!("{wanted:?} missing from {values:?}"))
+}
+
+#[test]
+fn the_monitor_is_usable_only_by_pro_and_follows_the_entitlement() {
+    let (mock, controller) = controller();
+    assert!(!controller.can_use_untracked(ProFeature::ServerMonitor));
+
+    mock.set_entitlement(Entitlement::Pending);
+    block_on(controller.refresh());
+    assert!(!controller.can_use_untracked(ProFeature::ServerMonitor));
+
+    mock.set_entitlement(Entitlement::Pro);
+    block_on(controller.refresh());
+    assert!(controller.can_use_untracked(ProFeature::ServerMonitor));
+    assert!(controller.can_use(ProFeature::ServerMonitor));
+
+    mock.set_entitlement(Entitlement::Free);
+    block_on(controller.refresh());
+    assert!(!controller.can_use_untracked(ProFeature::ServerMonitor));
+}
+
+#[test]
+fn opened_for_the_monitor_the_sheet_lists_it_before_multiple_servers() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut sheet = Sheet::mount();
+
+    sheet.open_for(ProFeature::ServerMonitor);
+
+    let values = sheet.values();
+    assert!(
+        position_of(&values, "Server monitor") < position_of(&values, "Multiple servers"),
+        "{values:?}"
+    );
+    assert!(
+        values
+            .iter()
+            .any(|v| v == "cpu, memory, disks, network and processes, live"),
+        "{values:?}"
+    );
+    let labels = sheet.labels();
+    for expected in [SEEDED_UPGRADE, RESTORE_LABEL, NOT_NOW_LABEL] {
+        assert!(labels.iter().any(|l| l == expected), "{labels:?}");
+    }
+}
+
+#[test]
+fn opened_the_old_way_the_sheet_lists_the_monitor_after_multiple_servers() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut sheet = Sheet::mount();
+
+    sheet.open(Vec::new());
+
+    let values = sheet.values();
+    assert!(
+        position_of(&values, "Multiple servers") < position_of(&values, "Server monitor"),
+        "{values:?}"
+    );
+}
+
+#[test]
+fn a_purchase_from_the_monitor_sheet_unlocks_exactly_once() {
+    let _g = serial();
+    let _ambient = setup();
+    let mut sheet = Sheet::mount();
+    sheet.open_for(ProFeature::ServerMonitor);
+
+    sheet.tap_label(SEEDED_UPGRADE);
+
+    assert_eq!(sheet.depth(), 1);
+    assert_eq!(sheet.unlocked.get(), 1);
+    assert!(sheet.pro.can_use_untracked(ProFeature::ServerMonitor));
+}
+
+#[test]
+fn the_teaser_flag_is_per_install_and_published_by_the_composition_root() {
+    let _g = serial();
+    let _ambient = setup();
+    let _state = MuxrApp.init();
+
+    let store = expect_monitor_teaser_store();
+    assert!(!store.is_dismissed());
+    store.dismiss();
+    assert!(expect_monitor_teaser_store().is_dismissed());
+}
+
+#[test]
+fn a_dismissed_teaser_reads_dismissed_from_a_fresh_store_over_the_same_backing() {
+    let first = MockMonitorTeaserStore::new();
+    assert!(!first.is_dismissed());
+    first.dismiss();
+
+    let relaunched = MockMonitorTeaserStore::sharing_backing_with(&first);
+    assert!(relaunched.is_dismissed());
 }

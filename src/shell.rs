@@ -13,6 +13,7 @@ use frust_glyph::{
 use crate::AppState;
 use crate::connection::ConnectionController;
 use crate::features::connect::domain::entities::epoch_millis;
+use crate::features::monitor::presentation::pages::open_monitor_menu;
 use crate::features::pro::di::expect_pro_controller;
 use crate::features::servers::di::{
     expect_servers_controller, expect_switcher_back, keep_peers, use_last_seen,
@@ -43,6 +44,7 @@ const TABLET_CARD_SCALE: f64 = 0.58;
 const TABLET_FAB_MARGIN: f64 = 24.0;
 const TERMINAL_MENU_LABEL: &str = "Terminal menu";
 const NEW_TOKEN_LABEL: &str = "New token";
+const MONITOR_MENU_LABEL: &str = "Monitor menu";
 
 /// Toasts mount above this host; `Stack` reconciles positionally, so the navigator keeps index 0.
 pub fn root_view(
@@ -261,6 +263,11 @@ fn shell_bar(nav: &Nav, connection: &ConnectionController) -> Option<impl View<A
             icons::MORE_VERT,
             TERMINAL_MENU_LABEL,
             open_terminal_menu,
+        )],
+        Some(BarAction::MonitorMenu) => vec![bar_icon(
+            icons::MORE_VERT,
+            MONITOR_MENU_LABEL,
+            open_monitor_menu,
         )],
         // Dimmed on a read-only session, whose tap only toasts why.
         Some(BarAction::NewToken) => {

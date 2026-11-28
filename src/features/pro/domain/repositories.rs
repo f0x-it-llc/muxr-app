@@ -26,3 +26,10 @@ pub trait EntitlementRepository {
         std::future::pending::<()>().await
     }
 }
+
+/// Per install, not per server; synchronous because it is read while a page is being built.
+pub trait MonitorTeaserStore {
+    fn is_dismissed(&self) -> bool;
+
+    fn dismiss(&self);
+}
