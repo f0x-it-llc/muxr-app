@@ -1312,9 +1312,19 @@ impl ProcessesController {
         start_unix_s: i64,
         signal: ProcessSignal,
     ) -> Result<(), AppFailure> {
-        let fenced =
-            lock(&self.snapshot_epoch).is_some_and(|taken| Some(taken) != self.env.epoch());
-        let usable = !fenced
+        let current =
+            lock(&self.snapshot_epoch).is_some_and(|taken| Some(taken) == self.env.epoch());
+        let listed = current
+            && self
+                .snapshot
+                .try_get_untracked()
+                .flatten()
+                .is_some_and(|snap| {
+                    snap.rows
+                        .iter()
+                        .any(|row| row.pid == pid && row.start_unix_s == start_unix_s)
+                });
+        let usable = listed
             && self.env.gate() == Gate::Open
             && !self.disabled.load(Ordering::SeqCst)
             && self.env.permitted();
@@ -2158,6 +2168,10 @@ mod tests {
             let processes = Arc::new(ProcessesController::new(
                 rig.env_over(Arc::clone(&gated) as SharedMonitorRepository),
             ));
+            processes.start();
+            settle().await;
+            rig.mock.push_snapshot(snapshot(4211, 7, 10.0));
+            settle().await;
             let sending = Arc::clone(&processes);
             let first = tokio::task::spawn_local(async move {
                 sending.signal(4211, 7, ProcessSignal::Term).await
@@ -2181,6 +2195,29 @@ mod tests {
             settle().await;
             processes.select(Some((4211, 7)));
             rig.land(Some(server("other:7777", true)));
+            let refused = processes.signal(4211, 7, ProcessSignal::Term).await;
+            assert_eq!(
+                refused,
+                Err(AppFailure::Internal(MONITOR_UNAVAILABLE.to_string()))
+            );
+            assert!(rig.mock.signals().is_empty());
+        });
+    }
+
+    #[test]
+    fn a_row_listed_on_the_previous_server_cannot_be_signalled_on_the_next() {
+        run(async {
+            let rig = Rig::capable();
+            let processes = rig.processes();
+            processes.start();
+            settle().await;
+            rig.mock.push_snapshot(snapshot(4211, 7, 10.0));
+            settle().await;
+            rig.land(Some(server("other:7777", true)));
+            processes.observe();
+            settle().await;
+            rig.mock.push_snapshot(snapshot(902, 9, 5.0));
+            settle().await;
             let refused = processes.signal(4211, 7, ProcessSignal::Term).await;
             assert_eq!(
                 refused,
@@ -2368,6 +2405,10 @@ mod tests {
             let processes = Arc::new(ProcessesController::new(
                 rig.env_over(Arc::clone(&gated) as SharedMonitorRepository),
             ));
+            processes.start();
+            settle().await;
+            rig.mock.push_snapshot(snapshot(4211, 7, 10.0));
+            settle().await;
             let sending = Arc::clone(&processes);
             let first = tokio::task::spawn_local(async move {
                 sending.signal(4211, 7, ProcessSignal::Term).await
@@ -2384,6 +2425,8 @@ mod tests {
             assert!(!processes.signalling.get_untracked());
             rig.mock
                 .fail_signal(Some(AppFailure::Network("refused".to_string())));
+            rig.mock.push_snapshot(snapshot(1, 2, 0.0));
+            settle().await;
             gated.release(1);
             let failed = processes.signal(1, 2, ProcessSignal::Kill).await;
             assert_eq!(failed, Err(AppFailure::Network("refused".to_string())));
