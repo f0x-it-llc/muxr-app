@@ -57,14 +57,14 @@ fn identity(host: &HostInfo, now_ms: i64) -> String {
         parts.push(host.arch.clone());
     }
     if let Some(boot) = host.boot_unix_s {
-        let uptime = u64::try_from(now_ms / 1_000 - boot).unwrap_or(0);
+        let uptime = u64::try_from((now_ms / 1_000).saturating_sub(boot)).unwrap_or(0);
         parts.push(format!("up {}", uptime_label(Duration::from_secs(uptime))));
     }
     parts.join(SEPARATOR)
 }
 
 fn since(since_unix_ms: i64, now_ms: i64) -> Duration {
-    Duration::from_millis(u64::try_from(now_ms - since_unix_ms).unwrap_or(0))
+    Duration::from_millis(u64::try_from(now_ms.saturating_sub(since_unix_ms)).unwrap_or(0))
 }
 
 pub fn host_strip<S: 'static>(strip: &HostStrip<'_>, colors: &Palette) -> impl View<S> + use<S> {
@@ -154,5 +154,25 @@ mod tests {
             ..host
         };
         assert_eq!(identity(&no_boot, 0), "Arch Linux rolling \u{b7} x86_64");
+    }
+
+    #[test]
+    fn extreme_timestamps_never_overflow() {
+        for extreme in [i64::MIN, i64::MAX] {
+            let host = HostInfo {
+                boot_unix_s: Some(extreme),
+                ..HostInfo::default()
+            };
+            for now in [i64::MIN, 0, i64::MAX] {
+                let _ = identity(&host, now);
+                let _ = since(extreme, now);
+                let _ = since(now, extreme);
+            }
+        }
+        assert_eq!(
+            since(i64::MIN, i64::MAX),
+            Duration::from_millis(i64::MAX as u64)
+        );
+        assert_eq!(since(i64::MAX, i64::MIN), Duration::ZERO);
     }
 }
